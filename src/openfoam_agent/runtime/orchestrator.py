@@ -10,6 +10,7 @@ from openfoam_agent.progress import (
     SolverProgressTracker,
 )
 from openfoam_agent.schemas.simulation import RuntimePolicy, RuntimeReport, SimulationAttempt
+from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.parsers import parse_runtime_log
 from openfoam_agent.tools.workspace import WorkspaceSafetyError
@@ -96,13 +97,17 @@ class RuntimeOrchestrator:
             attempt = SimulationAttempt(attempt=attempt_number, result=result)
             attempts.append(attempt)
 
+            diagnostic = None if result.success else diagnose_openfoam_failure(
+                run, command_name="foamRun"
+            )
+            diagnostic_text = diagnostic.render() if diagnostic is not None else ""
             self.progress.emit(
                 ProgressEvent(
                     phase="runtime",
                     message=(
                         f"foamRun attempt {attempt_number} 완료"
                         if result.success
-                        else f"foamRun attempt {attempt_number} 실패; repair 판단으로 이동"
+                        else f"foamRun attempt {attempt_number} 실패; native diagnostic captured; repair 판단으로 이동"
                     ),
                     status="success" if result.success else "failure",
                     metrics={
@@ -110,6 +115,15 @@ class RuntimeOrchestrator:
                         "maxCo": result.courant_max,
                         "returnCode": result.return_code,
                     },
+                    details=(
+                        tuple(
+                            self.engineering.redact_native_observation(line)[:800]
+                            for line in diagnostic_text.splitlines()
+                            if line.strip()
+                        )[:24]
+                        if diagnostic_text
+                        else ()
+                    ),
                 )
             )
 
@@ -147,7 +161,7 @@ class RuntimeOrchestrator:
             )
             outcome = self.engineering.repair_runtime(
                 state,
-                runtime_log=log,
+                runtime_log=(diagnostic_text or log[-8_000:]),
                 attempt=attempt_number,
                 native_execution=True,
             )

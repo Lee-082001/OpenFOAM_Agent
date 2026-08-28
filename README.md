@@ -417,17 +417,18 @@ See `ARCHITECTURE.md` and `V2_CHANGES.md` for the detailed boundary and migratio
 
 When native execution is enabled, `/confirm` resolves only the trusted `checkMesh` executable before the engineering loop starts. If it is unavailable, the run stops as `ENGINEERING_BLOCKED` before any engineering LLM action is consumed. Other OpenFOAM utilities are discovered/used later according to the agent-selected strategy. `--dry-run` skips this check.
 
-### blockMesh failure diagnostics (v2.4.2)
+### Unified native failure diagnostics (v2.5.0)
 
-A failed `blockMesh` command no longer appears only as `returned status 1`/`-6`. The complete native stdout/stderr is still written to the workspace log, while a bounded raw OpenFOAM fatal block is surfaced to both the next Engineering Agent turn and live CLI progress. For example:
+Native failures no longer collapse to only `returned status 1`/`-6`. The same bounded `NativeFailureDiagnostic` path is used by `foamDictionary`, `surfaceCheck`, `blockMesh`, `surfaceFeatureExtract`, `snappyHexMesh`, `createPatch`, `checkMesh`, `foamRun`, and `foamPostProcess`. Complete stdout/stderr remains in the private workspace log; a bounded raw OpenFOAM diagnostic is surfaced to both the next relevant Agent turn and normal CLI progress. For example:
 
 ```text
-[ENGINEERING 44/120] FAIL blockMesh returned status 1; fatal diagnostic captured.
+[ENGINEERING 31/120] FAIL snappyHexMesh returned status 1; native diagnostic captured.
   reason:
-    - --> FOAM FATAL ERROR:
-    - Block hex (...) has inward-pointing faces
-    - From function Foam::blockDescriptor::check()
-    - in file blockMesh/blockDescriptor/blockDescriptor.C at line ...
+    - nativeCommand: snappyHexMesh
+    - returnCode: 1
+    - diagnosticKind: foam_fatal_io_error
+    - --> FOAM FATAL IO ERROR:
+    - keyword locationInMesh is undefined ...
 ```
 
-The model/user-visible diagnostic is path-redacted and bounded; the complete local log remains under the run workspace `logs/NNN.blockMesh.log`. This is observation only: Python does not choose the mesh repair from the diagnostic.
+`foamRun` failures use the same projection before runtime repair and `foamPostProcess` failures use it before the next post-processing action. `foamDictionary` and `surfaceCheck` now also preserve full raw logs instead of existing only as transient tool output. Model/user-visible diagnostics are path-redacted and bounded. This is observation only: Python does not choose the engineering repair from the diagnostic.

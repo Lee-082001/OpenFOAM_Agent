@@ -1,3 +1,14 @@
+# v2.5.0
+
+- Generalizes v2.4.2 `blockMesh`-only failure extraction into a shared `NativeFailureDiagnostic` path for all allowlisted OpenFOAM execution stages.
+- Engineering failures from `foamDictionary`, `surfaceCheck`, `blockMesh`, `surfaceFeatureExtract`, `snappyHexMesh`, `createPatch`, and `checkMesh` now surface bounded native diagnostics to both CLI progress and the next Engineering Agent turn.
+- Runtime `foamRun` failures now render the same diagnostic to the user and return the bounded fatal observation to runtime repair while preserving the complete solver log locally.
+- `foamPostProcess` failures now render the same diagnostic and become the next PostProcessing Agent observation.
+- `foamDictionary` and `surfaceCheck` now persist complete stdout/stderr logs alongside mesh/runtime/post-processing logs.
+- Diagnostic classification recognizes OpenFOAM fatal/IO errors, aborts, segmentation faults, floating-point exceptions, and a bounded output-tail fallback without prescribing a repair.
+- Adds path-redaction and regression coverage for `snappyHexMesh`, dictionary/surface validation, `foamRun`, and `foamPostProcess` failure propagation.
+- Synchronizes package/module metadata at 2.5.0.
+
 # v2.4.2
 
 - `blockMesh` failures now preserve the complete native stdout/stderr in the workspace log while extracting a bounded raw fatal diagnostic for the agent observation and CLI progress.

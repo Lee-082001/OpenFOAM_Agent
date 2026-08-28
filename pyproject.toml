@@ -1,6 +1,6 @@
 [project]
 name = "openfoam-agent"
-version = "2.4.2"
+version = "2.5.0"
 description = "Agent-owned OpenFOAM CFD engineering behind deterministic safety gates"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -65,6 +65,7 @@ tests/test_v23_progress.py
 tests/test_v241_canonical_evidence.py
 tests/test_v242_blockmesh_diagnostics.py
 tests/test_v24_context_compaction.py
+tests/test_v250_native_failure_diagnostics.py
 tests/test_v2_adversarial_integration.py
 tests/test_v2_architecture.py
 tests/test_v2_budgets.py

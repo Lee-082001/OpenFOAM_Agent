@@ -46,7 +46,7 @@ from openfoam_agent.schemas.engineering import (
     WriteCaseFileAction,
 )
 from openfoam_agent.tools.capability_catalog import CapabilityCatalog
-from openfoam_agent.tools.diagnostics import extract_openfoam_failure_diagnostic
+from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.references import OpenFOAMReferenceIndex
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
@@ -1016,12 +1016,22 @@ class CFDEngineeringAgent:
                 target = self.workspace.resolve_case_path(action.path, must_exist=True)
                 result = self.tools.foam_dictionary_validate(target, cwd=self.workspace.case_dir)
                 output = _tool_output(result)
+                self.workspace.write_log(f"{step:03d}.foamDictionary.log", output)
+                event_output = output
+                summary = f"foamDictionary {'accepted' if result.success else 'rejected'} {action.path}."
+                if not result.success:
+                    diagnostic = diagnose_openfoam_failure(result, command_name="foamDictionary")
+                    event_output = diagnostic.render()
+                    summary = (
+                        f"foamDictionary returned status {result.return_code}; "
+                        "native diagnostic captured."
+                    )
                 return self._event(
                     step,
                     action.type,
                     result.success,
-                    f"foamDictionary {'accepted' if result.success else 'rejected'} {action.path}.",
-                    output,
+                    summary,
+                    event_output,
                     native_command_executed=True,
                 )
 
@@ -1035,12 +1045,23 @@ class CFDEngineeringAgent:
                     )
                 target = self.workspace.resolve_case_path(action.path, must_exist=True)
                 result = self.tools.surface_check(target, cwd=self.workspace.case_dir)
+                output = _tool_output(result)
+                self.workspace.write_log(f"{step:03d}.surfaceCheck.log", output)
+                event_output = output
+                summary = f"surfaceCheck {'passed' if result.success else 'failed'} for {action.path}."
+                if not result.success:
+                    diagnostic = diagnose_openfoam_failure(result, command_name="surfaceCheck")
+                    event_output = diagnostic.render()
+                    summary = (
+                        f"surfaceCheck returned status {result.return_code}; "
+                        "native diagnostic captured."
+                    )
                 return self._event(
                     step,
                     action.type,
                     result.success,
-                    f"surfaceCheck {'passed' if result.success else 'failed'} for {action.path}.",
-                    _tool_output(result),
+                    summary,
+                    event_output,
                     native_command_executed=True,
                 )
 
@@ -1067,17 +1088,13 @@ class CFDEngineeringAgent:
                 event_output = output
                 event_success = result.success
                 summary = f"{action.command} returned status {result.return_code}."
-                if action.command == "blockMesh" and not result.success:
-                    diagnostic = extract_openfoam_failure_diagnostic(
-                        result.stdout,
-                        result.stderr,
+                if not result.success:
+                    diagnostic = diagnose_openfoam_failure(result, command_name=action.command)
+                    event_output = diagnostic.render()
+                    summary = (
+                        f"{action.command} returned status {result.return_code}; "
+                        "native diagnostic captured."
                     )
-                    if diagnostic:
-                        event_output = diagnostic
-                        summary = (
-                            f"blockMesh returned status {result.return_code}; "
-                            "fatal diagnostic captured."
-                        )
                 if action.command == "checkMesh" and state is not None:
                     evidence = parse_check_mesh_evidence(result)
                     state.mesh_evidence = evidence
@@ -1405,6 +1422,10 @@ class CFDEngineeringAgent:
         )
         return payload
 
+    def redact_native_observation(self, text: str) -> str:
+        """Return a display/model-safe native diagnostic without changing its meaning."""
+        return self._redact_local_paths(text)
+
     def _redact_local_paths(self, text: str) -> str:
         replacements: list[tuple[str, str]] = []
         known = [
@@ -1484,10 +1505,7 @@ class CFDEngineeringAgent:
                     for line in event.output_excerpt.splitlines()
                     if line.strip()
                 )[:12]
-            elif (
-                event.action_type == "run_mesh_command"
-                and event.summary.startswith("blockMesh returned status")
-            ):
+            elif event.native_command_executed:
                 details = tuple(
                     self._redact_local_paths(line.rstrip())[:800]
                     for line in event.output_excerpt.splitlines()

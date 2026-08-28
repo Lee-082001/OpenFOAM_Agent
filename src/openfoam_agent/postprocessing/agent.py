@@ -38,6 +38,7 @@ from openfoam_agent.schemas.postprocessing import (
     SearchPostProcessReferencesAction,
     WritePostProcessConfigAction,
 )
+from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.references import OpenFOAMReferenceIndex
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
@@ -159,6 +160,13 @@ class CFDPostProcessingAgent:
                     "frequency": analysis.shedding_frequency,
                     "St": analysis.strouhal_number,
                 }
+            details: tuple[str, ...] = ()
+            if not event.success and event.native_command_executed and event.output_excerpt.strip():
+                details = tuple(
+                    self._redact_local_paths(line.rstrip())[:800]
+                    for line in event.output_excerpt.splitlines()
+                    if line.strip()
+                )[:24]
             self.progress.emit(
                 ProgressEvent(
                     phase="postprocess",
@@ -168,6 +176,7 @@ class CFDPostProcessingAgent:
                     limit=self.policy.max_steps,
                     importance=action_importance(event.action_type),
                     metrics=metrics,
+                    details=details,
                 )
             )
             if terminal:
@@ -246,12 +255,21 @@ class CFDPostProcessingAgent:
                 )
                 output = _tool_output(result)
                 self.workspace.write_log(f"postprocess.{step:03d}.foamPostProcess.log", output)
+                event_output = output
+                summary = f"foamPostProcess returned status {result.return_code}."
+                if not result.success:
+                    diagnostic = diagnose_openfoam_failure(result, command_name="foamPostProcess")
+                    event_output = diagnostic.render()
+                    summary = (
+                        f"foamPostProcess returned status {result.return_code}; "
+                        "native diagnostic captured."
+                    )
                 return self._event(
                     step,
                     action.type,
                     result.success,
-                    f"foamPostProcess returned status {result.return_code}.",
-                    output,
+                    summary,
+                    event_output,
                     native_command_executed=True,
                 ), False
 

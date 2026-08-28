@@ -153,6 +153,10 @@ This compaction never authorizes an engineering claim. Final plan/evidence valid
 
 The CLI progress stream exposes request-size telemetry (`promptChars`, structured-schema characters, and a conservative tokenizer-free `approxTokens` estimate). The estimate is diagnostic only. When the provider returns usage metadata, a separate `LLM-USAGE` event exposes exact input/output/total token counts. The OpenAI adapter also receives an explicit CLI-default `max_output_tokens=16000`, preventing a small structured action from leaving the model's full output window uncapped.
 
-## Native mesh failure observation (v2.4.2)
+## Unified native failure observation (v2.5.0)
 
-For a failed `blockMesh`, the native command layer retains complete stdout/stderr in the local workspace log and deterministically extracts a bounded fatal diagnostic block. That raw diagnostic projection is attached to the `EngineeringEvent`, redacted before remote-model/user display, and becomes the next agent observation. The extractor does not prescribe a repair; mesh design remains agent-owned.
+All failed allowlisted OpenFOAM executions now pass through one `NativeFailureDiagnostic` observation path rather than command-specific error handling. This covers engineering utilities (`foamDictionary`, `surfaceCheck`, `blockMesh`, `surfaceFeatureExtract`, `snappyHexMesh`, `createPatch`, `checkMesh`), runtime `foamRun`, and post-processing `foamPostProcess`.
+
+The command layer preserves complete stdout/stderr in the private workspace log. A deterministic extractor then identifies the first OpenFOAM fatal/IO marker or common process-failure marker (abort, segmentation fault, floating-point exception); if no explicit marker exists, it returns a bounded output tail. The diagnostic records only the logical command name, return code, observed diagnostic kind, and bounded native excerpt. Local absolute paths are redacted before model/user display.
+
+The same bounded diagnostic becomes the next relevant Agent observation and is rendered in normal CLI progress under the failed native action. It is descriptive evidence only: Python does not infer a CFD cause, choose a repair, change a mesh strategy, or authorize success from the diagnostic.

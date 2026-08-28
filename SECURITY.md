@@ -8,6 +8,10 @@ With `--backend openai --confirm-api-calls`, confirmed CFD task data, bounded to
 
 The model never receives a shell. `SafeRunner` resolves allowlisted executables inside trusted `WM_PROJECT_DIR`, sanitizes environment variables (including API secrets and user/site OpenFOAM override paths), restricts cwd to the private workspace, and applies timeouts. Allowed tools are limited to OpenFOAM preparation/validation, `foamRun`, `foamPostProcess`, and `foamDictionary` actions exposed by typed interfaces.
 
+## Native diagnostic disclosure boundary (v2.5)
+
+Failed allowlisted native commands preserve their complete stdout/stderr only in private workspace logs. The cloud/user-facing `NativeFailureDiagnostic` is bounded and local absolute paths are redacted before transmission/display. The extractor classifies only observable failure markers and never maps them to a repair policy; diagnostic text is untrusted tool output and cannot bypass case, provenance, approval, or resource gates.
+
 ## Case-input integrity
 
 Agent writes are sandboxed. Traversal, absolute paths, symlinked execution inputs, NUL content, executable directives (`#codeStream`, `#calc`, runtime coded constructs, `system(...)`, etc.) and non-allowlisted libraries are rejected. Before solve, every input under `0/`, `constant/`, and `system/` is SHA-256 sealed. `MESH_READY` additionally requires current trusted `checkMesh` evidence and a manifest matching the bytes that were checked.
