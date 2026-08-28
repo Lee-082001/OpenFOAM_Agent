@@ -18,10 +18,35 @@ class EngineeringDecision(_EngineeringModel):
     rationale: str = Field(min_length=1, max_length=2000)
 
 
+def canonical_engineering_evidence_id(kind: str, reference: str) -> str:
+    """Return a stable opaque ID for evidence observed by deterministic tools."""
+
+    if kind not in {"capability", "openfoam_reference"}:
+        raise ValueError(f"Unsupported engineering evidence kind: {kind}")
+    digest = hashlib.sha256(f"{kind}\0{reference}".encode("utf-8")).hexdigest()[:20]
+    prefix = "cap" if kind == "capability" else "ref"
+    return f"ev_{prefix}_{digest}"
+
+
 class EngineeringEvidence(_EngineeringModel):
-    kind: Literal["capability", "openfoam_reference", "tool_result", "user_fact"]
-    reference: str = Field(min_length=1, max_length=500)
+    """An LLM-selected pointer to evidence that Python already observed.
+
+    The model is intentionally not allowed to restate the evidence kind/reference.
+    It may only select an opaque canonical ID from ``available_evidence`` supplied
+    in the engineering prompt.
+    """
+
+    evidence_id: str = Field(pattern=r"^ev_(?:cap|ref)_[0-9a-f]{20}$")
     note: str = Field(default="", max_length=1000)
+
+
+class ObservedEngineeringEvidence(_EngineeringModel):
+    """Deterministically issued evidence record attached to successful tool events."""
+
+    evidence_id: str = Field(pattern=r"^ev_(?:cap|ref)_[0-9a-f]{20}$")
+    kind: Literal["capability", "openfoam_reference"]
+    reference: str = Field(min_length=1, max_length=1000)
+    summary: str = Field(min_length=1, max_length=1200)
 
 
 class EngineeringPlan(_EngineeringModel):
@@ -64,9 +89,9 @@ class EngineeringPlan(_EngineeringModel):
     def validate_unique_audit_fields(self) -> Self:
         if len(self.confirmed_fact_ids) != len(set(self.confirmed_fact_ids)):
             raise ValueError("Engineering plan contains duplicate confirmed fact IDs.")
-        evidence_keys = [(item.kind, item.reference) for item in self.evidence]
-        if len(evidence_keys) != len(set(evidence_keys)):
-            raise ValueError("Engineering plan contains duplicate evidence references.")
+        evidence_ids = [item.evidence_id for item in self.evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("Engineering plan contains duplicate evidence IDs.")
         return self
 
     def digest(self) -> str:
@@ -208,6 +233,7 @@ class EngineeringEvent(_EngineeringModel):
     artifact_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     native_command_executed: bool = False
     mesh_command_executed: bool = False
+    observed_evidence: list[ObservedEngineeringEvidence] = Field(default_factory=list, max_length=24)
 
     @model_validator(mode="after")
     def validate_resource_markers(self) -> Self:

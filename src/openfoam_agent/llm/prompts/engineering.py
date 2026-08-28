@@ -26,6 +26,15 @@ OpenFOAM syntax or behavior that may vary by release, prefer installed official 
 tutorial evidence. If the installed environment cannot support a required operation, block
 with a clear reason instead of inventing success.
 
+Evidence provenance is ID-based. Python supplies `available_evidence`, whose entries contain
+canonical opaque `evidence_id` values issued only after successful capability/reference tool
+observations. EngineeringPlan.evidence may select only those exact IDs. Never invent, rewrite,
+spell out, or paraphrase an evidence ID. Do not put user facts, confirmed_intake, checkMesh,
+case hashes, manifests, or generic tool-result descriptions into EngineeringPlan.evidence;
+those are deterministic bindings validated by Python and are shown separately under
+`deterministic_bindings`. If no optional supporting evidence is needed beyond the separately
+validated solver provider, leave EngineeringPlan.evidence empty rather than fabricating one.
+
 Safety is enforced outside you: case paths are sandboxed, executable directives and
 untrusted code-loading constructs are rejected, commands are allowlisted, files are hashed,
 and solver execution requires separate user approval. Do not attempt to bypass those gates.

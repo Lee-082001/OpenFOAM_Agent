@@ -61,6 +61,7 @@ tests/test_v21_postprocessing.py
 tests/test_v22_human_feedback.py
 tests/test_v231_checkmesh_preflight.py
 tests/test_v23_progress.py
+tests/test_v241_canonical_evidence.py
 tests/test_v24_context_compaction.py
 tests/test_v2_adversarial_integration.py
 tests/test_v2_architecture.py

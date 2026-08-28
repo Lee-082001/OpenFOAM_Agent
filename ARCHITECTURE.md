@@ -107,7 +107,8 @@ Python owns only generic authority/integrity/resource rules:
 - sandbox/path validation and private workspace permissions;
 - executable directive/dynamic-code/library blocking;
 - trusted OpenFOAM executable provenance and sanitized subprocess environment;
-- confirmed-fact and capability/reference/tool provenance checks;
+- confirmed-fact provenance plus canonical capability/reference evidence-ID checks;
+- Python-owned deterministic bindings for confirmed intake, current `checkMesh`, and case manifest (these are never LLM-authored evidence claims);
 - solver/controlDict consistency;
 - native syntax/mesh evidence;
 - current input SHA-256 sealing;

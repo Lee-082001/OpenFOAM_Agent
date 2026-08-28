@@ -8,6 +8,7 @@ from openfoam_agent.schemas.common import ToolResult
 from openfoam_agent.schemas.engineering import (
     EngineeringDecision,
     EngineeringEvidence,
+    canonical_engineering_evidence_id,
     EngineeringPlan,
     FinishPreviewAction,
     InspectEnvironmentAction,
@@ -147,14 +148,17 @@ def _dynamic_plan(intake: CFDIntakeSpec) -> EngineeringPlan:
         confirmed_fact_ids=[fact.id for fact in intake.facts if fact.category != "context"],
         evidence=[
             EngineeringEvidence(
-                kind="capability",
-                reference="solver.incompressibleFluid",
-                note="Retrieved from capability graph during this run.",
+                evidence_id=canonical_engineering_evidence_id(
+                    "capability", "solver.incompressibleFluid"
+                ),
+                note="Selected from deterministic available_evidence.",
             ),
             EngineeringEvidence(
-                kind="openfoam_reference",
-                reference="source:dynamicMesh/displacementLaplacian.C",
-                note="Installed Foundation reference inspected by the agent.",
+                evidence_id=canonical_engineering_evidence_id(
+                    "openfoam_reference",
+                    "source:dynamicMesh/displacementLaplacian.C",
+                ),
+                note="Selected from deterministic available_evidence.",
             ),
         ],
         postprocess_strategy=["Inspect lift/drag and wake phase relative to imposed motion."],

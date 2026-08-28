@@ -30,6 +30,8 @@ from openfoam_agent.schemas.engineering import (
     EngineeringEvent,
     EngineeringPlan,
     EngineeringTurn,
+    ObservedEngineeringEvidence,
+    canonical_engineering_evidence_id,
     FinishPreviewAction,
     InspectEnvironmentAction,
     ListCaseFilesAction,
@@ -859,22 +861,54 @@ class CFDEngineeringAgent:
 
             if isinstance(action, SearchCapabilitiesAction):
                 results = self.catalog.search(action.query)
+                observed = [
+                    ObservedEngineeringEvidence(
+                        evidence_id=canonical_engineering_evidence_id(
+                            "capability", str(item["provider_id"])
+                        ),
+                        kind="capability",
+                        reference=str(item["provider_id"]),
+                        summary=(
+                            f"Capability provider {item['provider_id']}: {item.get('name', '')} "
+                            f"({item.get('provider_type', '')}, OpenFOAM {item.get('openfoam_version', '')})"
+                        )[:1200],
+                    )
+                    for item in results
+                    if isinstance(item, dict) and item.get("provider_id")
+                ]
                 return self._event(
                     step,
                     action.type,
                     True,
                     f"Capability search returned {len(results)} provider(s).",
                     _json(results),
+                    observed_evidence=observed,
                 )
 
             if isinstance(action, SearchReferencesAction):
                 results = self.references.search(action.query, scope=action.scope)
+                observed = [
+                    ObservedEngineeringEvidence(
+                        evidence_id=canonical_engineering_evidence_id(
+                            "openfoam_reference", str(item["reference"])
+                        ),
+                        kind="openfoam_reference",
+                        reference=str(item["reference"]),
+                        summary=(
+                            f"Installed OpenFOAM reference {item['reference']}: "
+                            f"{str(item.get('snippet', ''))[:700]}"
+                        )[:1200],
+                    )
+                    for item in results
+                    if isinstance(item, dict) and item.get("reference")
+                ]
                 return self._event(
                     step,
                     action.type,
                     True,
                     f"Reference search returned {len(results)} result(s).",
                     _json(results),
+                    observed_evidence=observed,
                 )
 
             if isinstance(action, ReadReferenceAction):
@@ -883,7 +917,24 @@ class CFDEngineeringAgent:
                     start_line=action.start_line,
                     line_count=action.line_count,
                 )
-                return self._event(step, action.type, True, f"Read {action.reference}.", text)
+                observed = [
+                    ObservedEngineeringEvidence(
+                        evidence_id=canonical_engineering_evidence_id(
+                            "openfoam_reference", action.reference
+                        ),
+                        kind="openfoam_reference",
+                        reference=action.reference,
+                        summary=f"Read installed OpenFOAM reference {action.reference}.",
+                    )
+                ]
+                return self._event(
+                    step,
+                    action.type,
+                    True,
+                    f"Read {action.reference}.",
+                    text,
+                    observed_evidence=observed,
+                )
 
             if isinstance(action, ListCaseFilesAction):
                 files = [
@@ -1135,6 +1186,31 @@ class CFDEngineeringAgent:
                 for event in state.engineering_events[-self.policy.observation_history:]
             ],
             "cumulative_provenance": self._cumulative_provenance_summary(state),
+            "available_evidence": [
+                item.model_dump(mode="json")
+                for item in self._observed_evidence_registry(state).values()
+            ],
+            "deterministic_bindings": {
+                "confirmed_intake": {
+                    "bound_by": "python",
+                    "sha256": state.intake_digest,
+                    "fact_ids": sorted(
+                        fact.id for fact in state.intake.facts if fact.category != "context"
+                    ) if state.intake is not None else [],
+                },
+                "check_mesh": {
+                    "bound_by": "python",
+                    "passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
+                    "cell_count": state.mesh_evidence.cell_count if state.mesh_evidence else None,
+                    "raw_log_sha256": (
+                        state.mesh_evidence.raw_log_sha256 if state.mesh_evidence else None
+                    ),
+                },
+                "case_manifest": {
+                    "bound_by": "python",
+                    "sha256": self.workspace.manifest_digest(),
+                },
+            },
             "budget": {
                 "initial_engineering_step_budget": self.policy.max_agent_steps,
                 "current_engineering_step_limit": current_step_limit,
@@ -1217,17 +1293,20 @@ class CFDEngineeringAgent:
         plan: EngineeringPlan,
         state: CFDState,
     ) -> list[str]:
-        """Reject engineering claims that were not backed by this run's observations."""
+        """Reject LLM-selected evidence IDs that Python did not issue in this run."""
 
         failures: list[str] = []
-        successful = [event for event in state.engineering_events if event.success]
-        capability_events = [
-            event for event in successful if event.action_type == "search_capabilities"
-        ]
-        if not capability_events:
+        registry = self._observed_evidence_registry(state)
+        capability_ids = {
+            item.reference: item.evidence_id
+            for item in registry.values()
+            if item.kind == "capability"
+        }
+        if not capability_ids:
             failures.append(
                 "Engineering plan has no successful capability-graph observation in this run."
             )
+
         provider = self.catalog.provider(plan.solver_provider_id)
         if provider is None:
             failures.append(
@@ -1248,38 +1327,30 @@ class CFDEngineeringAgent:
                     f"Solver provider '{plan.solver_provider_id}' targets OpenFOAM "
                     f"{provider.openfoam_version}, not {plan.openfoam_version}."
                 )
-        if not any(
-            plan.solver_provider_id in event.output_excerpt for event in capability_events
-        ):
+        if plan.solver_provider_id not in capability_ids:
             failures.append(
                 f"Solver provider '{plan.solver_provider_id}' was not observed in capability search results."
             )
 
-        fact_ids = {fact.id for fact in state.intake.facts} if state.intake else set()
         for evidence in plan.evidence:
-            reference = evidence.reference
-            if evidence.kind == "capability":
-                observed = any(reference in event.output_excerpt for event in capability_events)
-            elif evidence.kind == "openfoam_reference":
-                observed = any(
-                    event.action_type in {"search_references", "read_reference"}
-                    and (reference in event.output_excerpt or reference in event.summary)
-                    for event in successful
-                )
-            elif evidence.kind == "tool_result":
-                observed = any(
-                    event.action_type not in {"search_capabilities", "search_references", "read_reference"}
-                    and (reference in event.output_excerpt or reference in event.summary)
-                    for event in successful
-                )
-            else:  # user_fact
-                observed = reference in fact_ids
-            if not observed:
+            if evidence.evidence_id not in registry:
                 failures.append(
-                    f"Engineering evidence claim was not observed in this run: "
-                    f"{evidence.kind}:{reference}"
+                    "Engineering evidence ID was not issued by the deterministic evidence "
+                    f"registry in this run: {evidence.evidence_id}"
                 )
         return failures
+
+    @staticmethod
+    def _observed_evidence_registry(
+        state: CFDState,
+    ) -> dict[str, ObservedEngineeringEvidence]:
+        registry: dict[str, ObservedEngineeringEvidence] = {}
+        for event in state.engineering_events:
+            if not event.success:
+                continue
+            for item in event.observed_evidence:
+                registry[item.evidence_id] = item
+        return dict(sorted(registry.items()))
 
     def _cumulative_provenance_summary(self, state: CFDState) -> dict[str, object]:
         successful = [event for event in state.engineering_events if event.success]
@@ -1301,10 +1372,12 @@ class CFDEngineeringAgent:
                 if event.summary:
                     reference_hints.add(self._redact_local_paths(event.summary)[:300])
 
+        registry = self._observed_evidence_registry(state)
         return {
             "successful_action_types": sorted({event.action_type for event in successful}),
             "observed_capability_provider_ids": sorted(provider_ids),
             "reference_observation_summaries": sorted(reference_hints)[-12:],
+            "canonical_evidence_ids": list(registry)[-40:],
             "mesh_evidence_passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
         }
 
@@ -1425,6 +1498,7 @@ class CFDEngineeringAgent:
         artifact_sha256: str | None = None,
         native_command_executed: bool = False,
         mesh_command_executed: bool = False,
+        observed_evidence: list[ObservedEngineeringEvidence] | None = None,
     ) -> EngineeringEvent:
         if len(output) > self.policy.max_observation_chars:
             output = output[-self.policy.max_observation_chars:]
@@ -1438,6 +1512,7 @@ class CFDEngineeringAgent:
             artifact_sha256=artifact_sha256,
             native_command_executed=native_command_executed,
             mesh_command_executed=mesh_command_executed,
+            observed_evidence=list(observed_evidence or []),
         )
 
 

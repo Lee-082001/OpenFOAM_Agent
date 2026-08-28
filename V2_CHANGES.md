@@ -1,3 +1,11 @@
+# v2.4.1
+
+- Replaces free-form EngineeringPlan evidence claims (`kind/reference` strings) with canonical opaque evidence IDs issued by Python only after successful capability/reference observations.
+- Adds `available_evidence` to the engineering model state; the LLM may select only `ev_cap_*` / `ev_ref_*` IDs from that registry. Unknown IDs are rejected by exact registry membership rather than substring matching.
+- Separates deterministic bindings from optional LLM-selected support: confirmed intake digest/fact IDs, current `checkMesh` evidence, and case-manifest SHA remain Python-owned and must not be emitted as model evidence claims.
+- Records canonical evidence objects directly on successful EngineeringEvents, so context compaction cannot change provenance identity.
+- Adds regression coverage for the former `tool_result:checkMesh at preparation step ...` and `user_fact:confirmed_intake` failure class.
+
 # v2.4.0
 
 - Adds deterministic model-context compaction without deleting local provenance/audit history.

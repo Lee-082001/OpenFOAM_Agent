@@ -62,3 +62,7 @@ Cloud payload size is now independently bounded from local provenance size. Engi
 The generic fallback compactor explicitly marks omitted string/list content. It is not an authority mechanism: a compacted model view cannot satisfy deterministic provenance checks that require original observed events or current file/native evidence.
 
 The CLI configures an explicit OpenAI `max_output_tokens` ceiling (default 16000). This is a resource/rate-limit control only; it does not change which CFD decisions the Agent owns. If a future unusually large single structured action legitimately needs more output, the user can raise the CLI cap deliberately.
+
+## Canonical engineering evidence
+
+Engineering evidence authority is not delegated to model prose. Successful capability/reference tool observations receive deterministic opaque IDs (`ev_cap_*`, `ev_ref_*`) and are stored on local `EngineeringEvent` records. The cloud model receives a bounded `available_evidence` projection and may only select those IDs; finalization rejects any ID absent from the local registry. User facts, confirmed-intake binding, `checkMesh`, and case-manifest integrity are Python-owned deterministic checks and are intentionally excluded from model-selectable evidence.

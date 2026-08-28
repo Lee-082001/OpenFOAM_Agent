@@ -337,6 +337,10 @@ The OpenAI backend is a cloud backend: after `--confirm-api-calls`, the confirme
 
 Operational success is evidence-bound: capability claims must come from observed searches, `MESH_READY` requires current trusted `checkMesh` evidence, and runtime success requires zero return status, `End`, actual `Time = ...` progress, and no fatal/non-finite evidence. Post-processing numerical metrics are derived from native outputs and hash-bound analysis dictionaries rather than accepted from model prose. Human revision proposals are additionally bound to the exact plan/case seal they reviewed and cannot mutate the case before `/confirm`. This prevents the model from merely *claiming* that tools, analyses, or revisions succeeded. It does not prove scientific correctness, mesh/time-step convergence, or experimental agreement; `COMPLETE` means the human explicitly accepted the reviewed result.
 
+### Canonical engineering evidence IDs
+
+v2.4.1 no longer lets `EngineeringPlan` invent evidence labels such as `tool_result:checkMesh at preparation step 98` or `user_fact:confirmed_intake`. Successful capability/reference tools create deterministic `ev_cap_<hash>` / `ev_ref_<hash>` records that are supplied under `available_evidence`; the model may only select those exact IDs. Confirmed intake, `checkMesh`, and the current case manifest are shown under `deterministic_bindings` and are validated automatically by Python rather than restated by the model.
+
 See `SECURITY.md` for the threat model and residual limitations.
 
 ## Failure semantics
