@@ -32,12 +32,12 @@ class CFDFeedbackReviewAgent:
         text = statement.strip()
         if not text:
             raise ValueError("Human feedback must not be blank.")
-        if state.current_state not in {State.MESH_READY, State.RESULT_REVIEW_REQUIRED}:
-            raise ValueError("Human feedback is accepted only at MESH_READY or RESULT_REVIEW_REQUIRED.")
+        if state.current_state not in {State.MESH_READY, State.SOLVE_READY, State.RESULT_REVIEW_REQUIRED}:
+            raise ValueError("Human feedback is accepted only at MESH_READY, SOLVE_READY, or RESULT_REVIEW_REQUIRED.")
         if state.engineering_plan is None or state.case_seal is None:
             raise ValueError("Human feedback requires an existing sealed engineering case.")
 
-        scope = "mesh" if state.current_state == State.MESH_READY else "result"
+        scope = "mesh" if state.current_state in {State.MESH_READY, State.SOLVE_READY} else "result"
         feedback = HumanFeedback(
             feedback_id=f"hf-{len(state.human_feedback) + 1:04d}",
             run_id=state.run_id,

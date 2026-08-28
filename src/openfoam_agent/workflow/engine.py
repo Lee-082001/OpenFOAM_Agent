@@ -111,6 +111,7 @@ class CFDWorkflow:
             State.NEEDS_CLARIFICATION,
             State.CASE_PREVIEW_READY,
             State.MESH_READY,
+            State.SOLVE_READY,
             State.ENGINEERING_REVIEW_REQUIRED,
             State.ENGINEERING_BLOCKED,
             State.RESULT_REVIEW_REQUIRED,

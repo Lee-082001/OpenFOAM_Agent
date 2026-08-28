@@ -40,6 +40,7 @@ SUCCESS_STATES = {
     State.INTAKE_REVIEW_REQUIRED,
     State.CASE_PREVIEW_READY,
     State.MESH_READY,
+    State.SOLVE_READY,
     State.RESULT_REVIEW_REQUIRED,
     State.REVISION_READY,
     State.COMPLETE,
@@ -273,6 +274,7 @@ def _policies_from_args(
         max_native_commands=args.native_command_budget,
         max_mesh_repair_cycles=args.mesh_repair_cycles,
         max_runtime_repair_steps=args.runtime_repair_steps,
+        require_solve_ready_gate=True,
     )
     runtime = RuntimePolicy(max_attempts=args.runtime_repair_cycles + 1)
     postprocessing = PostProcessingPolicy(
@@ -294,7 +296,7 @@ def build_report(
     postprocessing_policy: PostProcessingPolicy,
 ) -> dict[str, Any]:
     return {
-        "architecture": "v2.4",
+        "architecture": "v2.5",
         "run_id": state.run_id,
         "prompt": request.prompt,
         "conversation_turns": list(request.conversation_turns),
@@ -377,7 +379,9 @@ def _limitations(state: CFDState) -> list[str]:
     if state.current_state == State.CASE_PREVIEW_READY:
         out.append("Native OpenFOAM validation/mesh tools were disabled; this is a file preview only.")
     if state.current_state == State.MESH_READY:
-        out.append("checkMesh passed for the sealed case; foamRun still requires explicit /solve approval.")
+        out.append("checkMesh passed, but pre-solve completeness validation has not yet produced a solve-ready seal.")
+    if state.current_state == State.SOLVE_READY:
+        out.append("Pre-solve completeness validation passed; foamRun still requires explicit /solve approval.")
     if state.current_state == State.ENGINEERING_BLOCKED:
         out.append("The autonomous engineering/retry budget ended without a safely executable result.")
     if state.current_state == State.RESULT_REVIEW_REQUIRED:
@@ -533,8 +537,10 @@ def _print_human_report(report: dict[str, Any]) -> None:
         print(f"message: {report['message']}")
     if report["final_state"] == State.INTAKE_REVIEW_REQUIRED.value:
         print("next: /confirm in interactive mode, or --confirm-intake with --backend openai")
-    if report["final_state"] == State.MESH_READY.value:
+    if report["final_state"] == State.SOLVE_READY.value:
         print("next: /solve to approve foamRun, or /feedback <observation> to revise the mesh/case")
+    elif report["final_state"] == State.MESH_READY.value:
+        print("next: pre-solve completeness validation is still required before /solve")
     if report["final_state"] == State.RESULT_REVIEW_REQUIRED.value:
         print("next: /accept to complete, or /feedback <observation> to request a revision")
     if report["final_state"] == State.REVISION_READY.value:
@@ -918,8 +924,8 @@ def _solve_session(session, args, llm, backend, model) -> None:
         print("--dry-run 세션에서는 /solve를 사용할 수 없습니다.")
         return
     state = session.pending_workflow_state
-    if state is None or state.current_state != State.MESH_READY:
-        print("/solve를 실행하려면 먼저 /confirm으로 MESH_READY에 도달해야 합니다.")
+    if state is None or state.current_state != State.SOLVE_READY:
+        print("/solve를 실행하려면 먼저 /confirm으로 SOLVE_READY에 도달해야 합니다.")
         return
     if state.case_dir is None:
         print("실행할 sealed case directory가 없습니다.")
@@ -1031,7 +1037,7 @@ def _handle_command(command, session, args, llm, backend, model) -> bool:
 
 def _interactive(args, llm, backend, model) -> int:
     session = ConversationSession(mode=InteractionMode(args.mode))
-    print(f"OpenFOAM Agent v2.4 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
+    print(f"OpenFOAM Agent v2.5 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
     if backend == "openai":
         print(f"OpenAI model: {model}; cloud agent API calls authorized (task data/tool observations are transmitted; local paths are redacted).")
     while True:
@@ -1049,13 +1055,16 @@ def _interactive(args, llm, backend, model) -> int:
         pending = session.pending_workflow_state
         if pending is not None and pending.current_state in {
             State.MESH_READY,
+            State.SOLVE_READY,
             State.RESULT_REVIEW_REQUIRED,
             State.REVISION_READY,
         }:
             if pending.current_state == State.RESULT_REVIEW_REQUIRED:
                 print("현재 result review 상태입니다. /feedback <내용> 또는 /accept를 사용하세요. 새 문제는 /new 후 입력하세요.")
+            elif pending.current_state == State.SOLVE_READY:
+                print("현재 solve-ready review 상태입니다. /feedback <내용> 또는 /solve를 사용하세요. 새 문제는 /new 후 입력하세요.")
             elif pending.current_state == State.MESH_READY:
-                print("현재 mesh review 상태입니다. /feedback <내용> 또는 /solve를 사용하세요. 새 문제는 /new 후 입력하세요.")
+                print("현재 mesh-ready 상태지만 pre-solve validation이 남아 있습니다. /feedback <내용>을 사용하거나 /confirm 흐름을 완료하세요.")
             else:
                 print("revision proposal이 승인 대기 중입니다. /confirm으로 승인하거나 /reject로 거절하세요.")
             continue

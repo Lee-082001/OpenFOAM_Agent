@@ -50,6 +50,7 @@ from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.references import OpenFOAMReferenceIndex
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
+from openfoam_agent.verification.presolve import PreSolveCompletenessGate
 from openfoam_agent.verification.safety import (
     DeterministicSafetyGate,
     parse_check_mesh_evidence,
@@ -83,6 +84,7 @@ class EngineeringPolicy:
     max_model_prompt_chars: int = 60_000
     max_model_feedback_items: int = 8
     max_mesh_cells: int = 5_000_000
+    require_solve_ready_gate: bool = False
 
     def __post_init__(self) -> None:
         integer_fields = {
@@ -134,6 +136,7 @@ class CFDEngineeringAgent:
         self.catalog = CapabilityCatalog(capability_db)
         self.references = OpenFOAMReferenceIndex()
         self.safety = DeterministicSafetyGate(self.tools, self.workspace)
+        self.presolve = PreSolveCompletenessGate(self.tools, self.workspace)
         self.policy = policy or EngineeringPolicy()
         self.progress = progress or NullProgressReporter()
         self._checkmesh_manifest: str | None = None
@@ -749,6 +752,37 @@ class CFDEngineeringAgent:
                         "Human-feedback proposal requires a case revision, but the solver-input manifest is unchanged."
                     )
                     validation.valid = False
+            presolve = None
+            if native_execution and validation.valid and self.policy.require_solve_ready_gate:
+                self.progress.emit(
+                    ProgressEvent(
+                        phase="pre-solve",
+                        message="solve-ready case completeness 검증",
+                        status="start",
+                    )
+                )
+                presolve = self.presolve.validate(action.plan)
+                if not presolve.valid:
+                    validation.failures.extend(presolve.failures)
+                    validation.valid = False
+                    self.progress.emit(
+                        ProgressEvent(
+                            phase="pre-solve",
+                            message="solve-ready completeness 검증 실패",
+                            status="failure",
+                            details=tuple(item[:800] for item in presolve.failures[:12]),
+                            metrics={"checkedFiles": len(presolve.checked_files), "meshPatches": len(presolve.mesh_patches)},
+                        )
+                    )
+                else:
+                    self.progress.emit(
+                        ProgressEvent(
+                            phase="pre-solve",
+                            message="solve-ready completeness 검증 통과",
+                            status="success",
+                            metrics={"checkedFiles": len(presolve.checked_files), "meshPatches": len(presolve.mesh_patches)},
+                        )
+                    )
             if validation.valid:
                 previous_plan = state.engineering_plan
                 previous_seal = state.case_seal
@@ -772,11 +806,20 @@ class CFDEngineeringAgent:
                             feedback.status = "awaiting_rerun"
                     state.active_revision_proposal = None
                     state.pending_revision_archive_path = None
-                destination = State.MESH_READY if native_execution else State.CASE_PREVIEW_READY
+                destination = (
+                    State.SOLVE_READY
+                    if native_execution and self.policy.require_solve_ready_gate
+                    else (State.MESH_READY if native_execution else State.CASE_PREVIEW_READY)
+                )
+                if native_execution and self.policy.require_solve_ready_gate:
+                    state.transition(State.MESH_READY, "Current case passed checkMesh and mesh evidence gates.")
+                    state.transition(State.PRE_SOLVE_VALIDATION, "Mesh-ready case entered deterministic pre-solve completeness validation.")
                 state.transition(
                     destination,
                     (
-                        "Agent case passed safety/integrity gates and checkMesh. Solver approval is required."
+                        ("Agent case passed safety/integrity, checkMesh, and pre-solve completeness gates. Solver approval is required."
+                         if self.policy.require_solve_ready_gate else
+                         "Agent case passed safety/integrity gates and checkMesh. Solver approval is required.")
                         if native_execution
                         else "Agent case preview passed static safety/integrity gates; native tools were not executed."
                     ),

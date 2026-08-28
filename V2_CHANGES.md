@@ -1,3 +1,15 @@
+# v2.5.1
+
+## Pre-solve completeness gate
+
+- Adds `MESH_READY -> PRE_SOLVE_VALIDATION -> SOLVE_READY` to the interactive CLI path. `/solve` is accepted only from `SOLVE_READY`.
+- The Engineering Agent now declares solver-specific `required_case_files`; Python validates existence instead of hard-coding solver field choices.
+- Deterministic pre-solve validation checks `system/controlDict`, `system/fvSchemes`, `system/fvSolution`, every Agent-declared required input, OpenFOAM dictionary parsing, and mesh-patch coverage for declared `0/*` fields.
+- Missing files such as `fvSchemes`, `fvSolution`, `0/p`, or missing patchField entries are returned to the Engineering Agent before any `foamRun` attempt.
+- Fixes native diagnostic classification so the normal `sigFpe : Enabling floating point exception trapping` startup banner cannot mask a later `FOAM FATAL ERROR`.
+- Direct low-level API compatibility retains legacy `MESH_READY` approval when the new CLI policy is not enabled; the shipped CLI enables the solve-ready gate by default.
+- Version metadata synchronized at 2.5.1.
+
 # v2.5.0
 
 - Generalizes v2.4.2 `blockMesh`-only failure extraction into a shared `NativeFailureDiagnostic` path for all allowlisted OpenFOAM execution stages.

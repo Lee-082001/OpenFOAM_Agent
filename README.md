@@ -432,3 +432,10 @@ Native failures no longer collapse to only `returned status 1`/`-6`. The same bo
 ```
 
 `foamRun` failures use the same projection before runtime repair and `foamPostProcess` failures use it before the next post-processing action. `foamDictionary` and `surfaceCheck` now also preserve full raw logs instead of existing only as transient tool output. Model/user-visible diagnostics are path-redacted and bounded. This is observation only: Python does not choose the engineering repair from the diagnostic.
+
+
+### Pre-solve completeness validation (v2.5.1)
+
+The interactive CLI no longer treats a passing `checkMesh` as sufficient proof that a case is ready for `foamRun`. The Engineering Agent declares the solver inputs it requires in `EngineeringPlan.required_case_files`; deterministic validation then checks those files, core system dictionaries, and boundary coverage before exposing `/solve`. A native run proceeds only after `SOLVE_READY`.
+
+This keeps engineering choices with the Agent: Python does not infer that a particular solver needs `U`, `p`, or another field. It verifies the Agent's declared contract against the actual sealed case.

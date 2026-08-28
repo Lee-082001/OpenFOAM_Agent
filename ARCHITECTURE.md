@@ -160,3 +160,8 @@ All failed allowlisted OpenFOAM executions now pass through one `NativeFailureDi
 The command layer preserves complete stdout/stderr in the private workspace log. A deterministic extractor then identifies the first OpenFOAM fatal/IO marker or common process-failure marker (abort, segmentation fault, floating-point exception); if no explicit marker exists, it returns a bounded output tail. The diagnostic records only the logical command name, return code, observed diagnostic kind, and bounded native excerpt. Local absolute paths are redacted before model/user display.
 
 The same bounded diagnostic becomes the next relevant Agent observation and is rendered in normal CLI progress under the failed native action. It is descriptive evidence only: Python does not infer a CFD cause, choose a repair, change a mesh strategy, or authorize success from the diagnostic.
+
+
+## Solve-readiness contract (v2.5.1)
+
+A mesh-valid case is not necessarily solver-ready. The CLI path now separates `MESH_READY`, `PRE_SOLVE_VALIDATION`, and `SOLVE_READY`. The Engineering Agent declares solver-specific required inputs in `EngineeringPlan.required_case_files`. The deterministic layer checks file presence, dictionary syntax, and boundary-patch coverage without selecting fields, boundary conditions, numerics, or solver implementation. Only `SOLVE_READY` is eligible for interactive `/solve` approval.

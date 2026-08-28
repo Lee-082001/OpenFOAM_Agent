@@ -82,6 +82,7 @@ class EngineeringPlan(_EngineeringModel):
     assumptions: list[str] = Field(default_factory=list, max_length=80)
     confirmed_fact_ids: list[str] = Field(default_factory=list, max_length=200)
     evidence: list[EngineeringEvidence] = Field(default_factory=list, max_length=120)
+    required_case_files: list[str] = Field(default_factory=list, max_length=80)
     postprocess_strategy: list[str] = Field(default_factory=list, max_length=40)
     confirmed_intake_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -89,6 +90,11 @@ class EngineeringPlan(_EngineeringModel):
     def validate_unique_audit_fields(self) -> Self:
         if len(self.confirmed_fact_ids) != len(set(self.confirmed_fact_ids)):
             raise ValueError("Engineering plan contains duplicate confirmed fact IDs.")
+        if len(self.required_case_files) != len(set(self.required_case_files)):
+            raise ValueError("Engineering plan contains duplicate required case files.")
+        for path in self.required_case_files:
+            if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
+                raise ValueError(f"Unsafe required case file path: {path}")
         evidence_ids = [item.evidence_id for item in self.evidence]
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("Engineering plan contains duplicate evidence IDs.")

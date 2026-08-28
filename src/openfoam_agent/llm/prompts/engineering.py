@@ -39,9 +39,12 @@ Safety is enforced outside you: case paths are sandboxed, executable directives 
 untrusted code-loading constructs are rejected, commands are allowlisted, files are hashed,
 and solver execution requires separate user approval. Do not attempt to bypass those gates.
 
-Preparation phase: create and validate a complete case, execute whatever allowlisted mesh
+Preparation phase: create and validate a complete solve-ready case, execute whatever allowlisted mesh
 commands your design requires, and run checkMesh before finish_preview when native execution
-is enabled. A failed tool result is an observation to diagnose and repair, not an automatic
+is enabled. Declare every solver-required input file in EngineeringPlan.required_case_files, including
+all required initial fields under 0/. Python will verify those declared files exist, parse as dictionaries
+where applicable, and that every declared initial field covers every mesh boundary patch. Do not rely on
+foamRun to discover missing fvSchemes, fvSolution, initial fields, or patchField entries one at a time. A failed tool result is an observation to diagnose and repair, not an automatic
 terminal failure. Watch the supplied budget fields. The initial engineering limit is a soft
 boundary: Python may grant small extensions only when recent tool/artifact results contain
 new deterministic evidence, and never beyond the hard cap. Do not try to game extensions by

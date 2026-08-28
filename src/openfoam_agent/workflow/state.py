@@ -88,7 +88,7 @@ class CFDState(BaseModel):
         target = (
             State.RESULT_REVIEW_REQUIRED
             if any(item.submitted_state == State.RESULT_REVIEW_REQUIRED.value for item in linked)
-            else State.MESH_READY
+            else (State.SOLVE_READY if any(item.submitted_state == State.SOLVE_READY.value for item in linked) else State.MESH_READY)
         )
         proposal_id = self.active_revision_proposal.proposal_id
         for feedback in linked:
@@ -111,8 +111,8 @@ class CFDState(BaseModel):
                 feedback.status = "awaiting_review"
 
     def approve_solve(self) -> None:
-        if self.current_state != State.MESH_READY:
-            raise ValueError("Solve approval requires a mesh-ready sealed case.")
+        if self.current_state not in {State.MESH_READY, State.SOLVE_READY}:
+            raise ValueError("Solve approval requires a mesh-ready or solve-ready sealed case.")
         if self.engineering_plan is None or self.case_seal is None:
             raise ValueError("Solve approval requires an engineering plan and case seal.")
         self.solve_approved = True

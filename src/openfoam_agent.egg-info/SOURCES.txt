@@ -53,6 +53,7 @@ src/openfoam_agent/tools/references.py
 src/openfoam_agent/tools/safe_runner.py
 src/openfoam_agent/tools/workspace.py
 src/openfoam_agent/verification/__init__.py
+src/openfoam_agent/verification/presolve.py
 src/openfoam_agent/verification/safety.py
 src/openfoam_agent/workflow/__init__.py
 src/openfoam_agent/workflow/engine.py
@@ -66,6 +67,7 @@ tests/test_v241_canonical_evidence.py
 tests/test_v242_blockmesh_diagnostics.py
 tests/test_v24_context_compaction.py
 tests/test_v250_native_failure_diagnostics.py
+tests/test_v251_presolve_completeness.py
 tests/test_v2_adversarial_integration.py
 tests/test_v2_architecture.py
 tests/test_v2_budgets.py

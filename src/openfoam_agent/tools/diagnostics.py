@@ -109,8 +109,13 @@ def _extract_failure_block(
 
     marker_index: int | None = None
     marker_kind = "output_tail"
-    for index, line in enumerate(lines):
-        for kind, pattern in _FATAL_PATTERNS:
+    # Pattern priority matters more than first textual occurrence. OpenFOAM startup
+    # commonly prints "sigFpe : Enabling floating point exception trapping", which
+    # is not a failure. Prefer a later FOAM FATAL block over that harmless banner.
+    for kind, pattern in _FATAL_PATTERNS:
+        for index, line in enumerate(lines):
+            if kind == "floating_point_exception" and "enabling floating point exception trapping" in line.lower():
+                continue
             if pattern.search(line):
                 marker_index = index
                 marker_kind = kind
