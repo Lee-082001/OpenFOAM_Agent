@@ -1,4 +1,4 @@
-# v2.3 Security and Trust Boundary
+# v2.4 Security and Trust Boundary
 
 ## Cloud disclosure boundary
 
@@ -54,3 +54,11 @@ Engineering, native commands, mesh repair, runtime repair, solver attempts, post
 The v2.3 live progress stream cannot authorize case edits, commands, solver runs, feedback revisions, or acceptance. It receives already-selected action metadata and deterministic tool/runtime observations only. Model `rationale` fields and hidden reasoning are intentionally not rendered.
 
 Progress is emitted to stderr by the CLI so JSON reports on stdout are not corrupted. Raw `foamRun` stdout is enabled only by `--progress verbose`; `normal` mode emits bounded `Time`/Courant summaries while the complete native log remains in the private workspace log directory. Output callbacks are wrapped so callback exceptions cannot kill the OpenFOAM subprocess or change its return status.
+
+## Model-context resource boundary (v2.4)
+
+Cloud payload size is now independently bounded from local provenance size. Engineering, post-processing, and feedback-review prompts have deterministic pre-API character ceilings and high-volume histories are projected into bounded summaries before transmission. Full runtime residual arrays are never copied into post-processing/review prompts; the complete local `RuntimeReport` remains available for deterministic code and audit.
+
+The generic fallback compactor explicitly marks omitted string/list content. It is not an authority mechanism: a compacted model view cannot satisfy deterministic provenance checks that require original observed events or current file/native evidence.
+
+The CLI configures an explicit OpenAI `max_output_tokens` ceiling (default 16000). This is a resource/rate-limit control only; it does not change which CFD decisions the Agent owns. If a future unusually large single structured action legitimately needs more output, the user can raise the CLI cap deliberately.

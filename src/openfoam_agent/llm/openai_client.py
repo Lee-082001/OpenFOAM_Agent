@@ -121,6 +121,7 @@ class OpenAILLM:
         self.default_system_prompt = default_system_prompt.strip()
         self.store = store
         self.max_output_tokens = max_output_tokens
+        self.last_usage: dict[str, int] | None = None
         self._client = client if client is not None else self._build_client()
 
     @classmethod
@@ -178,7 +179,9 @@ class OpenAILLM:
         if self.max_output_tokens is not None:
             request["max_output_tokens"] = self.max_output_tokens
 
+        self.last_usage = None
         response = self._client.responses.parse(**request)
+        self.last_usage = _response_usage(response)
         parsed = getattr(response, "output_parsed", None)
         if parsed is None:
             response_id = getattr(response, "id", None)
@@ -191,3 +194,23 @@ class OpenAILLM:
         if isinstance(parsed, schema):
             return parsed
         return schema.model_validate(parsed)
+
+
+def _response_usage(response: Any) -> dict[str, int] | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+
+    def value(name: str) -> int | None:
+        if isinstance(usage, dict):
+            raw = usage.get(name)
+        else:
+            raw = getattr(usage, name, None)
+        return raw if isinstance(raw, int) and raw >= 0 else None
+
+    mapped = {
+        "inputTokens": value("input_tokens"),
+        "outputTokens": value("output_tokens"),
+        "totalTokens": value("total_tokens"),
+    }
+    return {key: item for key, item in mapped.items() if item is not None} or None

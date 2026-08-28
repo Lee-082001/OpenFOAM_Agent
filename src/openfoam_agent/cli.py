@@ -93,6 +93,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model", help="OpenAI model; otherwise use OPENAI_MODEL.")
     parser.add_argument(
+        "--llm-max-output-tokens",
+        type=int,
+        default=16_000,
+        help=(
+            "Per-response OpenAI output-token cap (default: 16000). "
+            "This bounds rate-limit reservation and prevents one structured action "
+            "from reserving the model's full output window."
+        ),
+    )
+    parser.add_argument(
         "--confirm-api-calls",
         action="store_true",
         help=("Explicitly authorize cloud model calls. The CFD request and bounded "
@@ -213,6 +223,8 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
             )
     elif not args.confirm_api_calls:
         parser.error("--backend openai requires --confirm-api-calls.")
+    if args.llm_max_output_tokens < 1:
+        parser.error("--llm-max-output-tokens must be >= 1.")
     positive_budget_fields = {
         "--engineering-steps": args.engineering_steps,
         "--engineering-hard-cap": args.engineering_hard_cap,
@@ -242,7 +254,11 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
 def _build_llm(args: argparse.Namespace):
     if args.backend == "rule-based-intake":
         return RuleBasedLLM(), "rule-based-intake", None
-    llm = OpenAILLM(model=args.model) if args.model else OpenAILLM.from_env()
+    llm = (
+        OpenAILLM(model=args.model, max_output_tokens=args.llm_max_output_tokens)
+        if args.model
+        else OpenAILLM.from_env(max_output_tokens=args.llm_max_output_tokens)
+    )
     return llm, "openai", llm.model
 
 
@@ -278,7 +294,7 @@ def build_report(
     postprocessing_policy: PostProcessingPolicy,
 ) -> dict[str, Any]:
     return {
-        "architecture": "v2.3",
+        "architecture": "v2.4",
         "run_id": state.run_id,
         "prompt": request.prompt,
         "conversation_turns": list(request.conversation_turns),
@@ -373,7 +389,7 @@ def _limitations(state: CFDState) -> list[str]:
             "COMPLETE records explicit human acceptance of the reviewed result; it is not a universal proof of mesh/time-step independence or experimental validation."
         )
     if state.current_state == State.DONE:
-        out.append("DONE is retained only for backward compatibility; v2.3 uses RESULT_REVIEW_REQUIRED and COMPLETE.")
+        out.append("DONE is retained only for backward compatibility; v2.4 uses RESULT_REVIEW_REQUIRED and COMPLETE.")
     return out
 
 
@@ -774,7 +790,7 @@ def _confirm_revision_session(session, args, llm, backend, model) -> None:
         print("확정할 human-feedback revision proposal이 없습니다.")
         return
     if backend != "openai":
-        print("v2.3 autonomous revision requires --backend openai --confirm-api-calls.")
+        print("v2.4 autonomous revision requires --backend openai --confirm-api-calls.")
         return
     if state.case_dir is None:
         print("수정할 sealed case directory가 없습니다.")
@@ -1015,7 +1031,7 @@ def _handle_command(command, session, args, llm, backend, model) -> bool:
 
 def _interactive(args, llm, backend, model) -> int:
     session = ConversationSession(mode=InteractionMode(args.mode))
-    print(f"OpenFOAM Agent v2.3 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
+    print(f"OpenFOAM Agent v2.4 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
     if backend == "openai":
         print(f"OpenAI model: {model}; cloud agent API calls authorized (task data/tool observations are transmitted; local paths are redacted).")
     while True:

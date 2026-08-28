@@ -19,6 +19,7 @@ src/openfoam_agent/capabilities/graph.py
 src/openfoam_agent/engineering/__init__.py
 src/openfoam_agent/engineering/agent.py
 src/openfoam_agent/llm/__init__.py
+src/openfoam_agent/llm/context.py
 src/openfoam_agent/llm/openai_client.py
 src/openfoam_agent/llm/protocol.py
 src/openfoam_agent/llm/rule_based.py
@@ -60,6 +61,7 @@ tests/test_v21_postprocessing.py
 tests/test_v22_human_feedback.py
 tests/test_v231_checkmesh_preflight.py
 tests/test_v23_progress.py
+tests/test_v24_context_compaction.py
 tests/test_v2_adversarial_integration.py
 tests/test_v2_architecture.py
 tests/test_v2_budgets.py

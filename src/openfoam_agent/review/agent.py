@@ -3,6 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 
+from openfoam_agent.llm.context import (
+    build_bounded_json_prompt,
+    compact_runtime_report,
+    structured_request_metrics,
+)
 from openfoam_agent.llm.prompts import FEEDBACK_REVIEW_SYSTEM_PROMPT
 from openfoam_agent.llm.protocol import StructuredLLM
 from openfoam_agent.progress import NullProgressReporter, ProgressEvent, ProgressReporter
@@ -55,12 +60,17 @@ class CFDFeedbackReviewAgent:
 
         payload = {
             "feedback": feedback.model_dump(mode="json"),
-            "feedback_history": [item.model_dump(mode="json") for item in state.human_feedback],
+            "feedback_history_count": len(state.human_feedback),
+            "feedback_history": [
+                item.model_dump(mode="json") for item in state.human_feedback[-12:]
+            ],
             "revision_history": [item.model_dump(mode="json") for item in state.revision_history[-5:]],
             "confirmed_intake": state.intake.model_dump(mode="json") if state.intake else None,
             "engineering_plan": state.engineering_plan.model_dump(mode="json"),
             "mesh_evidence": state.mesh_evidence.model_dump(mode="json") if state.mesh_evidence else None,
-            "runtime_report": state.runtime_report.model_dump(mode="json") if state.runtime_report else None,
+            "runtime_report": (
+                compact_runtime_report(state.runtime_report) if state.runtime_report else None
+            ),
             "postprocessing_report": (
                 state.postprocessing_report.model_dump(mode="json")
                 if state.postprocessing_report
@@ -77,12 +87,43 @@ class CFDFeedbackReviewAgent:
             },
         }
         try:
-            assessment = self.llm.generate(
+            prompt_result = build_bounded_json_prompt(
+                "Assess this human CFD review feedback and propose the next revision route:\n",
+                payload,
+                max_chars=40_000,
+            )
+            metrics = structured_request_metrics(
                 FeedbackAssessment,
-                "Assess this human CFD review feedback and propose the next revision route:\n"
-                + json.dumps(payload, ensure_ascii=False, indent=2),
+                prompt_result.prompt,
                 system_prompt=FEEDBACK_REVIEW_SYSTEM_PROMPT,
             )
+            metrics["compacted"] = prompt_result.compacted
+            max_output_tokens = getattr(self.llm, "max_output_tokens", None)
+            if max_output_tokens is not None:
+                metrics["maxOutputTokens"] = max_output_tokens
+            self.progress.emit(
+                ProgressEvent(
+                    phase="llm-context",
+                    message="feedback-review LLM context 준비",
+                    status="info",
+                    metrics=metrics,
+                )
+            )
+            assessment = self.llm.generate(
+                FeedbackAssessment,
+                prompt_result.prompt,
+                system_prompt=FEEDBACK_REVIEW_SYSTEM_PROMPT,
+            )
+            usage = getattr(self.llm, "last_usage", None)
+            if isinstance(usage, dict) and usage:
+                self.progress.emit(
+                    ProgressEvent(
+                        phase="llm-usage",
+                        message="feedback-review OpenAI token usage",
+                        status="info",
+                        metrics=usage,
+                    )
+                )
 
             proposal = RevisionProposal(
                 proposal_id=f"rp-{len(state.revision_proposals) + 1:04d}",

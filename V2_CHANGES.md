@@ -1,3 +1,16 @@
+# v2.4.0
+
+- Adds deterministic model-context compaction without deleting local provenance/audit history.
+- Replaces full runtime residual-history transmission with a compact summary: total sample count, latest residual per recent field, and a small recent-sample tail.
+- Limits engineering model context to 12 recent observations with bounded excerpts; cumulative capability/reference provenance remains separately summarized and final deterministic validation still reads the original full event history.
+- Limits post-processing model context to 8 recent observations and an 80-file bounded inventory projection while retaining the full native result tree locally.
+- Compacts feedback-review runtime reports and bounds transmitted feedback history.
+- Adds hard pre-API prompt character budgets: 60k engineering, 40k post-processing, and 40k feedback-review. An unusual oversized payload is deterministically compacted again instead of being sent unbounded.
+- Adds `[LLM-CONTEXT]` progress telemetry with prompt/schema size and a conservative tokenizer-free `approxTokens` estimate, plus `[LLM-USAGE]` exact input/output/total token metrics when returned by OpenAI.
+- Adds CLI `--llm-max-output-tokens` with a default of 16000 so structured action calls do not leave the model's much larger output window uncapped.
+- Adds stress regressions with 12,000 residual samples, large engineering observations, and oversized result inventories.
+- Synchronizes package/module metadata at 2.4.0.
+
 # v2.3.2
 
 - Surface bounded, path-redacted deterministic `finish_preview` validation failures in live CLI progress under a `reason:` block.

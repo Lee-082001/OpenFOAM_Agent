@@ -1,8 +1,8 @@
-# OpenFOAM Agent v2.3 Architecture
+# OpenFOAM Agent v2.4 Architecture
 
 ## 1. Authority invariant
 
-v2.3 separates four kinds of authority:
+v2.4 separates four kinds of authority:
 
 ```text
 Agent engineering authority      -> what CFD design/repair/analysis is appropriate?
@@ -136,3 +136,18 @@ Long-running work emits observational `ProgressEvent` objects through a shared r
 The progress channel may expose only deterministic/action-level observations such as phase, bounded step number, action type, relative case file, allowlisted command, tool success/failure, `checkMesh` metrics, solver `Time`/Courant summaries, retry counts, and post-processing metrics already derived from native evidence. It must not expose the model `rationale`, hidden reasoning, API credentials, or new unredacted host-file contents.
 
 `CLIProgressReporter` writes to stderr. `quiet` drops events, `normal` filters low-value read/list actions and throttles solver time markers, and `verbose` renders all action events and enables raw `foamRun` stdout. Reporter/callback exceptions are observational failures only: `SafeRunner` catches output-callback exceptions so a renderer cannot terminate or alter a native OpenFOAM process.
+
+## Token-aware remote working context (v2.4)
+
+The durable local audit state and the remote model working context are intentionally different representations.
+
+- `CFDState.engineering_events`, runtime reports, logs, result files, and revision history remain complete local provenance subject to their existing storage bounds.
+- The engineering model receives only 12 recent event projections with bounded excerpts plus compact cumulative capability/reference provenance.
+- Post-processing does not receive the full runtime residual array. It receives total residual sample count, latest residual evidence per recent field, and a short recent tail.
+- Result inventories are summarized and bounded before transmission; the full result tree remains available through explicit result-list/read tools.
+- Feedback review receives a compact runtime report and bounded recent feedback history.
+- Every model prompt passes a deterministic pre-API character budget. If the domain-specific projection is still unexpectedly large, a generic marked compaction pass reduces long strings/lists before an API call is allowed.
+
+This compaction never authorizes an engineering claim. Final plan/evidence validation continues to inspect the original local EngineeringEvents, case hashes, native evidence, and confirmed intake rather than trusting compact summaries.
+
+The CLI progress stream exposes request-size telemetry (`promptChars`, structured-schema characters, and a conservative tokenizer-free `approxTokens` estimate). The estimate is diagnostic only. When the provider returns usage metadata, a separate `LLM-USAGE` event exposes exact input/output/total token counts. The OpenAI adapter also receives an explicit CLI-default `max_output_tokens=16000`, preventing a small structured action from leaving the model's full output window uncapped.

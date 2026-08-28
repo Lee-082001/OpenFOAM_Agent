@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.3
+# OpenFOAM Agent v2.4
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -204,6 +204,41 @@ openfoam-agent --interactive --backend openai --confirm-api-calls --progress qui
 
 # every Agent action + raw foamRun output
 openfoam-agent --interactive --backend openai --confirm-api-calls --progress verbose
+```
+
+### Token-aware model context (v2.4)
+
+v2.4 keeps complete engineering/runtime/post-processing provenance locally but sends a compact working projection to the cloud model. Long residual histories, old tool outputs, result inventories, and feedback history are no longer retransmitted in full on every Agent turn.
+
+Default model-facing hard caps are:
+
+- engineering prompt: 60,000 characters;
+- post-processing prompt: 40,000 characters;
+- feedback-review prompt: 40,000 characters;
+- engineering recent observations: 12 bounded excerpts;
+- post-processing recent observations: 8 bounded excerpts;
+- post-processing result inventory: 80 representative file entries;
+- OpenAI response cap: `--llm-max-output-tokens 16000`.
+
+Runtime residual evidence is projected as total sample count, latest residuals by recent field, and a short recent tail instead of every parsed residual sample. The original `RuntimeReport` remains unchanged locally. Deterministic plan/evidence validation also continues to use the full local event history rather than trusting the compact model projection.
+
+Before each structured model call the progress stream reports approximate request size:
+
+```text
+[LLM-CONTEXT 07/120] prepare LLM context 준비
+  promptChars=18342, schemaChars=9470, approxTokens=15120, compacted=False
+```
+
+`approxTokens` is deliberately conservative tokenizer-free telemetry; it is not OpenAI billing/usage data. When the OpenAI response includes usage metadata, v2.4 follows it with an exact provider-reported event such as `inputTokens=...`, `outputTokens=...`, and `totalTokens=...`. Use `--progress quiet` to hide these events. The explicit output-token cap is independently useful because a structured action normally needs far less than the model's maximum output window.
+
+```bash
+# default
+openfoam-agent --interactive --backend openai --confirm-api-calls \
+  --llm-max-output-tokens 16000
+
+# increase only if a legitimately large single case-file action needs it
+openfoam-agent --interactive --backend openai --confirm-api-calls \
+  --llm-max-output-tokens 24000
 ```
 
 ### 3. One-shot preview without native OpenFOAM commands
