@@ -28,6 +28,7 @@ class ProgressEvent:
     limit: int | None = None
     importance: ProgressImportance = ProgressImportance.NORMAL
     metrics: Mapping[str, object] = field(default_factory=dict)
+    details: tuple[str, ...] = field(default_factory=tuple)
 
 
 class ProgressReporter(Protocol):
@@ -94,6 +95,13 @@ class CLIProgressReporter:
             )
             if payload:
                 print(f"  {payload}", file=self.stream, flush=True)
+        if event.details:
+            label = "reason:" if event.status == "failure" else "details:"
+            print(f"  {label}", file=self.stream, flush=True)
+            for detail in event.details:
+                text = _compact(str(detail), 800)
+                if text:
+                    print(f"    - {text}", file=self.stream, flush=True)
 
 
 _ENGINEERING_VERBOSE = {

@@ -477,3 +477,74 @@ def test_feedback_review_emits_progress_without_exposing_model_rationale(tmp_pat
     assert "feedback assessment 완료" in text
     assert "moderate_increase" in text
     assert "This is a hypothesis" not in text
+
+
+def test_cli_progress_failure_renders_reasons():
+    stream = StringIO()
+    reporter = CLIProgressReporter("normal", stream=stream)
+    reporter.emit(
+        ProgressEvent(
+            phase="finalizing",
+            message="Engineering plan rejected by deterministic safety/evidence gate.",
+            status="failure",
+            step=1,
+            limit=8,
+            details=(
+                "Case inputs changed after the last successful checkMesh; re-run checkMesh.",
+            ),
+        )
+    )
+    text = stream.getvalue()
+    assert "reason:" in text
+    assert "Case inputs changed after the last successful checkMesh" in text
+
+
+def test_finish_preview_failure_surfaces_deterministic_reason(tmp_path, graph_path):
+    state = make_state()
+    plan = make_plan(state.intake)
+    llm = ScriptedLLM(
+        [
+            SearchCapabilitiesAction(
+                type="search_capabilities", query="incompressibleFluid", rationale="Observe."
+            ),
+            WriteCaseFileAction(
+                type="write_case_file",
+                path="system/controlDict",
+                content=control_dict(),
+                rationale="Write.",
+            ),
+            RunMeshCommandAction(
+                type="run_mesh_command", command="checkMesh", rationale="Verify."
+            ),
+            WriteCaseFileAction(
+                type="write_case_file",
+                path="system/fvSchemes",
+                content="FoamFile { version 2.0; format ascii; class dictionary; object fvSchemes; }\n",
+                rationale="Modify after mesh verification.",
+            ),
+            FinishPreviewAction(type="finish_preview", plan=plan, rationale="Finish."),
+        ]
+    )
+    tools = FakeOpenFOAMTools(
+        mesh_results={"checkMesh": [tool_result("checkMesh", success=True, stdout=mesh_ok_log())]}
+    )
+    stream = StringIO()
+    agent = CFDEngineeringAgent(
+        llm,
+        workspace=tmp_path,
+        capability_db=graph_path,
+        tools=tools,
+        policy=EngineeringPolicy(
+            max_agent_steps=5,
+            hard_max_agent_steps=5,
+            max_finalization_steps=1,
+        ),
+        progress=CLIProgressReporter("normal", stream=stream),
+    )
+
+    agent.prepare(state, native_execution=True)
+
+    text = stream.getvalue()
+    assert "Engineering plan rejected by deterministic safety/evidence gate." in text
+    assert "reason:" in text
+    assert "A successful current checkMesh result with cell-count evidence is required before solve approval." in text

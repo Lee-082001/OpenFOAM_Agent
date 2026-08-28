@@ -183,6 +183,16 @@ OpenFOAM Agent> /confirm
 [ENGINEERING 19/120] OK Engineering plan accepted and case sealed.
 ```
 
+If deterministic final validation rejects the plan, normal progress now exposes the bounded, path-redacted gate reason immediately instead of only showing a generic failure:
+
+```text
+[FINALIZING 01/8] FAIL Engineering plan rejected by deterministic safety/evidence gate.
+  reason:
+    - A successful current checkMesh result with cell-count evidence is required before solve approval.
+```
+
+These are deterministic validation messages, not model rationale or private reasoning.
+
 `/solve` uses the same event bus. In `normal` mode, raw solver output is retained in log files while the terminal receives bounded live summaries of `Time`, Courant number, attempts, repair transitions, and post-processing actions. `verbose` additionally shows every Agent read/list action and raw `foamRun` stdout. Progress is written to stderr so `--json` stdout remains valid JSON.
 
 ```bash

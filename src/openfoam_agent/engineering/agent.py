@@ -1341,6 +1341,17 @@ class CFDEngineeringAgent:
                 "maxNonOrtho": evidence.max_non_orthogonality,
                 "maxSkew": evidence.max_skewness,
             }
+        details: tuple[str, ...] = ()
+        if (
+            not event.success
+            and event.action_type == "finish_preview"
+            and event.output_excerpt.strip()
+        ):
+            details = tuple(
+                self._redact_local_paths(line.strip())[:800]
+                for line in event.output_excerpt.splitlines()
+                if line.strip()
+            )[:12]
         self.progress.emit(
             ProgressEvent(
                 phase=phase,
@@ -1350,6 +1361,7 @@ class CFDEngineeringAgent:
                 limit=limit,
                 importance=action_importance(event.action_type),
                 metrics=metrics,
+                details=details,
             )
         )
 

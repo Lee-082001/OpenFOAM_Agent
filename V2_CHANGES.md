@@ -1,3 +1,8 @@
+# v2.3.2
+
+- Surface bounded, path-redacted deterministic `finish_preview` validation failures in live CLI progress under a `reason:` block.
+- Keep model rationale hidden; only deterministic gate failures are exposed.
+
 
 # v2.3.1
 
