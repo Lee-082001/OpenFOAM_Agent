@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.7
+# OpenFOAM Agent v2.7.1
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -419,7 +419,7 @@ A failed mesh or dictionary tool is an **observation**, not an automatic termina
 
 Preparation also has independent default limits of 40 executed native OpenFOAM validation/mesh commands and 10 mesh-repair cycles. If the engineering window ends immediately after a current passing `checkMesh`, a finalization-only window of 8 actions lets the Agent submit `finish_preview` or `block`; it cannot run tools or edit the case.
 
-During runtime, a failed `foamRun` log is returned to the same engineering agent. The default policy allows up to 8 autonomous repair/retry cycles (9 solver executions total), with up to 60 engineering actions inside each repair cycle. Automatic repair cannot switch the already approved solver. Any file edit invalidates the current `checkMesh` evidence; the agent must re-establish current evidence before `retry_solver` is accepted.
+During runtime, a failed `foamRun` log is returned to the same engineering agent. The default policy allows up to 8 autonomous repair/retry cycles (9 solver executions total), with up to 60 engineering actions inside each repair cycle. Automatic repair cannot switch the already approved solver. Only mesh-affecting edits invalidate current `checkMesh` evidence. Changes to `fvSchemes`, `fvSolution`, `controlDict`, initial fields, and other non-mesh solver inputs keep the existing mesh evidence current and are validated by their appropriate dictionary/pre-solve checks. Changes to mesh-generation dictionaries, geometry inputs, or generated `constant/polyMesh` require a fresh `checkMesh` before `retry_solver` is accepted.
 
 
 ### Budget controls
@@ -469,7 +469,7 @@ The v2 tests focus on architecture boundaries rather than preserving v0.x planne
 - no hidden required case-template files;
 - solver/case mismatch and confirmed-fact provenance;
 - mesh failure -> agent repair -> retry;
-- stale `checkMesh` invalidation;
+- mesh-scoped stale `checkMesh` invalidation without redundant reruns after solver-only edits;
 - full pre-solve input sealing, including native mesh outputs;
 - cell/resource bounds;
 - runtime failure log -> same-agent repair;
@@ -479,7 +479,7 @@ The v2 tests focus on architecture boundaries rather than preserving v0.x planne
 - deterministic Cd/Cl/shedding-frequency/Strouhal extraction from force-coefficient evidence;
 - post-processing failure isolation that preserves successful runtime evidence;
 - solver-change and `/solve` approval gates.
-- adversarial dynamic-mesh end-to-end recovery, including unsafe-directive rejection, native mesh sealing, state rehydration, SIGFPE repair, fresh `checkMesh`, resealing, and same-solver retry.
+- adversarial dynamic-mesh end-to-end recovery, including unsafe-directive rejection, native mesh sealing, state rehydration, SIGFPE solver-input repair without redundant `checkMesh`, resealing, and same-solver retry.
 
 See `ARCHITECTURE.md` and `V2_CHANGES.md` for the detailed boundary and migration notes.
 

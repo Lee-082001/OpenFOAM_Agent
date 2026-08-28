@@ -262,12 +262,11 @@ def test_hard_dynamic_mesh_failure_repair_runtime_repair_and_native_seal(
             content="solvers { p { solver PCG; tolerance 1e-7; relTol 0.05; } }\n",
             rationale="Repair numerics after observing the real SIGFPE runtime log.",
         ),
-        RunMeshCommandAction(
-            type="run_mesh_command",
-            command="checkMesh",
-            rationale="Refresh mesh evidence because an execution input changed.",
+        RetrySolverAction(
+            type="retry_solver",
+            plan=plan,
+            rationale="Retry the same approved solver; fvSolution did not change the mesh.",
         ),
-        RetrySolverAction(type="retry_solver", plan=plan, rationale="Retry the same approved solver."),
     ]
     llm = ScriptedLLM(actions)
 
@@ -286,7 +285,6 @@ def test_hard_dynamic_mesh_failure_repair_runtime_repair_and_native_seal(
             ],
             "checkMesh": [
                 tool_result("checkMesh", success=False, stderr=first_mesh_failure),
-                tool_result("checkMesh", success=True, stdout=mesh_ok_log(cells=36000)),
                 tool_result("checkMesh", success=True, stdout=mesh_ok_log(cells=36000)),
             ],
         },
@@ -386,8 +384,9 @@ def test_hard_dynamic_mesh_failure_repair_runtime_repair_and_native_seal(
     assert state.last_runtime_log_excerpt is not None
     assert "Floating point exception" in state.last_runtime_log_excerpt
 
-    # Runtime edit must force a fresh checkMesh and produce a new integrity seal.
-    assert tools.mesh_calls[-1] == "checkMesh"
+    # A solver-only runtime edit must preserve current mesh evidence while producing
+    # a new full integrity seal. The only checkMesh calls are the preparation checks.
+    assert tools.mesh_calls == ["blockMesh", "checkMesh", "blockMesh", "checkMesh"]
     assert state.case_seal is not None
     assert state.case_seal.manifest_sha256 != pre_runtime_manifest
     repaired_sealed = {item.path: item for item in state.case_seal.files}

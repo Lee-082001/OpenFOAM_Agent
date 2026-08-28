@@ -13,6 +13,26 @@ from openfoam_agent.schemas.engineering import CaseFileSeal, CaseSeal, Engineeri
 
 _WRITABLE_TOP_LEVEL = {"0", "constant", "system", "postprocessConfig"}
 _EXECUTION_INPUT_TOP_LEVEL = {"0", "constant", "system"}
+_MESH_AFFECTING_EXACT_PATHS = {
+    "system/blockMeshDict",
+    "system/surfaceFeatureExtractDict",
+    "system/snappyHexMeshDict",
+    "system/createPatchDict",
+}
+_MESH_AFFECTING_PREFIXES = (
+    "constant/polyMesh/",
+    "constant/triSurface/",
+)
+_MESH_GEOMETRY_SUFFIXES = {
+    ".stl",
+    ".obj",
+    ".emesh",
+    ".vtk",
+    ".vtp",
+    ".off",
+    ".nas",
+    ".bdf",
+}
 _TIME_DIR = re.compile(r"^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$")
 _SAFE_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
 _FORBIDDEN_CONTENT = (
@@ -149,6 +169,31 @@ class CaseWorkspace:
     def manifest_digest(self) -> str:
         """Digest every execution input under 0/, constant/ and system/."""
         return _seal_manifest_digest(self.execution_file_seals())
+
+    def mesh_manifest_digest(self) -> str:
+        """Digest only artifacts whose content can affect the generated mesh.
+
+        This is intentionally narrower than :meth:`manifest_digest`. Solver-control
+        dictionaries and initial fields remain part of the full case seal, but changing
+        them does not make previously observed checkMesh evidence stale.
+        """
+        mesh_files = [
+            item
+            for item in self.execution_file_seals()
+            if self.is_mesh_affecting_path(item.path)
+        ]
+        return _seal_manifest_digest(mesh_files)
+
+    def is_mesh_affecting_path(self, relative_text: str) -> bool:
+        """Return whether a case path participates in the allowlisted mesh pipeline."""
+        normalized = self._normalized(relative_text)
+        if normalized in _MESH_AFFECTING_EXACT_PATHS:
+            return True
+        if normalized.startswith(_MESH_AFFECTING_PREFIXES):
+            return True
+        if normalized.startswith("constant/"):
+            return Path(normalized).suffix.casefold() in _MESH_GEOMETRY_SUFFIXES
+        return False
 
     def file_seals(self) -> list[CaseFileSeal]:
         """Return agent-authored files only, for agent observations/UI."""

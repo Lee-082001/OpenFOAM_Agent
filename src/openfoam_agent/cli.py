@@ -500,7 +500,7 @@ def build_report(
     model_routes: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     return {
-        "architecture": "v2.7",
+        "architecture": "v2.7.1",
         "run_id": state.run_id,
         "prompt": request.prompt,
         "conversation_turns": list(request.conversation_turns),
@@ -1254,7 +1254,7 @@ def _handle_command(command, session, args, llm, backend, model) -> bool:
 
 def _interactive(args, llm, backend, model) -> int:
     session = ConversationSession(mode=InteractionMode(args.mode))
-    print(f"OpenFOAM Agent v2.7 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
+    print(f"OpenFOAM Agent v2.7.1 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
     if backend == "openai":
         routes = _model_routes(llm)
         print(

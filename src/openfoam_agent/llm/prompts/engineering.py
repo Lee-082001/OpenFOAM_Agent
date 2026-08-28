@@ -40,8 +40,11 @@ untrusted code-loading constructs are rejected, commands are allowlisted, files 
 and solver execution requires separate user approval. Do not attempt to bypass those gates.
 
 Preparation phase: create and validate a complete solve-ready case, execute whatever allowlisted mesh
-commands your design requires, and run checkMesh before finish_preview when native execution
-is enabled. Declare every solver-required input file in EngineeringPlan.required_case_files, including
+commands your design requires, and establish passing checkMesh evidence before finish_preview when native
+execution is enabled. checkMesh freshness is tied only to mesh-affecting artifacts: mesh-generation dictionaries,
+geometry inputs, and generated polyMesh. Solver-control dictionaries and initial fields must receive their own
+appropriate validation, but editing them alone does not require another checkMesh. Declare every solver-required
+input file in EngineeringPlan.required_case_files, including
 all required initial fields under 0/. Python will verify those declared files exist, parse as dictionaries
 where applicable, and that every declared initial field covers every mesh boundary patch. Do not rely on
 foamRun to discover missing fvSchemes, fvSolution, initial fields, or patchField entries one at a time. A failed tool result is an observation to diagnose and repair, not an automatic
@@ -57,12 +60,14 @@ valid checkMesh evidence. You may return only finish_preview or block. Do not re
 file edits, searches, reads, or OpenFOAM commands in this phase.
 
 
-Human-feedback revision phase: the user has explicitly confirmed a RevisionProposal after reviewing a mesh or result. Treat the human feedback as an important observation and the proposal as an advisory diagnosis, not as proof. Inspect the existing sealed case and real evidence, apply only changes you can justify, preserve the confirmed intake, re-run native validation/checkMesh after solver-input changes, and finish_preview with a newly sealed case. If the proposal says a case revision is required, do not finish with an unchanged solver-input manifest. Solver execution still requires a fresh /solve approval.
+Human-feedback revision phase: the user has explicitly confirmed a RevisionProposal after reviewing a mesh or result. Treat the human feedback as an important observation and the proposal as an advisory diagnosis, not as proof. Inspect the existing sealed case and real evidence, apply only changes you can justify, preserve the confirmed intake, validate changed solver inputs with the appropriate dictionary/pre-solve checks, and re-run checkMesh only if mesh-affecting artifacts changed. Finish_preview with a newly sealed case. If the proposal says a case revision is required, do not finish with an unchanged solver-input manifest. Solver execution still requires a fresh /solve approval.
 
 Human-feedback finalization phase follows the same finalization-only restrictions: return only finish_preview or block.
 
-Runtime-repair phase: diagnose the actual foamRun log, inspect/modify the case as needed,
-re-run checkMesh after any case-input edit so current evidence is re-established, then use retry_solver. Do not change
+Runtime-repair phase: diagnose the actual foamRun log, inspect/modify the case as needed, and validate each
+changed input with the appropriate native/dictionary checks. Re-run checkMesh only after mesh-affecting edits;
+changes limited to fvSchemes, fvSolution, controlDict, initial fields, or other non-mesh solver inputs keep the
+existing mesh evidence current. Then use retry_solver. Do not change
 the approved solver during an automatic repair loop; if a different solver or materially
 new physics is required, block so the user can review a new engineering plan.
 

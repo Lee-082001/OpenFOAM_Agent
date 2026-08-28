@@ -56,11 +56,11 @@ Human-confirmed revisions use the same engineering tools and safety gates but st
 
 ## 5. Solve-input sealing
 
-Before `MESH_READY`, all execution inputs under `0/`, `constant/`, and `system/` are SHA-256 sealed, including native-generated `constant/polyMesh`. `EngineeringPlan` is separately hashed. Any file write/delete invalidates current checkMesh evidence. `/solve` is legal only for the current sealed case.
+Before `MESH_READY`, all execution inputs under `0/`, `constant/`, and `system/` are SHA-256 sealed, including native-generated `constant/polyMesh`. `EngineeringPlan` is separately hashed. `checkMesh` freshness uses a narrower mesh-only manifest: mesh-generation dictionaries, geometry inputs, and generated `constant/polyMesh`. Solver-control or initial-field edits remain covered by the full case seal but do not invalidate mesh evidence. `/solve` is legal only for the current sealed case.
 
 ## 6. Runtime and post-processing
 
-`foamRun` failures return real stdout/stderr to the same engineering agent for bounded repair. Automatic repair cannot switch the already approved solver and must re-establish checkMesh evidence after input edits.
+`foamRun` failures return real stdout/stderr to the same engineering agent for bounded repair. Automatic repair cannot switch the already approved solver. It must re-establish `checkMesh` evidence only after mesh-affecting edits; solver-only changes use their own deterministic/native validation and preserve current mesh evidence.
 
 After runtime success, `CFDPostProcessingAgent` may write only `postprocessConfig/`, execute trusted `foamPostProcess`, read only numeric time directories and `postProcessing/`, and request deterministic analysis. Cd/Cl/f/St values come from parsed native files and executed dictionary hashes, never model prose. The Agent may additionally report advisory scientific confidence/review focus; this is explicitly non-deterministic and cannot transition to COMPLETE.
 

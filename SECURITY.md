@@ -24,7 +24,7 @@ Failed allowlisted native commands preserve their complete stdout/stderr only in
 
 ## Case-input integrity
 
-Agent writes are sandboxed. Traversal, absolute paths, symlinked execution inputs, NUL content, executable directives (`#codeStream`, `#calc`, runtime coded constructs, `system(...)`, etc.) and non-allowlisted libraries are rejected. Before solve, every input under `0/`, `constant/`, and `system/` is SHA-256 sealed. `MESH_READY` additionally requires current trusted `checkMesh` evidence and a manifest matching the bytes that were checked.
+Agent writes are sandboxed. Traversal, absolute paths, symlinked execution inputs, NUL content, executable directives (`#codeStream`, `#calc`, runtime coded constructs, `system(...)`, etc.) and non-allowlisted libraries are rejected. Before solve, every input under `0/`, `constant/`, and `system/` is SHA-256 sealed. `MESH_READY` additionally requires current trusted `checkMesh` evidence bound to a mesh-only manifest covering mesh-generation dictionaries, geometry inputs, and generated `constant/polyMesh`; non-mesh solver inputs remain protected by the full case seal and their own validators.
 
 ## Runtime self-deception resistance
 
@@ -38,7 +38,7 @@ Post-processing cannot modify sealed solve inputs. It writes only `postprocessCo
 
 Human feedback is stored separately from the immutable intake. The Review Agent has no file-write or native-execution tools. Each revision proposal is bound to the exact EngineeringPlan digest and case-manifest digest it reviewed. Any out-of-band plan/input change before `/confirm` blocks revision.
 
-A required case revision cannot pass finalization with an unchanged solver-input manifest. On successful revision, deterministic code records before/after hashes and per-file diff. The revised case must pass current validation/checkMesh and requires a fresh `/solve`.
+A required case revision cannot pass finalization with an unchanged solver-input manifest. On successful revision, deterministic code records before/after hashes and per-file diff. The revised case must pass current validation; a fresh `checkMesh` is required only when mesh-affecting artifacts changed, and every revision still requires a fresh `/solve`.
 If automated feedback assessment fails, the workflow returns to the originating review gate with the human observation retained as unresolved provenance. If an unexpected failure occurs after a confirmed revision has begun, the workflow is marked `ENGINEERING_BLOCKED` and reports the private baseline/output archive path rather than pretending the partial revision is usable.
 
 Before a confirmed revision starts, exact pre-revision execution inputs are copied to private `revision-history/rev-XXXX/baseline_inputs/`; previous numeric time outputs, `postProcessing/`, post-process configuration and logs are moved into the same archive. This prevents stale evidence from being mistaken for the new run while preserving rollback/audit/comparison material.

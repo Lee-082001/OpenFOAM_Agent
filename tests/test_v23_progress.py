@@ -518,9 +518,9 @@ def test_finish_preview_failure_surfaces_deterministic_reason(tmp_path, graph_pa
             ),
             WriteCaseFileAction(
                 type="write_case_file",
-                path="system/fvSchemes",
-                content="FoamFile { version 2.0; format ascii; class dictionary; object fvSchemes; }\n",
-                rationale="Modify after mesh verification.",
+                path="system/blockMeshDict",
+                content="FoamFile { version 2.0; format ascii; class dictionary; object blockMeshDict; }\n",
+                rationale="Modify a mesh-affecting input after mesh verification.",
             ),
             FinishPreviewAction(type="finish_preview", plan=plan, rationale="Finish."),
         ]

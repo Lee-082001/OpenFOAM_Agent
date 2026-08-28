@@ -102,14 +102,45 @@ def test_failed_mesh_command_is_observation_then_agent_repairs(tmp_path, graph_p
     assert any("FOAM FATAL ERROR" in prompt for prompt in llm.prompts[3:])
 
 
-def test_file_change_invalidates_previous_checkmesh_evidence(tmp_path, graph_path):
+def test_solver_input_change_preserves_previous_checkmesh_evidence(tmp_path, graph_path):
     state = make_state()
     plan = make_plan(state.intake)
     llm = ScriptedLLM([
         SearchCapabilitiesAction(type="search_capabilities", query="incompressibleFluid", rationale="Observe solver capability evidence."),
         WriteCaseFileAction(type="write_case_file", path="system/controlDict", content=control_dict(), rationale="control"),
         RunMeshCommandAction(type="run_mesh_command", command="checkMesh", rationale="check"),
-        WriteCaseFileAction(type="write_case_file", path="system/fvSchemes", content="ddtSchemes {};\n", rationale="change input"),
+        WriteCaseFileAction(type="write_case_file", path="system/fvSchemes", content="ddtSchemes {};\n", rationale="change solver input"),
+        FinishPreviewAction(type="finish_preview", plan=plan, rationale="finish with still-current mesh evidence"),
+    ])
+    tools = FakeOpenFOAMTools(
+        mesh_results={"checkMesh": [tool_result("checkMesh", success=True, stdout=mesh_ok_log())]}
+    )
+    agent = CFDEngineeringAgent(
+        llm,
+        workspace=tmp_path,
+        capability_db=graph_path,
+        tools=tools,
+        policy=EngineeringPolicy(max_agent_steps=5),
+    )
+    agent.prepare(state, native_execution=True)
+    assert state.current_state == State.MESH_READY
+    assert state.mesh_evidence is not None and state.mesh_evidence.passed
+    assert tools.mesh_calls == ["checkMesh"]
+
+
+def test_mesh_input_change_invalidates_previous_checkmesh_evidence(tmp_path, graph_path):
+    state = make_state()
+    plan = make_plan(state.intake)
+    llm = ScriptedLLM([
+        SearchCapabilitiesAction(type="search_capabilities", query="incompressibleFluid", rationale="Observe solver capability evidence."),
+        WriteCaseFileAction(type="write_case_file", path="system/controlDict", content=control_dict(), rationale="control"),
+        RunMeshCommandAction(type="run_mesh_command", command="checkMesh", rationale="check"),
+        WriteCaseFileAction(
+            type="write_case_file",
+            path="system/blockMeshDict",
+            content="FoamFile { version 2.0; format ascii; class dictionary; object blockMeshDict; }\n",
+            rationale="change mesh input",
+        ),
         FinishPreviewAction(type="finish_preview", plan=plan, rationale="try stale evidence"),
     ])
     tools = FakeOpenFOAMTools(

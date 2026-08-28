@@ -1,3 +1,16 @@
+# v2.7.1
+
+## Mesh-scoped checkMesh freshness
+
+- Separates the full execution-input manifest from a narrower mesh-only manifest used to decide whether passing `checkMesh` evidence is still current.
+- Mesh freshness tracks the allowlisted mesh pipeline: `system/blockMeshDict`, `system/surfaceFeatureExtractDict`, `system/snappyHexMeshDict`, `system/createPatchDict`, geometry inputs under `constant/` (including `constant/triSurface`), and generated `constant/polyMesh`.
+- Editing/deleting `fvSchemes`, `fvSolution`, `controlDict`, initial fields under `0/`, physical-property dictionaries, or other non-mesh solver inputs no longer clears passing mesh evidence or forces redundant `checkMesh`.
+- Full case sealing remains unchanged: every execution input under `0/`, `constant/`, and `system/` is still SHA-256 bound before solve/retry.
+- Runtime-repair rehydration restores mesh freshness only after verifying the persisted full case seal and persisted passing mesh evidence.
+- Engineering/revision/runtime prompts now instruct the Agent to validate changed solver inputs appropriately and rerun `checkMesh` only after mesh-affecting changes.
+- Adds regression coverage for solver-only edits preserving mesh evidence, mesh edits invalidating it, runtime retry without redundant `checkMesh`, and rehydrated runtime repair.
+- Synchronizes package/module/CLI metadata at 2.7.1.
+
 # v2.7.0
 
 ## Local Ollama backend over SSH tunnel

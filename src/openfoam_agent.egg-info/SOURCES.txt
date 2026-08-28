@@ -72,6 +72,7 @@ tests/test_v250_native_failure_diagnostics.py
 tests/test_v251_presolve_completeness.py
 tests/test_v260_model_routing.py
 tests/test_v270_ollama_backend.py
+tests/test_v271_mesh_freshness.py
 tests/test_v2_adversarial_integration.py
 tests/test_v2_architecture.py
 tests/test_v2_budgets.py

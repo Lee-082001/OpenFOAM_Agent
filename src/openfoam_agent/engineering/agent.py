@@ -139,7 +139,7 @@ class CFDEngineeringAgent:
         self.presolve = PreSolveCompletenessGate(self.tools, self.workspace)
         self.policy = policy or EngineeringPolicy()
         self.progress = progress or NullProgressReporter()
-        self._checkmesh_manifest: str | None = None
+        self._checkmesh_mesh_manifest: str | None = None
 
     def prepare(self, state: CFDState, *, native_execution: bool = True) -> CFDState:
         state.assert_confirmed_intake()
@@ -258,7 +258,7 @@ class CFDEngineeringAgent:
         self.workspace.adopt_seal(state.case_seal)
         self.safety.verify_seal(state.engineering_plan, state.case_seal)
         if state.mesh_evidence is not None and state.mesh_evidence.passed:
-            self._checkmesh_manifest = self.workspace.manifest_digest()
+            self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
 
         revision_id = f"rev-{len(state.revision_history) + 1:04d}"
         state.pending_revision_archive_path = self.workspace.archive_revision_outputs(revision_id)
@@ -521,8 +521,8 @@ class CFDEngineeringAgent:
             evidence is not None
             and evidence.passed
             and (evidence.cell_count is None or evidence.cell_count <= self.policy.max_mesh_cells)
-            and self._checkmesh_manifest is not None
-            and self._checkmesh_manifest == self.workspace.manifest_digest()
+            and self._checkmesh_mesh_manifest is not None
+            and self._checkmesh_mesh_manifest == self.workspace.mesh_manifest_digest()
         )
 
     def _run_finalization_window(
@@ -592,6 +592,17 @@ class CFDEngineeringAgent:
     ) -> RepairOutcome:
         if state.engineering_plan is None or state.case_seal is None:
             return RepairOutcome(False, reason="No approved engineering plan is available.")
+        try:
+            self.workspace.adopt_seal(state.case_seal)
+            self.safety.verify_seal(state.engineering_plan, state.case_seal)
+        except WorkspaceSafetyError as exc:
+            return RepairOutcome(False, reason=f"Approved case integrity verification failed: {exc}")
+        if state.mesh_evidence is not None and state.mesh_evidence.passed:
+            # The full case seal proves the runtime-repair workspace is still the exact
+            # case for which this persisted checkMesh evidence was approved. Restore
+            # freshness against the narrower mesh-only manifest so solver-input edits
+            # do not force redundant checkMesh runs.
+            self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
         approved_solver = state.engineering_plan.solver
         state.last_runtime_log_excerpt = runtime_log[-12000:]
         state.transition(
@@ -644,9 +655,9 @@ class CFDEngineeringAgent:
                         result.failures.append(
                             f"Mesh cell count {state.mesh_evidence.cell_count} exceeds bounded policy limit {self.policy.max_mesh_cells}."
                         )
-                    elif self._checkmesh_manifest != self.workspace.manifest_digest():
+                    elif self._checkmesh_mesh_manifest != self.workspace.mesh_manifest_digest():
                         result.failures.append(
-                            "Case inputs changed after checkMesh; re-run checkMesh before retry_solver."
+                            "Mesh-affecting inputs changed after checkMesh; re-run checkMesh before retry_solver."
                         )
                     result.valid = not result.failures
                 if result.valid:
@@ -740,9 +751,9 @@ class CFDEngineeringAgent:
                     validation.failures.append(
                         f"Mesh cell count {state.mesh_evidence.cell_count} exceeds bounded policy limit {self.policy.max_mesh_cells}."
                     )
-                elif self._checkmesh_manifest != self.workspace.manifest_digest():
+                elif self._checkmesh_mesh_manifest != self.workspace.mesh_manifest_digest():
                     validation.failures.append(
-                        "Case inputs changed after the last successful checkMesh; re-run checkMesh."
+                        "Mesh-affecting inputs changed after the last successful checkMesh; re-run checkMesh."
                     )
                 validation.valid = not validation.failures
             proposal = state.active_revision_proposal
@@ -1016,10 +1027,12 @@ class CFDEngineeringAgent:
                             False,
                             f"Mesh repair cycle budget exhausted ({self.policy.max_mesh_repair_cycles}); case edit was not applied.",
                         )
+                mesh_affecting = self.workspace.is_mesh_affecting_path(action.path)
                 digest = self.workspace.write_text(action.path, action.content)
-                self._checkmesh_manifest = None
-                if state is not None:
-                    state.mesh_evidence = None
+                if mesh_affecting:
+                    self._checkmesh_mesh_manifest = None
+                    if state is not None:
+                        state.mesh_evidence = None
                 return self._event(
                     step,
                     action.type,
@@ -1042,10 +1055,12 @@ class CFDEngineeringAgent:
                             False,
                             f"Mesh repair cycle budget exhausted ({self.policy.max_mesh_repair_cycles}); case delete was not applied.",
                         )
+                mesh_affecting = self.workspace.is_mesh_affecting_path(action.path)
                 self.workspace.delete(action.path)
-                self._checkmesh_manifest = None
-                if state is not None:
-                    state.mesh_evidence = None
+                if mesh_affecting:
+                    self._checkmesh_mesh_manifest = None
+                    if state is not None:
+                        state.mesh_evidence = None
                 return self._event(step, action.type, True, f"Deleted {action.path}.")
 
             if isinstance(action, ValidateDictionaryAction):
@@ -1147,7 +1162,7 @@ class CFDEngineeringAgent:
                         f"evidence {'passed' if evidence.passed else 'failed'}."
                     )
                     if evidence.passed:
-                        self._checkmesh_manifest = self.workspace.manifest_digest()
+                        self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
                 return self._event(
                     step,
                     action.type,
