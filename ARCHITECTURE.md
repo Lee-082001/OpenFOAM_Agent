@@ -171,3 +171,24 @@ The same bounded diagnostic becomes the next relevant Agent observation and is r
 ## Solve-readiness contract (v2.5.1)
 
 A mesh-valid case is not necessarily solver-ready. The CLI path now separates `MESH_READY`, `PRE_SOLVE_VALIDATION`, and `SOLVE_READY`. The Engineering Agent declares solver-specific required inputs in `EngineeringPlan.required_case_files`. The deterministic layer checks file presence, dictionary syntax, and boundary-patch coverage without selecting fields, boundary conditions, numerics, or solver implementation. Only `SOLVE_READY` is eligible for interactive `/solve` approval.
+
+## Local LLM provider boundary (v2.7.0)
+
+All reasoning providers implement the same `StructuredLLM.generate(schema, prompt, system_prompt=...)` protocol. `CFDWorkflow`, Intake, Engineering, Runtime repair, PostProcessing, and Review do not branch on OpenAI versus Ollama. Provider selection and client construction are confined to the CLI/backend layer.
+
+```text
+OpenFOAM Agent roles
+        |
+        +-- StructuredLLM protocol
+               |
+               +-- OpenAILLM -> OpenAI Responses API
+               |
+               +-- OllamaLLM -> http://localhost:11434/v1/chat/completions
+                                      |
+                                      +-- user-created SSH local tunnel
+                                      +-- mlfm4.knu.ac.kr:127.0.0.1:11434
+```
+
+The Ollama provider is not an Agent and does not acquire tool authority. All filesystem mutation, native OpenFOAM execution, evidence validation, safety gates, retries, and state transitions remain in the existing deterministic/agent orchestration layers.
+
+Ollama endpoint configuration is loopback-only by construction. A startup `/v1/models` probe verifies the tunnel/service and requested models before workflow execution. Provider failure is terminal for that backend invocation; there is no implicit OpenAI fallback.

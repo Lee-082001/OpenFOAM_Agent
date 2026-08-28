@@ -1,5 +1,11 @@
 # v2.4 Security and Trust Boundary
 
+## Local Ollama transport boundary (v2.7)
+
+The Ollama backend accepts only loopback base URLs (`localhost`, `127.0.0.1`, `::1`). The Agent never opens, binds, or exposes TCP port 11434 and never connects directly to `mlfm4.knu.ac.kr:11434`. The user establishes SSH local forwarding separately. `--base-url` exists for local tunnel/port customization, not for bypassing the loopback boundary.
+
+Ollama uses the OpenAI-compatible API with a dummy `ollama` key. Failure to reach `/v1/models`, absence of a requested model, or a later connection loss fails closed. No request is silently rerouted to the OpenAI cloud backend.
+
 ## Cloud disclosure boundary
 
 With `--backend openai --confirm-api-calls`, confirmed CFD task data, bounded tool observations, post-processing evidence, and human feedback/revision-review payloads are intentionally sent to the configured OpenAI model. API keys are never inserted into prompts; known local paths are redacted and `store=False` is used by default. Do not use the cloud backend for data that policy forbids leaving the host; a local model backend would be required for a zero-egress deployment.

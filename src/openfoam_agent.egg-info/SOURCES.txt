@@ -20,6 +20,7 @@ src/openfoam_agent/engineering/__init__.py
 src/openfoam_agent/engineering/agent.py
 src/openfoam_agent/llm/__init__.py
 src/openfoam_agent/llm/context.py
+src/openfoam_agent/llm/ollama_client.py
 src/openfoam_agent/llm/openai_client.py
 src/openfoam_agent/llm/protocol.py
 src/openfoam_agent/llm/routing.py
@@ -70,6 +71,7 @@ tests/test_v24_context_compaction.py
 tests/test_v250_native_failure_diagnostics.py
 tests/test_v251_presolve_completeness.py
 tests/test_v260_model_routing.py
+tests/test_v270_ollama_backend.py
 tests/test_v2_adversarial_integration.py
 tests/test_v2_architecture.py
 tests/test_v2_budgets.py

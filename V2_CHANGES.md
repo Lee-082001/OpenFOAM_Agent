@@ -1,3 +1,17 @@
+# v2.7.0
+
+## Local Ollama backend over SSH tunnel
+
+- Adds `--backend ollama` while preserving the existing OpenAI and offline rule-based intake backends.
+- Adds `OllamaLLM`, which implements the existing `StructuredLLM` protocol using Ollama's OpenAI-compatible `/v1/chat/completions` structured-output path; upper Agent/workflow code remains backend-agnostic.
+- Defaults to `http://localhost:11434/v1`, model `gemma4:31b`, and dummy API key `ollama`; supports `--model`/`OLLAMA_MODEL`, `--base-url`/`OLLAMA_BASE_URL`, and role-specific `OLLAMA_*_MODEL` overrides.
+- Enforces loopback-only Ollama URLs so the remote GPU server is reached only through user-managed SSH local port forwarding; direct `mlfm4.knu.ac.kr:11434` and `0.0.0.0` endpoints are rejected.
+- Adds a startup `/v1/models` health/model check with a clear SSH-tunnel diagnostic and no automatic fallback to OpenAI.
+- Runtime Ollama connection failures retain the same no-fallback behavior and surface a tunnel/service error.
+- Preserves v2.6 role routing: runtime repair and confirmed revision engineering continue to use the engineering model when the Ollama backend is selected.
+- Adds mock-HTTP health-check regressions plus structured-adapter, routing, loopback-security, connection-failure, and no-fallback tests.
+- Synchronizes package/module/report metadata at 2.7.0.
+
 # v2.6.0
 
 ## Role-based model routing

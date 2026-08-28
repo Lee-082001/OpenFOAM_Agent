@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.4
+# OpenFOAM Agent v2.7
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -24,6 +24,8 @@ Natural-language request
        - read real failure logs and iterate
   -> deterministic safety + integrity gate
   -> MESH_READY
+  -> deterministic pre-solve completeness gate
+  -> SOLVE_READY
   -> user /solve
   -> foamRun
        - failure log -> same CFDEngineeringAgent -> bounded repair/retry
@@ -122,6 +124,54 @@ openfoam-agent --interactive \
   --confirm-api-calls
 ```
 
+### Local Ollama backend over SSH tunnel (v2.7.0)
+
+The Agent can use an Ollama model through the same `StructuredLLM` boundary without changing intake, engineering, validation, OpenFOAM execution, repair, post-processing, or review orchestration. Ollama is only the text/reasoning backend.
+
+For the school GPU server, keep Ollama bound to server loopback and create the SSH tunnel from the local PC/WSL:
+
+```bash
+ssh -fN -L 11434:127.0.0.1:11434 oslee@mlfm4.knu.ac.kr
+```
+
+Then run the Agent locally:
+
+```bash
+openfoam-agent --interactive \
+  --backend ollama \
+  --model gemma4:31b
+```
+
+Ollama defaults are:
+
+```text
+base_url = http://localhost:11434/v1
+model    = gemma4:31b
+api_key  = ollama  # OpenAI-compatible dummy value
+```
+
+`--base-url` and `OLLAMA_BASE_URL` can override the endpoint, but the Agent accepts only loopback hosts (`localhost`, `127.0.0.1`, `::1`). Direct URLs such as `http://mlfm4.knu.ac.kr:11434/v1` or `0.0.0.0` are rejected so the remote Ollama service stays behind SSH local forwarding.
+
+At startup the Ollama backend calls `/v1/models` through the tunnel, verifies connectivity and the requested role models, and fails without any OpenAI fallback if the tunnel/service/model is unavailable. A typical connection error is:
+
+```text
+Cannot connect to Ollama at http://localhost:11434. Check that the SSH tunnel to mlfm4.knu.ac.kr and the Ollama service are running.
+```
+
+Configuration is available through:
+
+```text
+--model / OLLAMA_MODEL
+--base-url / OLLAMA_BASE_URL
+OLLAMA_API_KEY (optional; defaults to ollama)
+--intake-model / OLLAMA_INTAKE_MODEL
+--engineering-model / OLLAMA_ENGINEERING_MODEL
+--postprocess-model / OLLAMA_POSTPROCESS_MODEL
+--review-model / OLLAMA_REVIEW_MODEL
+```
+
+The Ollama adapter reuses the installed OpenAI Python SDK against the OpenAI-compatible `/v1/chat/completions` endpoint and requests Pydantic structured output. `--confirm-api-calls` is intentionally not required for `--backend ollama` because requests stay on local loopback and traverse the user-created SSH tunnel; that flag remains mandatory for the cloud OpenAI backend.
+
 ### Role-based model routing (v2.6.0)
 
 `--model` remains the backward-compatible default for every cloud role. Individual roles can override it without changing the workflow or safety gates:
@@ -183,7 +233,7 @@ Useful commands:
 /exit
 ```
 
-The first `/confirm` approves the immutable intake and bounded case/mesh preparation. It does **not** authorize the solver. `/solve` is a separate authority gate and is accepted only for a sealed `MESH_READY` case. After results are produced, `/feedback` records a human observation without mutating the case; the Review Agent produces an auditable revision proposal. A second `/confirm` is required before that proposal can modify the sealed case, and the revised case requires a fresh `/solve`. `/reject` discards the active proposal and returns to the unchanged mesh/result review state. Rejected proposals remain in audit history. `/accept` is the only transition from `RESULT_REVIEW_REQUIRED` to `COMPLETE`.
+The first `/confirm` approves the immutable intake and bounded case/mesh preparation. It does **not** authorize the solver. `/solve` is a separate authority gate and is accepted only for a sealed `SOLVE_READY` case. After results are produced, `/feedback` records a human observation without mutating the case; the Review Agent produces an auditable revision proposal. A second `/confirm` is required before that proposal can modify the sealed case, and the revised case requires a fresh `/solve`. `/reject` discards the active proposal and returns to the unchanged mesh/result review state. Rejected proposals remain in audit history. `/accept` is the only transition from `RESULT_REVIEW_REQUIRED` to `COMPLETE`.
 
 ### Live progress after `/confirm` and `/solve` (v2.3)
 

@@ -12,7 +12,18 @@ from typing import Any, Sequence
 
 from openfoam_agent.conversation import ConversationSession, InteractionMode
 from openfoam_agent.engineering import EngineeringPolicy
-from openfoam_agent.llm import LLMConfigurationError, OpenAILLM, RuleBasedLLM, WorkflowLLMs
+from openfoam_agent.llm import (
+    DEFAULT_OLLAMA_API_KEY,
+    DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_OLLAMA_MODEL,
+    LLMConfigurationError,
+    OllamaLLM,
+    OpenAILLM,
+    RuleBasedLLM,
+    WorkflowLLMs,
+    check_ollama_health,
+    normalize_ollama_base_url,
+)
 from openfoam_agent.postprocessing import PostProcessingPolicy
 from openfoam_agent.progress import CLIProgressReporter, ProgressLevel, ProgressReporter
 from openfoam_agent.schemas.intake import CFDIntakeSpec
@@ -85,45 +96,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=("rule-based-intake", "openai"),
+        choices=("rule-based-intake", "openai", "ollama"),
         default="rule-based-intake",
         help=(
             "rule-based-intake is an offline intake regression baseline only; "
-            "autonomous engineering requires --backend openai."
+            "autonomous engineering supports --backend openai or --backend ollama."
         ),
     )
     parser.add_argument(
         "--model",
         help=(
-            "Default OpenAI model for every role; otherwise use OPENAI_MODEL. "
-            "Role-specific model flags override this default."
+            "Default model for every role. OpenAI otherwise uses OPENAI_MODEL; "
+            "Ollama otherwise uses OLLAMA_MODEL or gemma4:31b. Role-specific flags override it."
         ),
     )
     parser.add_argument(
         "--intake-model",
-        help="Override the model used for intake analysis (or OPENAI_INTAKE_MODEL).",
+        help="Override the model used for intake analysis for the selected backend.",
     )
     parser.add_argument(
         "--engineering-model",
         help=(
             "Override the model used for engineering, mesh/case repair, runtime repair, "
-            "and confirmed revisions (or OPENAI_ENGINEERING_MODEL)."
+            "and confirmed revisions for the selected backend."
         ),
     )
     parser.add_argument(
         "--postprocess-model",
-        help="Override the model used for post-processing (or OPENAI_POSTPROCESS_MODEL).",
+        help="Override the model used for post-processing for the selected backend.",
     )
     parser.add_argument(
         "--review-model",
-        help="Override the model used for human-feedback review (or OPENAI_REVIEW_MODEL).",
+        help="Override the model used for human-feedback review for the selected backend.",
     )
     parser.add_argument(
         "--llm-max-output-tokens",
         type=int,
         default=16_000,
         help=(
-            "Per-response OpenAI output-token cap (default: 16000). "
+            "Per-response LLM output-token cap (default: 16000). "
             "This bounds rate-limit reservation and prevents one structured action "
             "from reserving the model's full output window."
         ),
@@ -134,6 +145,20 @@ def build_parser() -> argparse.ArgumentParser:
         help=("Explicitly authorize cloud model calls. The CFD request and bounded "
               "engineering observations/log excerpts are sent to OpenAI; local absolute paths "
               "are redacted and store=False is used by default."),
+    )
+    parser.add_argument(
+        "--base-url",
+        help=(
+            "Ollama OpenAI-compatible base URL. Defaults to OLLAMA_BASE_URL or "
+            "http://localhost:11434/v1. Only loopback URLs are accepted so remote Ollama "
+            "stays behind SSH local port forwarding."
+        ),
+    )
+    parser.add_argument(
+        "--ollama-health-timeout",
+        type=float,
+        default=3.0,
+        help="Startup Ollama /v1/models health-check timeout in seconds (default: 3).",
     )
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     parser.add_argument("--capability-db", type=Path, default=DEFAULT_CAPABILITY_DB)
@@ -248,19 +273,37 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         invalid_model_flags = [flag for flag, value in role_model_flags.items() if value]
         if invalid_model_flags:
             parser.error(
-                f"{', '.join(invalid_model_flags)} are only valid with --backend openai."
+                f"{', '.join(invalid_model_flags)} require --backend openai or --backend ollama."
             )
+        if args.base_url:
+            parser.error("--base-url is only valid with --backend ollama.")
         if args.confirm_api_calls:
             parser.error("--confirm-api-calls is only valid with --backend openai.")
         if args.confirm_intake:
             parser.error(
                 "Autonomous engineering has no rule-based template fallback. "
-                "Use --backend openai --confirm-api-calls when confirming intake."
+                "Use --backend openai --confirm-api-calls or --backend ollama."
             )
-    elif not args.confirm_api_calls:
-        parser.error("--backend openai requires --confirm-api-calls.")
+    elif args.backend == "openai":
+        if args.base_url:
+            parser.error("--base-url is only valid with --backend ollama.")
+        if not args.confirm_api_calls:
+            parser.error("--backend openai requires --confirm-api-calls.")
+    elif args.backend == "ollama":
+        if args.confirm_api_calls:
+            parser.error(
+                "--confirm-api-calls is only for the cloud OpenAI backend and is not used by Ollama."
+            )
+        try:
+            normalize_ollama_base_url(
+                args.base_url or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+            )
+        except LLMConfigurationError as exc:
+            parser.error(str(exc))
     if args.llm_max_output_tokens < 1:
         parser.error("--llm-max-output-tokens must be >= 1.")
+    if args.ollama_health_timeout <= 0:
+        parser.error("--ollama-health-timeout must be > 0.")
     positive_budget_fields = {
         "--engineering-steps": args.engineering_steps,
         "--engineering-hard-cap": args.engineering_hard_cap,
@@ -288,11 +331,63 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
 
 
 _ROLE_MODEL_ENV = {
-    "intake": "OPENAI_INTAKE_MODEL",
-    "engineering": "OPENAI_ENGINEERING_MODEL",
-    "postprocessing": "OPENAI_POSTPROCESS_MODEL",
-    "review": "OPENAI_REVIEW_MODEL",
+    "openai": {
+        "intake": "OPENAI_INTAKE_MODEL",
+        "engineering": "OPENAI_ENGINEERING_MODEL",
+        "postprocessing": "OPENAI_POSTPROCESS_MODEL",
+        "review": "OPENAI_REVIEW_MODEL",
+    },
+    "ollama": {
+        "intake": "OLLAMA_INTAKE_MODEL",
+        "engineering": "OLLAMA_ENGINEERING_MODEL",
+        "postprocessing": "OLLAMA_POSTPROCESS_MODEL",
+        "review": "OLLAMA_REVIEW_MODEL",
+    },
 }
+
+
+def _cleaned(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _resolve_backend_model_names(
+    args: argparse.Namespace,
+    *,
+    backend: str,
+    environ: dict[str, str] | None = None,
+) -> tuple[str | None, dict[str, str]]:
+    env = os.environ if environ is None else environ
+    if backend not in {"openai", "ollama"}:
+        raise LLMConfigurationError(f"Unsupported model backend: {backend}")
+
+    default_env = "OPENAI_MODEL" if backend == "openai" else "OLLAMA_MODEL"
+    built_in_default = None if backend == "openai" else DEFAULT_OLLAMA_MODEL
+    default_model = _cleaned(args.model) or _cleaned(env.get(default_env)) or built_in_default
+    cli_overrides = {
+        "intake": _cleaned(args.intake_model),
+        "engineering": _cleaned(args.engineering_model),
+        "postprocessing": _cleaned(args.postprocess_model),
+        "review": _cleaned(args.review_model),
+    }
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for role, env_name in _ROLE_MODEL_ENV[backend].items():
+        model_name = cli_overrides[role] or _cleaned(env.get(env_name)) or default_model
+        if model_name is None:
+            missing.append(role)
+        else:
+            resolved[role] = model_name
+    if missing:
+        roles = ", ".join(missing)
+        prefix = "OPENAI" if backend == "openai" else "OLLAMA"
+        raise LLMConfigurationError(
+            f"No {backend} model is configured for role(s): {roles}. "
+            f"Set --model/{prefix}_MODEL or provide every missing role override."
+        )
+    return default_model, resolved
 
 
 def _resolve_openai_model_names(
@@ -300,60 +395,71 @@ def _resolve_openai_model_names(
     *,
     environ: dict[str, str] | None = None,
 ) -> tuple[str | None, dict[str, str]]:
-    env = os.environ if environ is None else environ
+    return _resolve_backend_model_names(args, backend="openai", environ=environ)
 
-    def cleaned(value: str | None) -> str | None:
-        if value is None:
-            return None
-        value = value.strip()
-        return value or None
 
-    default_model = cleaned(args.model) or cleaned(env.get("OPENAI_MODEL"))
-    cli_overrides = {
-        "intake": cleaned(args.intake_model),
-        "engineering": cleaned(args.engineering_model),
-        "postprocessing": cleaned(args.postprocess_model),
-        "review": cleaned(args.review_model),
-    }
-    resolved: dict[str, str] = {}
-    missing: list[str] = []
-    for role, env_name in _ROLE_MODEL_ENV.items():
-        model_name = cli_overrides[role] or cleaned(env.get(env_name)) or default_model
-        if model_name is None:
-            missing.append(role)
-        else:
-            resolved[role] = model_name
-    if missing:
-        roles = ", ".join(missing)
-        raise LLMConfigurationError(
-            "No OpenAI model is configured for role(s): "
-            f"{roles}. Set --model/OPENAI_MODEL or provide every missing role override."
-        )
-    return default_model, resolved
+def _resolve_ollama_model_names(
+    args: argparse.Namespace,
+    *,
+    environ: dict[str, str] | None = None,
+) -> tuple[str | None, dict[str, str]]:
+    return _resolve_backend_model_names(args, backend="ollama", environ=environ)
 
 
 def _build_llm(args: argparse.Namespace):
     if args.backend == "rule-based-intake":
         return WorkflowLLMs.uniform(RuleBasedLLM()), "rule-based-intake", None
 
-    default_model, names = _resolve_openai_model_names(args)
-    clients: dict[str, OpenAILLM] = {}
+    if args.backend == "openai":
+        default_model, names = _resolve_openai_model_names(args)
+        clients: dict[str, OpenAILLM] = {}
 
-    def client(model_name: str) -> OpenAILLM:
+        def client(model_name: str) -> OpenAILLM:
+            if model_name not in clients:
+                clients[model_name] = OpenAILLM(
+                    model=model_name,
+                    max_output_tokens=args.llm_max_output_tokens,
+                )
+            return clients[model_name]
+
+        llms = WorkflowLLMs(
+            intake=client(names["intake"]),
+            engineering=client(names["engineering"]),
+            postprocessing=client(names["postprocessing"]),
+            review=client(names["review"]),
+        )
+        return llms, "openai", default_model
+
+    default_model, names = _resolve_ollama_model_names(args)
+    base_url = normalize_ollama_base_url(
+        args.base_url or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+    )
+    api_key = os.getenv("OLLAMA_API_KEY", DEFAULT_OLLAMA_API_KEY) or DEFAULT_OLLAMA_API_KEY
+    check_ollama_health(
+        base_url=base_url,
+        models=tuple(names.values()),
+        api_key=api_key,
+        timeout=args.ollama_health_timeout,
+    )
+    clients: dict[str, OllamaLLM] = {}
+
+    def ollama_client(model_name: str) -> OllamaLLM:
         if model_name not in clients:
-            clients[model_name] = OpenAILLM(
+            clients[model_name] = OllamaLLM(
                 model=model_name,
+                base_url=base_url,
+                api_key=api_key,
                 max_output_tokens=args.llm_max_output_tokens,
             )
         return clients[model_name]
 
     llms = WorkflowLLMs(
-        intake=client(names["intake"]),
-        engineering=client(names["engineering"]),
-        postprocessing=client(names["postprocessing"]),
-        review=client(names["review"]),
+        intake=ollama_client(names["intake"]),
+        engineering=ollama_client(names["engineering"]),
+        postprocessing=ollama_client(names["postprocessing"]),
+        review=ollama_client(names["review"]),
     )
-    return llms, "openai", default_model
+    return llms, "ollama", default_model
 
 
 def _model_routes(llm: Any) -> dict[str, str | None]:
@@ -394,7 +500,7 @@ def build_report(
     model_routes: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     return {
-        "architecture": "v2.6",
+        "architecture": "v2.7",
         "run_id": state.run_id,
         "prompt": request.prompt,
         "conversation_turns": list(request.conversation_turns),
@@ -640,7 +746,7 @@ def _print_human_report(report: dict[str, Any]) -> None:
     if report["message"]:
         print(f"message: {report['message']}")
     if report["final_state"] == State.INTAKE_REVIEW_REQUIRED.value:
-        print("next: /confirm in interactive mode, or --confirm-intake with --backend openai")
+        print("next: /confirm in interactive mode, or --confirm-intake with --backend openai/ollama")
     if report["final_state"] == State.SOLVE_READY.value:
         print("next: /solve to approve foamRun, or /feedback <observation> to revise the mesh/case")
     elif report["final_state"] == State.MESH_READY.value:
@@ -812,8 +918,8 @@ def _confirm_session(session, args, llm, backend, model) -> None:
     if intake.status != "ready_for_review":
         print("blocking 질문에 답변한 뒤 확정할 수 있습니다.")
         return
-    if backend != "openai":
-        print("v2 autonomous engineering requires --backend openai --confirm-api-calls.")
+    if backend not in {"openai", "ollama"}:
+        print("v2 autonomous engineering requires --backend openai or --backend ollama.")
         return
     attempt = session.next_attempt()
     engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
@@ -848,8 +954,8 @@ def _feedback_session(session, args, llm, backend, model, feedback_text: str) ->
     if state is None or state.current_state not in {State.MESH_READY, State.RESULT_REVIEW_REQUIRED}:
         print("/feedback은 MESH_READY 또는 RESULT_REVIEW_REQUIRED에서 사용할 수 있습니다.")
         return
-    if backend != "openai":
-        print("human-feedback diagnosis requires --backend openai --confirm-api-calls.")
+    if backend not in {"openai", "ollama"}:
+        print("human-feedback diagnosis requires --backend openai or --backend ollama.")
         return
     text = feedback_text.strip()
     if not text:
@@ -901,8 +1007,8 @@ def _confirm_revision_session(session, args, llm, backend, model) -> None:
     if state is None or state.current_state != State.REVISION_READY:
         print("확정할 human-feedback revision proposal이 없습니다.")
         return
-    if backend != "openai":
-        print("v2.4 autonomous revision requires --backend openai --confirm-api-calls.")
+    if backend not in {"openai", "ollama"}:
+        print("autonomous revision requires --backend openai or --backend ollama.")
         return
     if state.case_dir is None:
         print("수정할 sealed case directory가 없습니다.")
@@ -1148,7 +1254,7 @@ def _handle_command(command, session, args, llm, backend, model) -> bool:
 
 def _interactive(args, llm, backend, model) -> int:
     session = ConversationSession(mode=InteractionMode(args.mode))
-    print(f"OpenFOAM Agent v2.6 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
+    print(f"OpenFOAM Agent v2.7 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
     if backend == "openai":
         routes = _model_routes(llm)
         print(
@@ -1158,6 +1264,16 @@ def _interactive(args, llm, backend, model) -> int:
             "runtime-repair/revision use the engineering model. "
             "Cloud agent API calls authorized (task data/tool observations are transmitted; "
             "local paths are redacted)."
+        )
+    elif backend == "ollama":
+        routes = _model_routes(llm)
+        base_url = getattr(WorkflowLLMs.coerce(llm).intake, "base_url", DEFAULT_OLLAMA_BASE_URL)
+        print(
+            "Ollama local model routing: "
+            f"intake={routes['intake']}, engineering={routes['engineering']}, "
+            f"postprocess={routes['postprocessing']}, review={routes['review']}; "
+            f"base_url={base_url}; runtime-repair/revision use the engineering model. "
+            "No OpenAI fallback is enabled; the endpoint must be reachable through the SSH tunnel."
         )
     while True:
         try:
