@@ -1,0 +1,171 @@
+{
+  "schema_version": "1.0",
+  "graph_id": "openfoam-foundation-v14",
+  "openfoam_distribution": "foundation",
+  "openfoam_version": "14",
+  "providers": [
+    {
+      "id": "toolkit.finiteVolume",
+      "name": "finiteVolume",
+      "provider_type": "toolkit",
+      "capabilities": [
+        "operator.ddt.scalar",
+        "operator.div.scalar",
+        "operator.grad.scalar",
+        "operator.laplacian.scalar",
+        "operator.sp.scalar",
+        "operator.ddt.vector",
+        "operator.div.vector",
+        "operator.laplacian.vector",
+        "operator.ddt.tensor",
+        "operator.div.tensor",
+        "operator.laplacian.tensor"
+      ],
+      "openfoam_version": "14",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v14/namespaceFoam_1_1fvm.html",
+          "note": "OpenFOAM v14 implicit finite-volume operator namespace."
+        }
+      ]
+    },
+    {
+      "id": "model.momentumTransport",
+      "name": "OpenFOAM momentum transport models",
+      "provider_type": "model",
+      "capabilities": [
+        "model.turbulence.laminar",
+        "model.turbulence.rans",
+        "model.turbulence.les",
+        "model.turbulence.dns"
+      ],
+      "openfoam_version": "14",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v14/models",
+          "note": "OpenFOAM v14 models and turbulence-model documentation."
+        }
+      ]
+    },
+    {
+      "id": "model.rheology",
+      "name": "OpenFOAM transport and rheology models",
+      "provider_type": "model",
+      "capabilities": [
+        "constitutive.viscosity.non_newtonian"
+      ],
+      "openfoam_version": "14",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v14/transport-rheology",
+          "note": "OpenFOAM v14 generalized-Newtonian and visco-elastic models."
+        }
+      ]
+    },
+    {
+      "id": "model.MRFZone",
+      "name": "MRFZone",
+      "provider_type": "model",
+      "capabilities": [
+        "model.frame.rotating"
+      ],
+      "openfoam_version": "14",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v14/MRFZone_8C_source.html",
+          "note": "OpenFOAM v14 multiple-reference-frame implementation."
+        }
+      ]
+    },
+    {
+      "id": "solver.incompressibleFluid",
+      "name": "incompressibleFluid",
+      "provider_type": "solver",
+      "capabilities": [
+        "flow.continuity.incompressible",
+        "flow.momentum.incompressible",
+        "algorithm.pressure_velocity",
+        "algorithm.mesh_motion",
+        "time.steady",
+        "time.transient"
+      ],
+      "openfoam_version": "14",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v14/incompressibleFluid_8C_source.html",
+          "note": "OpenFOAM v14 run-time selectable incompressibleFluid module."
+        },
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v14/incompressibleFluid_8H_source.html",
+          "note": "Class contract for PIMPLE control, public phi, and postSolve extension."
+        },
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v14/solvers-modules",
+          "note": "Documents steady/transient flow and optional mesh motion/change."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.fluid",
+      "name": "fluid",
+      "provider_type": "solver",
+      "capabilities": [
+        "flow.continuity.compressible",
+        "flow.momentum.compressible",
+        "equation.energy.temperature",
+        "algorithm.pressure_velocity",
+        "algorithm.mesh_motion",
+        "time.steady",
+        "time.transient"
+      ],
+      "openfoam_version": "14",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v14/fluid_8C_source.html",
+          "note": "OpenFOAM v14 run-time selectable compressible fluid module."
+        },
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v14/solvers-modules",
+          "note": "Documents compressible flow with heat transfer and optional mesh motion/change."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    }
+  ]
+}

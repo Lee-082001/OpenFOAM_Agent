@@ -1,0 +1,380 @@
+Metadata-Version: 2.4
+Name: openfoam-agent
+Version: 2.3.1
+Summary: Agent-owned OpenFOAM CFD engineering behind deterministic safety gates
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: openai<3,>=2
+Requires-Dist: pydantic<3,>=2.8
+Provides-Extra: dev
+Requires-Dist: pytest<10,>=8; extra == "dev"
+
+# OpenFOAM Agent v2.3
+
+OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
+
+The central design rule is:
+
+> The agent chooses and designs. Python validates authority, safety, integrity, bounded execution, and evidence.
+
+v2 is intentionally not a collection of hand-written CFD case templates. There is no production rule such as `if vortex shedding -> square obstacle template`, `if static -> snappyHexMesh`, or `if prescribed deformation -> displacementLaplacian`.
+
+## Architecture
+
+```text
+Natural-language request
+  -> Intake Agent
+  -> user /confirm
+  -> CFDEngineeringAgent
+       - inspect installed OpenFOAM environment
+       - query capability evidence
+       - search installed official tutorials/source
+       - choose solver / mesh / BC / numerics / motion strategy
+       - write and patch case files
+       - run allowlisted OpenFOAM validation and mesh tools
+       - read real failure logs and iterate
+  -> deterministic safety + integrity gate
+  -> MESH_READY
+  -> user /solve
+  -> foamRun
+       - failure log -> same CFDEngineeringAgent -> bounded repair/retry
+  -> runtime evidence
+  -> CFDPostProcessingAgent
+       - choose evidence-driven post-processing strategy
+       - author isolated postprocessConfig dictionaries
+       - run trusted foamPostProcess
+       - inspect native time/postProcessing outputs
+       - compute Cd/Cl/f/St from deterministic parsers when evidence exists
+       - record advisory scientific-confidence/review focus
+  -> RESULT_REVIEW_REQUIRED
+       - /accept -> COMPLETE
+       - /feedback <observation> -> Review Agent -> REVISION_READY
+             - /confirm -> CFDEngineeringAgent revision -> MESH_READY -> /solve
+```
+
+### Agent-owned decisions
+
+The engineering agent owns:
+
+- steady/transient interpretation;
+- solver selection;
+- mesh strategy and geometry simplification;
+- boundary conditions;
+- properties and normalization;
+- time step and numerical schemes;
+- dynamic-mesh implementation;
+- OpenFOAM error diagnosis and repair;
+- post-processing strategy.
+
+The semantic fields `temporal_behavior`, `motion_kind`, and `mesh_motion_requirement` remain as auditable common language. They do **not** trigger a Python implementation recipe.
+
+### Deterministic responsibilities
+
+Python owns only bounded execution and evidence boundaries:
+
+- allowlisted OpenFOAM commands;
+- workspace/path sandboxing;
+- executable OpenFOAM directive and arbitrary code blocking;
+- confirmed-user-fact provenance;
+- solver identity consistency between `EngineeringPlan` and `system/controlDict`;
+- native `foamDictionary`, `surfaceCheck`, and `checkMesh` evidence;
+- SHA-256 sealing of every pre-solve execution input under `0/`, `constant/`, and `system/`, including native-generated mesh files;
+- agent-step, solver-attempt, command-timeout, file-size, and mesh-cell limits;
+- explicit `/confirm`, `/solve`, human `/feedback`, and `/accept` authority/review gates.
+
+## What was removed in v2
+
+The old production architecture was deleted rather than retained as a second hidden planning path. Removed components include:
+
+- rule-based case templates and `case_factory`;
+- deterministic requirement -> physics -> equation -> solver routing chain;
+- `CapabilityGapPlanner` as a solver decision-maker;
+- deterministic runtime `deltaT` repair planner;
+- solver source-generation factory and verified-registry path from the v0.x prototype;
+- motion-specific Foundation case contracts such as fixed `displacementLaplacian` or BC requirements;
+- Phase-specific evaluation code and tests that asserted those old decisions.
+
+The capability graph remains, but only as **read-only evidence available to the agent**.
+
+## Installation
+
+Python 3.12+ is required.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+pytest -q
+```
+
+For native execution, source an installed OpenFOAM Foundation environment first. The bundled capability graph is Foundation v14; a different version can use `--capability-db` with a version-matched graph. The engineering agent can also search the installed `FOAM_TUTORIALS`, `FOAM_SRC`, and `FOAM_ETC` trees directly.
+
+## CLI
+
+### 1. Intake only, offline
+
+The rule-based backend exists only as an offline intake regression baseline. It cannot generate a case.
+
+```bash
+openfoam-agent \
+  "사각형 장애물 주위 vortex shedding Re=1000 나머지는 탐색용으로 정해줘"
+```
+
+This stops at `INTAKE_REVIEW_REQUIRED`.
+
+### 2. Autonomous engineering with OpenAI
+
+```bash
+export OPENAI_API_KEY="..."
+export OPENAI_MODEL="..."
+
+openfoam-agent --interactive \
+  --backend openai \
+  --confirm-api-calls
+```
+
+Typical interactive flow:
+
+```text
+OpenFOAM Agent> 사각형 장애물 주위 vortex shedding Re=1000 나머지는 탐색용으로 정해줘
+... intake review ...
+OpenFOAM Agent> /confirm
+... agent designs/writes/meshes/repairs until MESH_READY ...
+OpenFOAM Agent> /solve
+... bounded foamRun; failures are returned to the same engineering agent ...
+... on success, bounded post-processing runs automatically ...
+... RESULT_REVIEW_REQUIRED with artifacts, metrics and agent review focus ...
+OpenFOAM Agent> /feedback 후류가 너무 대칭이고 vortex shedding이 이상해 보여
+... diagnosis hypotheses + revision proposal; sealed case remains unchanged ...
+OpenFOAM Agent> /confirm
+... confirmed revision is applied, revalidated and resealed ...
+# or use /reject while REVISION_READY to keep the current sealed case unchanged
+OpenFOAM Agent> /solve
+... revised run/post-processing ...
+OpenFOAM Agent> /accept
+... COMPLETE ...
+```
+
+Useful commands:
+
+```text
+/show
+/details
+/confirm
+/solve
+/feedback <mesh/result observation>
+/accept
+/reject
+/set <fact>=<value>
+/edit <text>
+/undo
+/run
+/mode easy|guided|strict
+/new
+/exit
+```
+
+The first `/confirm` approves the immutable intake and bounded case/mesh preparation. It does **not** authorize the solver. `/solve` is a separate authority gate and is accepted only for a sealed `MESH_READY` case. After results are produced, `/feedback` records a human observation without mutating the case; the Review Agent produces an auditable revision proposal. A second `/confirm` is required before that proposal can modify the sealed case, and the revised case requires a fresh `/solve`. `/reject` discards the active proposal and returns to the unchanged mesh/result review state. Rejected proposals remain in audit history. `/accept` is the only transition from `RESULT_REVIEW_REQUIRED` to `COMPLETE`.
+
+### Live progress after `/confirm` and `/solve` (v2.3)
+
+v2.3 adds an observational `ProgressEvent` bus shared by engineering, runtime repair, post-processing, and human-feedback review. The default CLI mode is `--progress normal`, so a long `/confirm` no longer appears frozen while the Agent is working. Only observable workflow/tool facts are rendered; model rationale or private chain-of-thought is never printed.
+
+```text
+OpenFOAM Agent> /confirm
+[ENGINEERING] 확정된 CFD 정의로 autonomous engineering 시작
+[ENGINEERING 01/120] capability graph 조회: incompressibleFluid
+[ENGINEERING 01/120] OK Capability search returned 1 provider(s).
+[ENGINEERING 07/120] case 파일 작성: system/controlDict
+[ENGINEERING 07/120] OK Wrote system/controlDict.
+[ENGINEERING 18/120] mesh command 실행: checkMesh
+[ENGINEERING 18/120] OK checkMesh returned status 0; evidence passed.
+  cells=23760, maxNonOrtho=0, maxSkew=2.84e-13
+[ENGINEERING 19/120] engineering plan 최종 검증 및 case seal
+[ENGINEERING 19/120] OK Engineering plan accepted and case sealed.
+```
+
+`/solve` uses the same event bus. In `normal` mode, raw solver output is retained in log files while the terminal receives bounded live summaries of `Time`, Courant number, attempts, repair transitions, and post-processing actions. `verbose` additionally shows every Agent read/list action and raw `foamRun` stdout. Progress is written to stderr so `--json` stdout remains valid JSON.
+
+```bash
+# recommended default
+openfoam-agent --interactive --backend openai --confirm-api-calls --progress normal
+
+# no live progress
+openfoam-agent --interactive --backend openai --confirm-api-calls --progress quiet
+
+# every Agent action + raw foamRun output
+openfoam-agent --interactive --backend openai --confirm-api-calls --progress verbose
+```
+
+### 3. One-shot preview without native OpenFOAM commands
+
+```bash
+openfoam-agent \
+  "사각형 장애물 주위 vortex shedding Re=1000 나머지는 탐색용으로 정해줘" \
+  --backend openai \
+  --confirm-api-calls \
+  --confirm-intake \
+  --dry-run
+```
+
+The agent may author files, but `foamDictionary`, mesh utilities, and `foamRun` are not executed. The terminal state is `CASE_PREVIEW_READY`, not `MESH_READY`.
+
+### 4. One-shot native preparation and solve
+
+```bash
+openfoam-agent \
+  "사각형 장애물 주위 vortex shedding Re=1000 나머지는 탐색용으로 정해줘" \
+  --backend openai \
+  --confirm-api-calls \
+  --confirm-intake \
+  --solve
+```
+
+`--solve` requires `--confirm-intake` and cannot be combined with `--dry-run`.
+
+## Automatic post-processing and human review (v2.2)
+
+After a successful `foamRun`, v2.2 automatically hands the immutable solved case to `CFDPostProcessingAgent` unless `--skip-postprocess` is set. The post-processing agent decides what analysis is useful for the problem and can search installed OpenFOAM references, author isolated dictionaries under `postprocessConfig/`, run `foamPostProcess`, inspect native output files, and finish with an evidence-bound report.
+
+For wake/vortex-shedding cases, the agent may choose vorticity and force-coefficient analysis. When a native `coefficient.dat` and the executed force-coefficient dictionary are available, deterministic Python computes mean Cd, mean/RMS Cl, a Cl-based shedding frequency, and Strouhal number. The LLM cannot invent these numerical metrics; each analysis is bound to SHA-256 hashes of both the coefficient file and the reference-scale dictionary. If there are too few cycles or the signal is not stable enough, the report keeps explicit limitations instead of claiming scientific validation.
+
+Typical successful terminal output includes:
+
+```text
+runtime: success=True, attempts=1, lastTime=20.0, maxCo=...
+postprocess: success=True, actions=..., native=...
+forces: samples=..., meanCd=..., rmsCl=..., f=..., St=...
+artifacts:
+- 20/vorticity
+- postProcessing/.../coefficient.dat
+visualize: cd <case_dir> && paraFoam
+```
+
+Post-processing failure does **not** rewrite a successful solver run as a solver failure. Runtime success remains preserved and the post-processing report records its own limitations. The post-processing Agent may also provide an explicitly advisory `scientific_confidence`, reasons, and recommended human checks; those fields are never treated as deterministic proof. Whether post-processing succeeds or is partial, a successful solve ends at `RESULT_REVIEW_REQUIRED`, not `COMPLETE`. Use `--skip-postprocess` when only bounded execution is wanted; human review is still required.
+
+### Human feedback and revision provenance
+
+`/feedback <text>` is accepted at `MESH_READY` or `RESULT_REVIEW_REQUIRED`. The text is stored separately from the confirmed intake as `HumanFeedback` with its run/scope/evidence snapshot hash. The Review Agent can propose likely causes and changes, but cannot edit files or run OpenFOAM. The proposal is bound to the exact current EngineeringPlan digest and case-manifest digest.
+
+If the feedback changes a confirmed user fact (for example `Re=1000 -> Re=500`), the Review Agent must route back to intake review instead of silently changing the case. Otherwise the proposal stops at `REVISION_READY`; only `/confirm` authorizes a new engineering round. A required case revision cannot finalize with an unchanged solver-input manifest. The accepted revision records added/removed/modified file hashes in `RevisionRecord`.
+
+Before the revised run, the exact pre-revision `0/constant/system` inputs are copied to `revision-history/rev-XXXX/baseline_inputs/`, while old numeric time directories, `postProcessing/`, post-process configuration and tool logs are moved into the same private revision archive. This prevents stale outputs from being mixed with the new run while preserving both the original inputs and prior results for audit/rollback/comparison. Previous engineering events remain as provenance, but each human-confirmed revision receives a fresh bounded engineering/native/mesh-repair budget.
+
+## Agent tools
+
+The engineering agent receives bounded actions for:
+
+- environment inspection;
+- capability search;
+- installed OpenFOAM reference search/read;
+- case file list/read/write/delete;
+- `foamDictionary` validation;
+- `surfaceCheck`;
+- `blockMesh`, `surfaceFeatureExtract`, `snappyHexMesh`, `createPatch`, `checkMesh`;
+- final preview sealing;
+- same-solver runtime retry or review-required blocking.
+
+After runtime success, the post-processing agent separately receives bounded actions for:
+
+- installed OpenFOAM post-processing reference search/read;
+- write-only analysis configuration under `postprocessConfig/`;
+- trusted `foamPostProcess`;
+- read-only listing/reading of native numeric time directories and `postProcessing/`;
+- deterministic force-coefficient analysis and evidence-bound finalization.
+
+The process runner does not expose a shell. The executable allowlist is:
+
+```text
+blockMesh
+surfaceFeatureExtract
+surfaceCheck
+snappyHexMesh
+createPatch
+checkMesh
+foamRun
+foamDictionary
+foamPostProcess
+```
+
+## Security and confidentiality
+
+The OpenAI backend is a cloud backend: after `--confirm-api-calls`, the confirmed CFD request and bounded engineering observations/log excerpts are intentionally transmitted to OpenAI. The API key is not inserted into prompts, local absolute paths are redacted from model-bound observations, and `store=False` is used by default. Native OpenFOAM subprocesses receive a sanitized environment and must resolve to executables inside the trusted OpenFOAM installation. Run directories/logs are private (`0700`/`0600`).
+
+Operational success is evidence-bound: capability claims must come from observed searches, `MESH_READY` requires current trusted `checkMesh` evidence, and runtime success requires zero return status, `End`, actual `Time = ...` progress, and no fatal/non-finite evidence. Post-processing numerical metrics are derived from native outputs and hash-bound analysis dictionaries rather than accepted from model prose. Human revision proposals are additionally bound to the exact plan/case seal they reviewed and cannot mutate the case before `/confirm`. This prevents the model from merely *claiming* that tools, analyses, or revisions succeeded. It does not prove scientific correctness, mesh/time-step convergence, or experimental agreement; `COMPLETE` means the human explicitly accepted the reviewed result.
+
+See `SECURITY.md` for the threat model and residual limitations.
+
+## Failure semantics
+
+A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.0.5 uses a progress-aware engineering budget: the default soft boundary is 120 actions, extensions are granted in 20-action chunks only when recent action/result evidence is genuinely new, and the absolute hard cap is 200. Repeating the same action/result loop does not earn more budget.
+
+Preparation also has independent default limits of 40 executed native OpenFOAM validation/mesh commands and 10 mesh-repair cycles. If the engineering window ends immediately after a current passing `checkMesh`, a finalization-only window of 8 actions lets the Agent submit `finish_preview` or `block`; it cannot run tools or edit the case.
+
+During runtime, a failed `foamRun` log is returned to the same engineering agent. The default policy allows up to 8 autonomous repair/retry cycles (9 solver executions total), with up to 60 engineering actions inside each repair cycle. Automatic repair cannot switch the already approved solver. Any file edit invalidates the current `checkMesh` evidence; the agent must re-establish current evidence before `retry_solver` is accepted.
+
+
+### Budget controls
+
+The CLI exposes the production defaults so operators can tighten them for expensive environments:
+
+```bash
+--engineering-steps 120
+--engineering-hard-cap 200
+--engineering-extension 20
+--finalization-steps 8
+--native-command-budget 40
+--mesh-repair-cycles 10
+--runtime-repair-cycles 8
+--runtime-repair-steps 60
+--postprocess-steps 40
+--postprocess-native-budget 8
+--skip-postprocess
+```
+
+These are resource/safety limits only. They do not encode solver, mesh, boundary-condition, or numerical-method choices.
+
+## Evidence and integrity
+
+At `MESH_READY`, v2 seals:
+
+- the `EngineeringPlan` digest;
+- every execution input file under `0/`, `constant/`, and `system/`;
+- each file's SHA-256, size, and origin (`agent` or native OpenFOAM tool);
+- the aggregate manifest SHA-256;
+- current parsed `checkMesh` evidence.
+
+`foamRun` is blocked if the sealed inputs or plan change after approval.
+
+## Tests
+
+The v2 tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+
+- no rule-based engineering fallback;
+- capability retrieval without deterministic solver planning;
+- path/code/library sandboxing;
+- strict OpenAI structured-output compatibility;
+- trusted executable provenance and sanitized native subprocess environment;
+- cloud-bound local-path redaction and trusted OpenFOAM reference roots;
+- private workspace/log permissions;
+- observed capability/evidence provenance and runtime progress evidence;
+- no hidden required case-template files;
+- solver/case mismatch and confirmed-fact provenance;
+- mesh failure -> agent repair -> retry;
+- stale `checkMesh` invalidation;
+- full pre-solve input sealing, including native mesh outputs;
+- cell/resource bounds;
+- runtime failure log -> same-agent repair;
+- automatic runtime-success -> post-processing state transition;
+- isolated postprocess configuration that cannot mutate the solve-input seal;
+- hash-bound postprocess configuration execution and native result reads;
+- deterministic Cd/Cl/shedding-frequency/Strouhal extraction from force-coefficient evidence;
+- post-processing failure isolation that preserves successful runtime evidence;
+- solver-change and `/solve` approval gates.
+- adversarial dynamic-mesh end-to-end recovery, including unsafe-directive rejection, native mesh sealing, state rehydration, SIGFPE repair, fresh `checkMesh`, resealing, and same-solver retry.
+
+See `ARCHITECTURE.md` and `V2_CHANGES.md` for the detailed boundary and migration notes.
+
+### Minimal native preflight
+
+When native execution is enabled, `/confirm` resolves only the trusted `checkMesh` executable before the engineering loop starts. If it is unavailable, the run stops as `ENGINEERING_BLOCKED` before any engineering LLM action is consumed. Other OpenFOAM utilities are discovered/used later according to the agent-selected strategy. `--dry-run` skips this check.

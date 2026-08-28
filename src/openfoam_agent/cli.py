@@ -1,0 +1,1112 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sysconfig
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any, Sequence
+
+from openfoam_agent.conversation import ConversationSession, InteractionMode
+from openfoam_agent.engineering import EngineeringPolicy
+from openfoam_agent.llm import LLMConfigurationError, OpenAILLM, RuleBasedLLM
+from openfoam_agent.postprocessing import PostProcessingPolicy
+from openfoam_agent.progress import CLIProgressReporter, ProgressLevel, ProgressReporter
+from openfoam_agent.schemas.intake import CFDIntakeSpec
+from openfoam_agent.schemas.request import UserRequest
+from openfoam_agent.schemas.simulation import RuntimePolicy
+from openfoam_agent.workflow.engine import CFDWorkflow
+from openfoam_agent.workflow.state import CFDState
+from openfoam_agent.workflow.states import State
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+INSTALLED_DATA_ROOT = Path(sysconfig.get_path("data")) / "share" / "openfoam-agent"
+
+
+def _resource_path(source_path: Path, installed_path: Path) -> Path:
+    return source_path if source_path.exists() else installed_path
+
+
+DEFAULT_CAPABILITY_DB = _resource_path(
+    PROJECT_ROOT / "config" / "openfoam14_capability_graph.json",
+    INSTALLED_DATA_ROOT / "config" / "openfoam14_capability_graph.json",
+)
+DEFAULT_WORKSPACE = Path(tempfile.gettempdir()) / "openfoam-agent-v2"
+SUCCESS_STATES = {
+    State.INTAKE_REVIEW_REQUIRED,
+    State.CASE_PREVIEW_READY,
+    State.MESH_READY,
+    State.RESULT_REVIEW_REQUIRED,
+    State.REVISION_READY,
+    State.COMPLETE,
+    State.DONE,
+}
+CLARIFICATION_EXIT_CODE = 2
+_SETTABLE_FACT_PREFIXES = {
+    "classification", "objective", "domain", "geometry", "scale", "material",
+    "property", "physics", "temporal", "motion", "boundary", "output",
+    "fidelity", "assumption",
+}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="openfoam-agent",
+        description="OpenFOAM Agent v2: autonomous CFD engineering behind deterministic safety gates.",
+    )
+    parser.add_argument("prompt", nargs="?", help="One-shot CFD prompt.")
+    parser.add_argument("--prompt", dest="prompt_option", help="Alternative one-shot prompt.")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Conversational mode.")
+    parser.add_argument(
+        "--mode",
+        choices=tuple(mode.value for mode in InteractionMode),
+        default=InteractionMode.GUIDED.value,
+        help="easy authorizes exploratory completion; guided requires user wording; strict forbids it.",
+    )
+    parser.add_argument(
+        "--confirm-intake",
+        action="store_true",
+        help="Confirm a review-ready intake and authorize bounded case preparation/mesh tools.",
+    )
+    parser.add_argument(
+        "--solve",
+        action="store_true",
+        help="One-shot only: after a passing mesh gate, approve bounded foamRun execution.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Allow agent file authoring but do not execute native OpenFOAM tools or solver.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("rule-based-intake", "openai"),
+        default="rule-based-intake",
+        help=(
+            "rule-based-intake is an offline intake regression baseline only; "
+            "autonomous engineering requires --backend openai."
+        ),
+    )
+    parser.add_argument("--model", help="OpenAI model; otherwise use OPENAI_MODEL.")
+    parser.add_argument(
+        "--confirm-api-calls",
+        action="store_true",
+        help=("Explicitly authorize cloud model calls. The CFD request and bounded "
+              "engineering observations/log excerpts are sent to OpenAI; local absolute paths "
+              "are redacted and store=False is used by default."),
+    )
+    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    parser.add_argument("--capability-db", type=Path, default=DEFAULT_CAPABILITY_DB)
+    parser.add_argument(
+        "--progress",
+        choices=tuple(level.value for level in ProgressLevel),
+        default=ProgressLevel.NORMAL.value,
+        help=(
+            "Live progress verbosity: quiet disables progress, normal shows major engineering/runtime/postprocess events, "
+            "verbose shows every agent action and raw foamRun output."
+        ),
+    )
+    parser.add_argument(
+        "--engineering-steps",
+        type=int,
+        default=120,
+        help="Initial autonomous engineering soft budget (default: 120 actions).",
+    )
+    parser.add_argument(
+        "--engineering-hard-cap",
+        type=int,
+        default=200,
+        help="Absolute engineering action cap after progress-aware extensions (default: 200).",
+    )
+    parser.add_argument(
+        "--engineering-extension",
+        type=int,
+        default=20,
+        help="Progress-aware extension chunk size (default: 20 actions).",
+    )
+    parser.add_argument(
+        "--finalization-steps",
+        type=int,
+        default=8,
+        help="Plan-finalization-only actions after validated case preparation (default: 8).",
+    )
+    parser.add_argument(
+        "--native-command-budget",
+        type=int,
+        default=40,
+        help="Maximum executed OpenFOAM validation/mesh commands across engineering (default: 40).",
+    )
+    parser.add_argument(
+        "--mesh-repair-cycles",
+        type=int,
+        default=10,
+        help="Maximum file-repair cycles triggered by failed mesh commands (default: 10).",
+    )
+    parser.add_argument(
+        "--runtime-repair-cycles",
+        type=int,
+        default=8,
+        help="Maximum autonomous foamRun failure-repair-retry cycles (default: 8).",
+    )
+    parser.add_argument(
+        "--runtime-repair-steps",
+        type=int,
+        default=60,
+        help="Maximum agent actions inside each runtime repair cycle (default: 60).",
+    )
+    parser.add_argument(
+        "--postprocess-steps",
+        type=int,
+        default=40,
+        help="Maximum autonomous post-processing actions after a successful solve (default: 40).",
+    )
+    parser.add_argument(
+        "--postprocess-native-budget",
+        type=int,
+        default=8,
+        help="Maximum foamPostProcess executions after a successful solve (default: 8).",
+    )
+    parser.add_argument(
+        "--skip-postprocess",
+        action="store_true",
+        help="Stop at successful foamRun instead of launching the automatic post-processing agent.",
+    )
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--force", action="store_true")
+    return parser
+
+
+def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> str | None:
+    prompt_sources = sum(value is not None for value in (args.prompt, args.prompt_option))
+    if args.interactive and prompt_sources:
+        parser.error("Choose either a one-shot prompt or --interactive, not both.")
+    if not args.interactive and prompt_sources == 0:
+        parser.error("Provide a prompt or use --interactive.")
+    if prompt_sources > 1:
+        parser.error("Provide the prompt either positionally or with --prompt, not both.")
+    if args.interactive and args.output:
+        parser.error("--output is one-shot only; use --json in interactive mode.")
+    if args.interactive and args.confirm_intake:
+        parser.error("Use /confirm in interactive mode.")
+    if args.interactive and args.solve:
+        parser.error("Use /solve in interactive mode.")
+    if args.force and not args.output:
+        parser.error("--force requires --output.")
+    if args.solve and not args.confirm_intake:
+        parser.error("--solve requires --confirm-intake.")
+    if args.solve and args.dry_run:
+        parser.error("--solve cannot be combined with --dry-run.")
+    if args.backend == "rule-based-intake":
+        if args.model:
+            parser.error("--model is only valid with --backend openai.")
+        if args.confirm_api_calls:
+            parser.error("--confirm-api-calls is only valid with --backend openai.")
+        if args.confirm_intake:
+            parser.error(
+                "Autonomous engineering has no rule-based template fallback. "
+                "Use --backend openai --confirm-api-calls when confirming intake."
+            )
+    elif not args.confirm_api_calls:
+        parser.error("--backend openai requires --confirm-api-calls.")
+    positive_budget_fields = {
+        "--engineering-steps": args.engineering_steps,
+        "--engineering-hard-cap": args.engineering_hard_cap,
+        "--engineering-extension": args.engineering_extension,
+        "--finalization-steps": args.finalization_steps,
+        "--native-command-budget": args.native_command_budget,
+        "--mesh-repair-cycles": args.mesh_repair_cycles,
+        "--runtime-repair-steps": args.runtime_repair_steps,
+        "--postprocess-steps": args.postprocess_steps,
+        "--postprocess-native-budget": args.postprocess_native_budget,
+    }
+    for flag, value in positive_budget_fields.items():
+        if value < 1:
+            parser.error(f"{flag} must be >= 1.")
+    if args.engineering_hard_cap < args.engineering_steps:
+        parser.error("--engineering-hard-cap must be >= --engineering-steps.")
+    if not 0 <= args.runtime_repair_cycles <= 12:
+        parser.error("--runtime-repair-cycles must be between 0 and 12.")
+    if not args.capability_db.is_file():
+        parser.error(f"Capability database is missing: {args.capability_db}")
+    selected = args.prompt_option if args.prompt_option is not None else args.prompt
+    if selected is not None and not selected.strip():
+        parser.error("Prompt must not be blank.")
+    return selected.strip() if selected is not None else None
+
+
+def _build_llm(args: argparse.Namespace):
+    if args.backend == "rule-based-intake":
+        return RuleBasedLLM(), "rule-based-intake", None
+    llm = OpenAILLM(model=args.model) if args.model else OpenAILLM.from_env()
+    return llm, "openai", llm.model
+
+
+def _policies_from_args(
+    args: argparse.Namespace,
+) -> tuple[EngineeringPolicy, RuntimePolicy, PostProcessingPolicy]:
+    engineering = EngineeringPolicy(
+        max_agent_steps=args.engineering_steps,
+        hard_max_agent_steps=args.engineering_hard_cap,
+        step_extension=args.engineering_extension,
+        max_finalization_steps=args.finalization_steps,
+        max_native_commands=args.native_command_budget,
+        max_mesh_repair_cycles=args.mesh_repair_cycles,
+        max_runtime_repair_steps=args.runtime_repair_steps,
+    )
+    runtime = RuntimePolicy(max_attempts=args.runtime_repair_cycles + 1)
+    postprocessing = PostProcessingPolicy(
+        max_steps=args.postprocess_steps,
+        max_native_commands=args.postprocess_native_budget,
+    )
+    return engineering, runtime, postprocessing
+
+
+def build_report(
+    state: CFDState,
+    *,
+    backend: str,
+    model: str | None,
+    request: UserRequest,
+    workspace: Path,
+    engineering_policy: EngineeringPolicy,
+    runtime_policy: RuntimePolicy,
+    postprocessing_policy: PostProcessingPolicy,
+) -> dict[str, Any]:
+    return {
+        "architecture": "v2.3",
+        "run_id": state.run_id,
+        "prompt": request.prompt,
+        "conversation_turns": list(request.conversation_turns),
+        "interaction_mode": request.interaction_mode,
+        "exploratory_completion_authorized": request.exploratory_completion_authorized,
+        "backend": backend,
+        "model": model,
+        "final_state": state.current_state.value,
+        "message": state.history[-1]["note"] if state.history else "",
+        "workspace": str(workspace),
+        "intake": state.intake.model_dump(mode="json") if state.intake else None,
+        "intake_confirmed": state.intake_confirmed,
+        "intake_sha256": state.intake_digest or (state.intake.digest() if state.intake else None),
+        "engineering_plan": (
+            state.engineering_plan.model_dump(mode="json") if state.engineering_plan else None
+        ),
+        "engineering_events": [item.model_dump(mode="json") for item in state.engineering_events],
+        "budget": {
+            "engineering_actions_used": len(state.engineering_events[state.engineering_round_start_index:]),
+            "engineering_actions_total": len(state.engineering_events),
+            "engineering_soft_limit": engineering_policy.max_agent_steps,
+            "engineering_hard_limit": engineering_policy.hard_max_agent_steps,
+            "engineering_extensions": [
+                item.model_dump(mode="json") for item in state.engineering_budget_extensions
+            ],
+            "native_commands_executed": sum(
+                1
+                for item in state.engineering_events[state.engineering_round_start_index:]
+                if item.native_command_executed
+            ),
+            "native_commands_total": sum(
+                1 for item in state.engineering_events if item.native_command_executed
+            ),
+            "native_command_limit": engineering_policy.max_native_commands,
+            "mesh_repair_cycle_limit": engineering_policy.max_mesh_repair_cycles,
+            "runtime_repair_cycles_limit": runtime_policy.max_repair_cycles,
+            "runtime_repair_steps_per_cycle": engineering_policy.max_runtime_repair_steps,
+            "postprocess_actions_used": len(state.postprocessing_events),
+            "postprocess_action_limit": postprocessing_policy.max_steps,
+            "postprocess_native_commands_executed": sum(
+                1 for item in state.postprocessing_events if item.native_command_executed
+            ),
+            "postprocess_native_command_limit": postprocessing_policy.max_native_commands,
+        },
+        "case_dir": state.case_dir,
+        "case_seal": state.case_seal.model_dump(mode="json") if state.case_seal else None,
+        "mesh_evidence": (
+            state.mesh_evidence.model_dump(mode="json") if state.mesh_evidence else None
+        ),
+        "solve_approved": state.solve_approved,
+        "runtime_report": (
+            state.runtime_report.model_dump(mode="json") if state.runtime_report else None
+        ),
+        "postprocessing_report": (
+            state.postprocessing_report.model_dump(mode="json")
+            if state.postprocessing_report
+            else None
+        ),
+        "postprocessing_events": [
+            item.model_dump(mode="json") for item in state.postprocessing_events
+        ],
+        "human_feedback": [item.model_dump(mode="json") for item in state.human_feedback],
+        "revision_proposals": [item.model_dump(mode="json") for item in state.revision_proposals],
+        "active_revision_proposal": (
+            state.active_revision_proposal.model_dump(mode="json")
+            if state.active_revision_proposal
+            else None
+        ),
+        "revision_history": [
+            item.model_dump(mode="json") for item in state.revision_history
+        ],
+        "pending_revision_archive_path": state.pending_revision_archive_path,
+        "history": list(state.history),
+        "limitations": _limitations(state),
+    }
+
+
+def _limitations(state: CFDState) -> list[str]:
+    out: list[str] = []
+    if state.current_state == State.CASE_PREVIEW_READY:
+        out.append("Native OpenFOAM validation/mesh tools were disabled; this is a file preview only.")
+    if state.current_state == State.MESH_READY:
+        out.append("checkMesh passed for the sealed case; foamRun still requires explicit /solve approval.")
+    if state.current_state == State.ENGINEERING_BLOCKED:
+        out.append("The autonomous engineering/retry budget ended without a safely executable result.")
+    if state.current_state == State.RESULT_REVIEW_REQUIRED:
+        out.append(
+            "Runtime/post-processing evidence is available, but human review is still required; use /accept or /feedback in interactive mode."
+        )
+    if state.current_state == State.COMPLETE:
+        out.append(
+            "COMPLETE records explicit human acceptance of the reviewed result; it is not a universal proof of mesh/time-step independence or experimental validation."
+        )
+    if state.current_state == State.DONE:
+        out.append("DONE is retained only for backward compatibility; v2.3 uses RESULT_REVIEW_REQUIRED and COMPLETE.")
+    return out
+
+
+def _write_report(path: Path, report: dict[str, Any], *, force: bool) -> None:
+    if path.exists() and not force:
+        raise FileExistsError(f"Refusing to overwrite {path}; use --force.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _print_human_report(report: dict[str, Any]) -> None:
+    print(f"state: {report['final_state']}")
+    intake = report["intake"]
+    if intake:
+        print(f"intake: {intake['title']} [{intake['status']}]")
+        for fact in intake["facts"]:
+            if fact["category"] != "context":
+                unit = f" {fact['unit']}" if fact["unit"] else ""
+                print(f"- {fact['id']}: {fact['value']}{unit} [{fact['source']}]")
+        if intake["blocking_unknowns"]:
+            print("blocking questions:")
+            for item in intake["blocking_unknowns"]:
+                print(f"- {item['question']}")
+    plan = report["engineering_plan"]
+    if plan:
+        print(f"solver: {plan['solver']}")
+        print(f"mesh: {plan['mesh_strategy']}")
+        print(
+            f"semantics: {plan['temporal_behavior']} / {plan['motion_kind']} / "
+            f"{plan['mesh_motion_requirement']}"
+        )
+        if plan["assumptions"]:
+            print("engineering assumptions:")
+            for assumption in plan["assumptions"]:
+                print(f"- {assumption}")
+    budget = report.get("budget")
+    if budget:
+        extensions = budget["engineering_extensions"]
+        extension_text = (
+            ", ".join(f"{item['previous_limit']}->{item['new_limit']}" for item in extensions)
+            if extensions
+            else "none"
+        )
+        print(
+            "engineering budget: "
+            f"actions={budget['engineering_actions_used']}, "
+            f"native={budget['native_commands_executed']}/{budget['native_command_limit']}, "
+            f"extensions={extension_text}"
+        )
+    if report["case_dir"]:
+        print(f"case: {report['case_dir']}")
+    mesh = report["mesh_evidence"]
+    if mesh:
+        print(
+            "checkMesh: "
+            f"passed={mesh['command_succeeded'] and mesh['mesh_ok']}, "
+            f"cells={mesh['cell_count']}, maxNonOrtho={mesh['max_non_orthogonality']}, "
+            f"maxSkew={mesh['max_skewness']}"
+        )
+    runtime = report["runtime_report"]
+    if runtime:
+        final = runtime["final_result"]
+        print(
+            f"runtime: success={runtime['success']}, attempts={len(runtime['attempts'])}, "
+            f"lastTime={final['last_time']}, maxCo={final['courant_max']}"
+        )
+    post = report.get("postprocessing_report")
+    if post:
+        print(
+            "postprocess: "
+            f"success={post['success']}, actions={post['actions_executed']}, "
+            f"native={post['native_commands_executed']}"
+        )
+        analysis = post.get("force_analysis")
+        if analysis:
+            print(
+                "forces: "
+                f"samples={analysis['samples_used']}/{analysis['samples_total']}, "
+                f"meanCd={analysis['mean_cd']}, rmsCl={analysis['rms_cl']}, "
+                f"f={analysis['shedding_frequency']}, St={analysis['strouhal_number']}"
+            )
+        if post.get("artifacts"):
+            print("result artifacts:")
+            for artifact in post["artifacts"]:
+                print(f"- {artifact['kind']}: {artifact['path']}")
+        print(f"scientific confidence (agent assessment): {post.get('scientific_confidence', 'unknown')}")
+        if post.get("review_reasons"):
+            print("review reasons:")
+            for item in post["review_reasons"]:
+                print(f"- {item}")
+        if post.get("recommended_human_checks"):
+            print("recommended human checks:")
+            for item in post["recommended_human_checks"]:
+                print(f"- {item}")
+        if post.get("limitations"):
+            print("postprocess limitations:")
+            for item in post["limitations"]:
+                print(f"- {item}")
+        if report.get("case_dir"):
+            print(f"visualize: cd {report['case_dir']} && paraFoam")
+    feedback = report.get("human_feedback") or []
+    if feedback:
+        print("human feedback:")
+        for item in feedback:
+            print(f"- {item['feedback_id']} [{item['status']}/{item['scope']}]: {item['statement']}")
+    proposal = report.get("active_revision_proposal")
+    if proposal:
+        print(f"revision proposal: {proposal['proposal_id']} (cost={proposal['expected_cost']})")
+        print(f"- diagnosis: {proposal['diagnosis_summary']}")
+        for change in proposal.get("proposed_changes", []):
+            print(f"- change[{change['area']}]: {change['change']}")
+        if proposal.get("review_limitations"):
+            print("- review limitations:")
+            for item in proposal["review_limitations"]:
+                print(f"  - {item}")
+    revisions = report.get("revision_history") or []
+    if revisions:
+        latest = revisions[-1]
+        print(
+            f"revision diff: {latest['revision_id']} proposal={latest['proposal_id']} "
+            f"files_changed={len(latest['file_changes'])}"
+        )
+        for item in latest["file_changes"][:30]:
+            print(f"- {item['change']}: {item['path']}")
+        if latest.get("archive_path"):
+            print(f"revision archive: {latest['archive_path']}")
+    if report.get("pending_revision_archive_path"):
+        print(f"pending revision archive: {report['pending_revision_archive_path']}")
+    if report["limitations"]:
+        print("limitations:")
+        for item in report["limitations"]:
+            print(f"- {item}")
+    if report["message"]:
+        print(f"message: {report['message']}")
+    if report["final_state"] == State.INTAKE_REVIEW_REQUIRED.value:
+        print("next: /confirm in interactive mode, or --confirm-intake with --backend openai")
+    if report["final_state"] == State.MESH_READY.value:
+        print("next: /solve to approve foamRun, or /feedback <observation> to revise the mesh/case")
+    if report["final_state"] == State.RESULT_REVIEW_REQUIRED.value:
+        print("next: /accept to complete, or /feedback <observation> to request a revision")
+    if report["final_state"] == State.REVISION_READY.value:
+        print("next: /confirm to authorize the proposed revision, or /reject to keep the current sealed case")
+    print(f"run_id: {report['run_id']}")
+
+
+def _exit_code(state: State) -> int:
+    if state in SUCCESS_STATES:
+        return 0
+    if state in {State.NEEDS_CLARIFICATION, State.ENGINEERING_REVIEW_REQUIRED}:
+        return CLARIFICATION_EXIT_CODE
+    return 1
+
+
+def run_prompt(
+    prompt: str | UserRequest,
+    *,
+    llm: Any,
+    backend: str,
+    model: str | None,
+    capability_db: Path,
+    workspace_root: Path,
+    run_id: str | None = None,
+    attempt: int | None = None,
+    confirmed_intake: CFDIntakeSpec | None = None,
+    native_execution: bool = True,
+    execute_solver: bool = False,
+    stream_solver_output: bool = False,
+    engineering_policy: EngineeringPolicy | None = None,
+    runtime_policy: RuntimePolicy | None = None,
+    postprocessing_policy: PostProcessingPolicy | None = None,
+    postprocessing_enabled: bool = True,
+    progress: ProgressReporter | None = None,
+) -> tuple[CFDState, dict[str, Any]]:
+    request = prompt if isinstance(prompt, UserRequest) else UserRequest(prompt=prompt)
+    engineering_policy = engineering_policy or EngineeringPolicy()
+    runtime_policy = runtime_policy or RuntimePolicy()
+    postprocessing_policy = postprocessing_policy or PostProcessingPolicy()
+    selected_run_id = run_id or str(uuid.uuid4())
+    run_workspace = workspace_root.expanduser().resolve() / selected_run_id
+    if attempt is not None:
+        run_workspace /= f"attempt-{attempt:03d}"
+    state = CFDState(run_id=selected_run_id, user_request=request)
+    if confirmed_intake is not None:
+        state.intake = confirmed_intake
+        state.confirm_intake()
+        state.current_state = State.ENGINEERING
+        state.history.append(
+            {
+                "from": State.INTAKE_REVIEW_REQUIRED.value,
+                "to": State.ENGINEERING.value,
+                "note": f"User confirmed immutable CFD intake {state.intake_digest}.",
+            }
+        )
+    workflow = CFDWorkflow(
+        llm=llm,
+        capability_db=capability_db,
+        workspace=run_workspace,
+        native_execution=native_execution,
+        stream_solver_output=stream_solver_output,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+        postprocessing_enabled=postprocessing_enabled,
+        progress=progress,
+    )
+    final_state = workflow.run(state)
+    if execute_solver and final_state.current_state == State.MESH_READY:
+        final_state.approve_solve()
+        final_state = workflow.run(final_state)
+    report = build_report(
+        final_state,
+        backend=backend,
+        model=model,
+        request=request,
+        workspace=run_workspace,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+    )
+    return final_state, report
+
+
+def _emit_report(report: dict[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        _print_human_report(report)
+
+
+def _print_interactive_help() -> None:
+    print("commands:")
+    print("- /show                 누적 요청과 승인 정책 표시")
+    print("- /details              현재 CFDIntakeSpec JSON")
+    print("- /confirm              intake 확정 + bounded case/mesh engineering 승인")
+    print("- /solve                MESH_READY sealed case의 foamRun 승인")
+    print("- /feedback <text>      mesh/result에 대한 human engineering feedback 제출")
+    print("- /accept               RESULT_REVIEW_REQUIRED 결과를 최종 수락")
+    print("- /reject               REVISION_READY proposal을 거절하고 이전 review 상태로 복귀")
+    print("- /set <fact>=<value>   사용자 사실 추가 후 intake 재작성")
+    print("- /edit <text>          마지막 사용자 턴 교체")
+    print("- /undo                 마지막 사용자 턴 제거")
+    print("- /run                  intake 재분석")
+    print("- /mode easy|guided|strict")
+    print("- /new                  새 세션")
+    print("- /exit                  종료")
+
+
+def _print_session(session: ConversationSession) -> None:
+    summary = session.summary()
+    print(f"session: {summary['session_id']}")
+    print(f"mode: {summary['mode']}")
+    print(f"exploratory completion: {summary['exploratory_completion_authorized']}")
+    for index, turn in enumerate(summary["turns"], start=1):
+        print(f"{index}. {turn}")
+    if summary["last_state"]:
+        print(f"last state: {summary['last_state']}")
+
+
+def _progress_from_args(args: argparse.Namespace) -> CLIProgressReporter:
+    return CLIProgressReporter(args.progress)
+
+
+def _run_session(session, args, llm, backend, model):
+    attempt = session.next_attempt()
+    engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
+    state, report = run_prompt(
+        session.to_request(),
+        llm=llm,
+        backend=backend,
+        model=model,
+        capability_db=args.capability_db,
+        workspace_root=args.workspace,
+        run_id=session.session_id,
+        attempt=attempt,
+        native_execution=not args.dry_run,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+        postprocessing_enabled=not args.skip_postprocess,
+        progress=_progress_from_args(args),
+    )
+    session.last_state = state.current_state.value
+    session.set_pending_intake(state.intake)
+    report["conversation"] = session.summary()
+    _emit_report(report, as_json=args.json)
+    if not args.json:
+        print()
+    return state, report
+
+
+def _confirm_session(session, args, llm, backend, model) -> None:
+    if (
+        session.pending_workflow_state is not None
+        and session.pending_workflow_state.current_state == State.REVISION_READY
+    ):
+        _confirm_revision_session(session, args, llm, backend, model)
+        return
+    intake = session.pending_intake
+    if intake is None:
+        print("확정할 CFD intake가 없습니다.")
+        return
+    if intake.status != "ready_for_review":
+        print("blocking 질문에 답변한 뒤 확정할 수 있습니다.")
+        return
+    if backend != "openai":
+        print("v2 autonomous engineering requires --backend openai --confirm-api-calls.")
+        return
+    attempt = session.next_attempt()
+    engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
+    state, report = run_prompt(
+        session.to_request(),
+        llm=llm,
+        backend=backend,
+        model=model,
+        capability_db=args.capability_db,
+        workspace_root=args.workspace,
+        run_id=session.session_id,
+        attempt=attempt,
+        confirmed_intake=intake,
+        native_execution=not args.dry_run,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+        postprocessing_enabled=not args.skip_postprocess,
+        progress=_progress_from_args(args),
+    )
+    session.last_state = state.current_state.value
+    session.confirmed_intake_digest = intake.digest()
+    session.pending_workflow_state = state
+    report["conversation"] = session.summary()
+    _emit_report(report, as_json=args.json)
+    if not args.json:
+        print()
+
+
+def _feedback_session(session, args, llm, backend, model, feedback_text: str) -> None:
+    state = session.pending_workflow_state
+    if state is None or state.current_state not in {State.MESH_READY, State.RESULT_REVIEW_REQUIRED}:
+        print("/feedback은 MESH_READY 또는 RESULT_REVIEW_REQUIRED에서 사용할 수 있습니다.")
+        return
+    if backend != "openai":
+        print("human-feedback diagnosis requires --backend openai --confirm-api-calls.")
+        return
+    text = feedback_text.strip()
+    if not text:
+        print("사용법: /feedback <mesh/result에 대한 관찰 또는 우려>")
+        return
+    if state.case_dir is None:
+        print("feedback을 연결할 sealed case directory가 없습니다.")
+        return
+    run_workspace = Path(state.case_dir).resolve().parent
+    engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
+    workflow = CFDWorkflow(
+        llm=llm,
+        capability_db=args.capability_db,
+        workspace=run_workspace,
+        native_execution=not args.dry_run,
+        stream_solver_output=False,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+        postprocessing_enabled=not args.skip_postprocess,
+        progress=_progress_from_args(args),
+    )
+    try:
+        final_state = workflow.review.review(state, text)
+    except Exception as exc:
+        print(f"feedback review failed: {type(exc).__name__}: {exc}")
+        return
+    session.last_state = final_state.current_state.value
+    session.pending_workflow_state = final_state
+    report = build_report(
+        final_state,
+        backend=backend,
+        model=model,
+        request=session.to_request(),
+        workspace=run_workspace,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+    )
+    report["conversation"] = session.summary()
+    _emit_report(report, as_json=args.json)
+    if not args.json:
+        print()
+
+
+def _confirm_revision_session(session, args, llm, backend, model) -> None:
+    state = session.pending_workflow_state
+    if state is None or state.current_state != State.REVISION_READY:
+        print("확정할 human-feedback revision proposal이 없습니다.")
+        return
+    if backend != "openai":
+        print("v2.3 autonomous revision requires --backend openai --confirm-api-calls.")
+        return
+    if state.case_dir is None:
+        print("수정할 sealed case directory가 없습니다.")
+        return
+    run_workspace = Path(state.case_dir).resolve().parent
+    engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
+    workflow = CFDWorkflow(
+        llm=llm,
+        capability_db=args.capability_db,
+        workspace=run_workspace,
+        native_execution=not args.dry_run,
+        stream_solver_output=False,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+        postprocessing_enabled=not args.skip_postprocess,
+        progress=_progress_from_args(args),
+    )
+    try:
+        final_state = workflow.engineering.revise_from_feedback(
+            state, native_execution=not args.dry_run
+        )
+    except Exception as exc:
+        # A revision may already have archived the previous outputs and begun
+        # editing the active case.  Never leave that partially executed state
+        # looking like a live ENGINEERING session with no recovery information.
+        if state.current_state == State.ENGINEERING:
+            archive_note = (
+                f" Prior baseline/output archive: {state.pending_revision_archive_path}."
+                if state.pending_revision_archive_path
+                else ""
+            )
+            state.transition(
+                State.ENGINEERING_BLOCKED,
+                f"Human-feedback revision aborted after an unexpected {type(exc).__name__}.{archive_note}",
+            )
+        session.last_state = state.current_state.value
+        session.pending_workflow_state = state
+        report = build_report(
+            state,
+            backend=backend,
+            model=model,
+            request=session.to_request(),
+            workspace=run_workspace,
+            engineering_policy=engineering_policy,
+            runtime_policy=runtime_policy,
+            postprocessing_policy=postprocessing_policy,
+        )
+        report["conversation"] = session.summary()
+        _emit_report(report, as_json=args.json)
+        if not args.json:
+            print(f"revision engineering failed: {type(exc).__name__}: {exc}")
+            print()
+        return
+    session.last_state = final_state.current_state.value
+    session.pending_workflow_state = final_state
+    report = build_report(
+        final_state,
+        backend=backend,
+        model=model,
+        request=session.to_request(),
+        workspace=run_workspace,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+    )
+    report["conversation"] = session.summary()
+    _emit_report(report, as_json=args.json)
+    if not args.json:
+        print()
+
+
+def _reject_revision_session(session, args, llm, backend, model) -> None:
+    state = session.pending_workflow_state
+    if state is None or state.current_state != State.REVISION_READY:
+        print("/reject는 REVISION_READY에서만 사용할 수 있습니다.")
+        return
+    state.reject_revision()
+    session.last_state = state.current_state.value
+    run_workspace = Path(state.case_dir).resolve().parent if state.case_dir else args.workspace
+    engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
+    report = build_report(
+        state,
+        backend=backend,
+        model=model,
+        request=session.to_request(),
+        workspace=run_workspace,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+    )
+    report["conversation"] = session.summary()
+    _emit_report(report, as_json=args.json)
+    if not args.json:
+        print()
+
+
+def _accept_session(session, args, llm, backend, model) -> None:
+    state = session.pending_workflow_state
+    if state is None or state.current_state != State.RESULT_REVIEW_REQUIRED:
+        print("/accept는 RESULT_REVIEW_REQUIRED에서만 사용할 수 있습니다.")
+        return
+    state.accept_result()
+    session.last_state = state.current_state.value
+    run_workspace = Path(state.case_dir).resolve().parent if state.case_dir else args.workspace
+    engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
+    report = build_report(
+        state,
+        backend=backend,
+        model=model,
+        request=session.to_request(),
+        workspace=run_workspace,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+    )
+    report["conversation"] = session.summary()
+    _emit_report(report, as_json=args.json)
+    if not args.json:
+        print()
+
+
+def _solve_session(session, args, llm, backend, model) -> None:
+    if args.dry_run:
+        print("--dry-run 세션에서는 /solve를 사용할 수 없습니다.")
+        return
+    state = session.pending_workflow_state
+    if state is None or state.current_state != State.MESH_READY:
+        print("/solve를 실행하려면 먼저 /confirm으로 MESH_READY에 도달해야 합니다.")
+        return
+    if state.case_dir is None:
+        print("실행할 sealed case directory가 없습니다.")
+        return
+    state.approve_solve()
+    run_workspace = Path(state.case_dir).resolve().parent
+    engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
+    workflow = CFDWorkflow(
+        llm=llm,
+        capability_db=args.capability_db,
+        workspace=run_workspace,
+        native_execution=True,
+        stream_solver_output=args.progress == ProgressLevel.VERBOSE.value,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+        postprocessing_enabled=not args.skip_postprocess,
+        progress=_progress_from_args(args),
+    )
+    final_state = workflow.run(state)
+    session.last_state = final_state.current_state.value
+    session.pending_workflow_state = final_state
+    report = build_report(
+        final_state,
+        backend=backend,
+        model=model,
+        request=session.to_request(),
+        workspace=run_workspace,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+    )
+    report["conversation"] = session.summary()
+    _emit_report(report, as_json=args.json)
+    if not args.json:
+        print()
+
+
+def _handle_command(command, session, args, llm, backend, model) -> bool:
+    name, _, value = command.partition(" ")
+    name = name.casefold()
+    value = value.strip()
+    if name in {"/exit", "/quit"}:
+        return False
+    if name == "/help":
+        _print_interactive_help()
+    elif name == "/show":
+        _print_session(session)
+    elif name == "/details":
+        if session.pending_intake is None:
+            print("표시할 CFD intake가 없습니다.")
+        else:
+            print(session.pending_intake.model_dump_json(indent=2))
+    elif name == "/confirm":
+        _confirm_session(session, args, llm, backend, model)
+    elif name == "/solve":
+        _solve_session(session, args, llm, backend, model)
+    elif name == "/feedback":
+        _feedback_session(session, args, llm, backend, model, value)
+    elif name == "/accept":
+        _accept_session(session, args, llm, backend, model)
+    elif name == "/reject":
+        _reject_revision_session(session, args, llm, backend, model)
+    elif name == "/set":
+        field, separator, field_value = value.partition("=")
+        if not separator or not field.strip() or not field_value.strip():
+            print("사용법: /set <fact>=<value>")
+        elif not re.fullmatch(r"[a-z][a-z0-9_.-]*", field.strip()) or (
+            field.strip().split(".", maxsplit=1)[0] not in _SETTABLE_FACT_PREFIXES
+        ):
+            print("지원되지 않는 fact ID입니다.")
+        else:
+            session.add_turn(f"Set {field.strip()} to {field_value.strip()} as a user-provided value.")
+            _run_session(session, args, llm, backend, model)
+    elif name == "/mode":
+        if not value:
+            print(f"current mode: {session.mode.value}")
+        else:
+            try:
+                session.mode = InteractionMode(value.casefold())
+            except ValueError:
+                print("mode는 easy, guided, strict 중 하나여야 합니다.")
+            else:
+                print(f"mode: {session.mode.value}")
+    elif name == "/undo":
+        try:
+            print(f"제거됨: {session.undo_last()}")
+        except ValueError as exc:
+            print(exc)
+    elif name == "/edit":
+        try:
+            session.edit_last(value)
+        except ValueError as exc:
+            print(exc)
+        else:
+            _run_session(session, args, llm, backend, model)
+    elif name == "/run":
+        if not session.turns:
+            print("먼저 CFD 프롬프트를 입력하세요.")
+        else:
+            _run_session(session, args, llm, backend, model)
+    elif name == "/new":
+        session.reset()
+        print(f"새 세션: {session.session_id}")
+    else:
+        print("알 수 없는 명령입니다. /help를 사용하세요.")
+    return True
+
+
+def _interactive(args, llm, backend, model) -> int:
+    session = ConversationSession(mode=InteractionMode(args.mode))
+    print(f"OpenFOAM Agent v2.3 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
+    if backend == "openai":
+        print(f"OpenAI model: {model}; cloud agent API calls authorized (task data/tool observations are transmitted; local paths are redacted).")
+    while True:
+        try:
+            prompt = input("OpenFOAM Agent> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not prompt:
+            continue
+        if prompt.startswith("/"):
+            if not _handle_command(prompt, session, args, llm, backend, model):
+                return 0
+            continue
+        pending = session.pending_workflow_state
+        if pending is not None and pending.current_state in {
+            State.MESH_READY,
+            State.RESULT_REVIEW_REQUIRED,
+            State.REVISION_READY,
+        }:
+            if pending.current_state == State.RESULT_REVIEW_REQUIRED:
+                print("현재 result review 상태입니다. /feedback <내용> 또는 /accept를 사용하세요. 새 문제는 /new 후 입력하세요.")
+            elif pending.current_state == State.MESH_READY:
+                print("현재 mesh review 상태입니다. /feedback <내용> 또는 /solve를 사용하세요. 새 문제는 /new 후 입력하세요.")
+            else:
+                print("revision proposal이 승인 대기 중입니다. /confirm으로 승인하거나 /reject로 거절하세요.")
+            continue
+        session.add_turn(prompt)
+        _run_session(session, args, llm, backend, model)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    prompt = _validate_args(args, parser)
+    try:
+        llm, backend, model = _build_llm(args)
+    except LLMConfigurationError as exc:
+        parser.error(str(exc))
+    except Exception as exc:
+        parser.error(f"Could not configure backend: {exc}")
+    if args.interactive:
+        return _interactive(args, llm, backend, model)
+
+    engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
+    assert prompt is not None
+    session = ConversationSession(mode=InteractionMode(args.mode))
+    session.add_turn(prompt)
+    request = session.to_request()
+    state, report = run_prompt(
+        request,
+        llm=llm,
+        backend=backend,
+        model=model,
+        capability_db=args.capability_db,
+        workspace_root=args.workspace,
+        native_execution=not args.dry_run,
+        engineering_policy=engineering_policy,
+        runtime_policy=runtime_policy,
+        postprocessing_policy=postprocessing_policy,
+        postprocessing_enabled=not args.skip_postprocess,
+        progress=_progress_from_args(args),
+    )
+    if args.confirm_intake and state.current_state == State.INTAKE_REVIEW_REQUIRED:
+        assert state.intake is not None
+        state, report = run_prompt(
+            request,
+            llm=llm,
+            backend=backend,
+            model=model,
+            capability_db=args.capability_db,
+            workspace_root=args.workspace,
+            run_id=state.run_id,
+            confirmed_intake=state.intake,
+            native_execution=not args.dry_run,
+            execute_solver=args.solve,
+            stream_solver_output=args.solve and args.progress == ProgressLevel.VERBOSE.value,
+            engineering_policy=engineering_policy,
+            runtime_policy=runtime_policy,
+            postprocessing_policy=postprocessing_policy,
+            postprocessing_enabled=not args.skip_postprocess,
+            progress=_progress_from_args(args),
+        )
+    if args.output:
+        try:
+            _write_report(args.output, report, force=args.force)
+        except FileExistsError as exc:
+            parser.error(str(exc))
+    _emit_report(report, as_json=args.json)
+    return _exit_code(state.current_state)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

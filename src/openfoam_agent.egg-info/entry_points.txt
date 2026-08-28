@@ -1,0 +1,2 @@
+[console_scripts]
+openfoam-agent = openfoam_agent.cli:main

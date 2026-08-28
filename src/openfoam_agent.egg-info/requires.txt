@@ -1,0 +1,5 @@
+openai<3,>=2
+pydantic<3,>=2.8
+
+[dev]
+pytest<10,>=8

@@ -1,0 +1,32 @@
+[project]
+name = "openfoam-agent"
+version = "2.3.1"
+description = "Agent-owned OpenFOAM CFD engineering behind deterministic safety gates"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "openai>=2,<3",
+  "pydantic>=2.8,<3",
+]
+
+[project.scripts]
+openfoam-agent = "openfoam_agent.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<10",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/openfoam-agent/config" = ["config/openfoam14_capability_graph.json"]
