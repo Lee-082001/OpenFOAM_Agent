@@ -46,6 +46,7 @@ from openfoam_agent.schemas.engineering import (
     WriteCaseFileAction,
 )
 from openfoam_agent.tools.capability_catalog import CapabilityCatalog
+from openfoam_agent.tools.diagnostics import extract_openfoam_failure_diagnostic
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.references import OpenFOAMReferenceIndex
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
@@ -1063,8 +1064,20 @@ class CFDEngineeringAgent:
                 result = self.tools.run_mesh_command(action.command, self.workspace.case_dir)
                 output = _tool_output(result)
                 self.workspace.write_log(f"{step:03d}.{action.command}.log", output)
+                event_output = output
                 event_success = result.success
                 summary = f"{action.command} returned status {result.return_code}."
+                if action.command == "blockMesh" and not result.success:
+                    diagnostic = extract_openfoam_failure_diagnostic(
+                        result.stdout,
+                        result.stderr,
+                    )
+                    if diagnostic:
+                        event_output = diagnostic
+                        summary = (
+                            f"blockMesh returned status {result.return_code}; "
+                            "fatal diagnostic captured."
+                        )
                 if action.command == "checkMesh" and state is not None:
                     evidence = parse_check_mesh_evidence(result)
                     state.mesh_evidence = evidence
@@ -1080,7 +1093,7 @@ class CFDEngineeringAgent:
                     action.type,
                     event_success,
                     summary,
-                    output,
+                    event_output,
                     native_command_executed=True,
                     mesh_command_executed=True,
                 )
@@ -1464,16 +1477,22 @@ class CFDEngineeringAgent:
                 "maxSkew": evidence.max_skewness,
             }
         details: tuple[str, ...] = ()
-        if (
-            not event.success
-            and event.action_type == "finish_preview"
-            and event.output_excerpt.strip()
-        ):
-            details = tuple(
-                self._redact_local_paths(line.strip())[:800]
-                for line in event.output_excerpt.splitlines()
-                if line.strip()
-            )[:12]
+        if not event.success and event.output_excerpt.strip():
+            if event.action_type == "finish_preview":
+                details = tuple(
+                    self._redact_local_paths(line.strip())[:800]
+                    for line in event.output_excerpt.splitlines()
+                    if line.strip()
+                )[:12]
+            elif (
+                event.action_type == "run_mesh_command"
+                and event.summary.startswith("blockMesh returned status")
+            ):
+                details = tuple(
+                    self._redact_local_paths(line.rstrip())[:800]
+                    for line in event.output_excerpt.splitlines()
+                    if line.strip()
+                )[:24]
         self.progress.emit(
             ProgressEvent(
                 phase=phase,

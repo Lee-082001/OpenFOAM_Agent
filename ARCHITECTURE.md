@@ -152,3 +152,7 @@ The durable local audit state and the remote model working context are intention
 This compaction never authorizes an engineering claim. Final plan/evidence validation continues to inspect the original local EngineeringEvents, case hashes, native evidence, and confirmed intake rather than trusting compact summaries.
 
 The CLI progress stream exposes request-size telemetry (`promptChars`, structured-schema characters, and a conservative tokenizer-free `approxTokens` estimate). The estimate is diagnostic only. When the provider returns usage metadata, a separate `LLM-USAGE` event exposes exact input/output/total token counts. The OpenAI adapter also receives an explicit CLI-default `max_output_tokens=16000`, preventing a small structured action from leaving the model's full output window uncapped.
+
+## Native mesh failure observation (v2.4.2)
+
+For a failed `blockMesh`, the native command layer retains complete stdout/stderr in the local workspace log and deterministically extracts a bounded fatal diagnostic block. That raw diagnostic projection is attached to the `EngineeringEvent`, redacted before remote-model/user display, and becomes the next agent observation. The extractor does not prescribe a repair; mesh design remains agent-owned.

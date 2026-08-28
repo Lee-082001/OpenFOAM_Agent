@@ -416,3 +416,18 @@ See `ARCHITECTURE.md` and `V2_CHANGES.md` for the detailed boundary and migratio
 ### Minimal native preflight
 
 When native execution is enabled, `/confirm` resolves only the trusted `checkMesh` executable before the engineering loop starts. If it is unavailable, the run stops as `ENGINEERING_BLOCKED` before any engineering LLM action is consumed. Other OpenFOAM utilities are discovered/used later according to the agent-selected strategy. `--dry-run` skips this check.
+
+### blockMesh failure diagnostics (v2.4.2)
+
+A failed `blockMesh` command no longer appears only as `returned status 1`/`-6`. The complete native stdout/stderr is still written to the workspace log, while a bounded raw OpenFOAM fatal block is surfaced to both the next Engineering Agent turn and live CLI progress. For example:
+
+```text
+[ENGINEERING 44/120] FAIL blockMesh returned status 1; fatal diagnostic captured.
+  reason:
+    - --> FOAM FATAL ERROR:
+    - Block hex (...) has inward-pointing faces
+    - From function Foam::blockDescriptor::check()
+    - in file blockMesh/blockDescriptor/blockDescriptor.C at line ...
+```
+
+The model/user-visible diagnostic is path-redacted and bounded; the complete local log remains under the run workspace `logs/NNN.blockMesh.log`. This is observation only: Python does not choose the mesh repair from the diagnostic.

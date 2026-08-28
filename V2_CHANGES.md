@@ -1,3 +1,10 @@
+# v2.4.2
+
+- `blockMesh` failures now preserve the complete native stdout/stderr in the workspace log while extracting a bounded raw fatal diagnostic for the agent observation and CLI progress.
+- Fatal extraction recognizes OpenFOAM fatal/IO errors plus common abort, segmentation-fault, and floating-point-exception markers; when no explicit marker exists, a bounded output tail is used.
+- Live progress now prints the redacted fatal diagnostic under the failed `blockMesh` event instead of exposing only `returnCode`. Local absolute paths remain redacted from model/user-visible observations.
+- Added regression coverage proving the next Engineering Agent turn receives the fatal block and the full raw log remains available locally.
+
 # v2.4.1
 
 - Replaces free-form EngineeringPlan evidence claims (`kind/reference` strings) with canonical opaque evidence IDs issued by Python only after successful capability/reference observations.

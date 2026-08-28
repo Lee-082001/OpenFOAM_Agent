@@ -46,6 +46,7 @@ src/openfoam_agent/schemas/request.py
 src/openfoam_agent/schemas/simulation.py
 src/openfoam_agent/tools/__init__.py
 src/openfoam_agent/tools/capability_catalog.py
+src/openfoam_agent/tools/diagnostics.py
 src/openfoam_agent/tools/openfoam.py
 src/openfoam_agent/tools/parsers.py
 src/openfoam_agent/tools/references.py
@@ -62,6 +63,7 @@ tests/test_v22_human_feedback.py
 tests/test_v231_checkmesh_preflight.py
 tests/test_v23_progress.py
 tests/test_v241_canonical_evidence.py
+tests/test_v242_blockmesh_diagnostics.py
 tests/test_v24_context_compaction.py
 tests/test_v2_adversarial_integration.py
 tests/test_v2_architecture.py
