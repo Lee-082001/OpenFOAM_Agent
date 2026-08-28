@@ -4,6 +4,7 @@ from pathlib import Path
 
 from openfoam_agent.agents.intake import IntakeAgent
 from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
+from openfoam_agent.llm import WorkflowLLMs
 from openfoam_agent.runtime import RuntimeOrchestrator
 from openfoam_agent.review import CFDFeedbackReviewAgent
 from openfoam_agent.postprocessing import CFDPostProcessingAgent, PostProcessingPolicy
@@ -32,10 +33,11 @@ class CFDWorkflow:
         progress: ProgressReporter | None = None,
     ) -> None:
         self.progress = progress or NullProgressReporter()
-        self.intake = IntakeAgent(llm)
+        self.llms = WorkflowLLMs.coerce(llm)
+        self.intake = IntakeAgent(self.llms.intake)
         self.tools = openfoam_tools or OpenFOAMTools.for_workspace(workspace)
         self.engineering = CFDEngineeringAgent(
-            llm,
+            self.llms.engineering,
             workspace=workspace,
             capability_db=capability_db,
             tools=self.tools,
@@ -49,9 +51,9 @@ class CFDWorkflow:
             stream_output=stream_solver_output,
             progress=self.progress,
         )
-        self.review = CFDFeedbackReviewAgent(llm, progress=self.progress)
+        self.review = CFDFeedbackReviewAgent(self.llms.review, progress=self.progress)
         self.postprocess = CFDPostProcessingAgent(
-            llm,
+            self.llms.postprocessing,
             workspace=workspace,
             tools=self.tools,
             policy=postprocessing_policy,

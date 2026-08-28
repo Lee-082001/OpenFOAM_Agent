@@ -8,6 +8,10 @@ With `--backend openai --confirm-api-calls`, confirmed CFD task data, bounded to
 
 The model never receives a shell. `SafeRunner` resolves allowlisted executables inside trusted `WM_PROJECT_DIR`, sanitizes environment variables (including API secrets and user/site OpenFOAM override paths), restricts cwd to the private workspace, and applies timeouts. Allowed tools are limited to OpenFOAM preparation/validation, `foamRun`, `foamPostProcess`, and `foamDictionary` actions exposed by typed interfaces.
 
+## Role-routed cloud models (v2.6)
+
+Different workflow roles may use different OpenAI model IDs, but every routed model remains behind the same cloud-call authorization, context compaction, local-path redaction, typed Structured Outputs, tool allowlists, case-integrity checks, and approval gates. Routing is not an authority boundary: selecting a stronger engineering model cannot bypass deterministic validation or execute arbitrary commands. Reports record the resolved role map so mixed-model runs remain auditable.
+
 ## Native diagnostic disclosure boundary (v2.5)
 
 Failed allowlisted native commands preserve their complete stdout/stderr only in private workspace logs. The cloud/user-facing `NativeFailureDiagnostic` is bounded and local absolute paths are redacted before transmission/display. The extractor classifies only observable failure markers and never maps them to a repair policy; diagnostic text is untrusted tool output and cannot bypass case, provenance, approval, or resource gates.

@@ -1,3 +1,15 @@
+# v2.6.0
+
+## Role-based model routing
+
+- Adds `WorkflowLLMs` with independent `intake`, `engineering`, `postprocessing`, and `review` structured-LLM roles while preserving the legacy single-LLM API through automatic uniform routing.
+- Adds CLI overrides `--intake-model`, `--engineering-model`, `--postprocess-model`, and `--review-model`; `--model` remains the global backward-compatible default.
+- Supports role environment variables `OPENAI_INTAKE_MODEL`, `OPENAI_ENGINEERING_MODEL`, `OPENAI_POSTPROCESS_MODEL`, and `OPENAI_REVIEW_MODEL`, with deterministic precedence: role CLI > role env > `--model` > `OPENAI_MODEL`.
+- Runtime repair and confirmed revision engineering deliberately reuse the engineering route so one engineering model owns the full design/repair thread.
+- Reuses one `OpenAILLM` adapter per unique resolved model name instead of constructing duplicate adapters when multiple roles share a model.
+- Exposes resolved role routing in interactive startup output, JSON reports (`model_routes`), and engineering/postprocess/review `LLM-CONTEXT` and `LLM-USAGE` metrics.
+- Adds routing/backward-compatibility regression tests and synchronizes package/module metadata at 2.6.0.
+
 # v2.5.1
 
 ## Pre-solve completeness gate

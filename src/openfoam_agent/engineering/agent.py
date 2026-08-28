@@ -1329,6 +1329,9 @@ class CFDEngineeringAgent:
             system_prompt=ENGINEERING_SYSTEM_PROMPT,
         )
         metrics["compacted"] = prompt_result.compacted
+        model_name = getattr(self.llm, "model", None)
+        if isinstance(model_name, str) and model_name:
+            metrics["model"] = model_name
         max_output_tokens = getattr(self.llm, "max_output_tokens", None)
         if max_output_tokens is not None:
             metrics["maxOutputTokens"] = max_output_tokens
@@ -1349,6 +1352,9 @@ class CFDEngineeringAgent:
         )
         usage = getattr(self.llm, "last_usage", None)
         if isinstance(usage, dict) and usage:
+            usage = dict(usage)
+            if isinstance(model_name, str) and model_name:
+                usage["model"] = model_name
             self.progress.emit(
                 ProgressEvent(
                     phase="llm-usage",

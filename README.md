@@ -122,13 +122,33 @@ openfoam-agent --interactive \
   --confirm-api-calls
 ```
 
+### Role-based model routing (v2.6.0)
+
+`--model` remains the backward-compatible default for every cloud role. Individual roles can override it without changing the workflow or safety gates:
+
+```bash
+export LUNA_MODEL="<exact API model id>"
+export SOL_MODEL="<exact API model id>"
+
+openfoam-agent --interactive \
+  --backend openai \
+  --confirm-api-calls \
+  --model "$LUNA_MODEL" \
+  --engineering-model "$SOL_MODEL" \
+  --review-model "$SOL_MODEL"
+```
+
+With that configuration, intake and post-processing use the default/Luna model while engineering, mesh/case repair, runtime repair, confirmed revision engineering, and feedback review use the Sol overrides. Runtime repair intentionally follows `--engineering-model`; it is not a separate routing role.
+
+Available role overrides are `--intake-model`, `--engineering-model`, `--postprocess-model`, and `--review-model`. Resolution order is: role CLI flag, role environment variable (`OPENAI_INTAKE_MODEL`, `OPENAI_ENGINEERING_MODEL`, `OPENAI_POSTPROCESS_MODEL`, `OPENAI_REVIEW_MODEL`), `--model`, then `OPENAI_MODEL`. A global default is optional if every role is explicitly configured. The CLI startup line, `LLM-CONTEXT`/`LLM-USAGE` metrics, and JSON report `model_routes` expose the resolved routing.
+
 Typical interactive flow:
 
 ```text
 OpenFOAM Agent> 사각형 장애물 주위 vortex shedding Re=1000 나머지는 탐색용으로 정해줘
 ... intake review ...
 OpenFOAM Agent> /confirm
-... agent designs/writes/meshes/repairs until MESH_READY ...
+... agent designs/writes/meshes/repairs and completes pre-solve validation until SOLVE_READY ...
 OpenFOAM Agent> /solve
 ... bounded foamRun; failures are returned to the same engineering agent ...
 ... on success, bounded post-processing runs automatically ...

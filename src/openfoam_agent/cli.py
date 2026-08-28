@@ -12,7 +12,7 @@ from typing import Any, Sequence
 
 from openfoam_agent.conversation import ConversationSession, InteractionMode
 from openfoam_agent.engineering import EngineeringPolicy
-from openfoam_agent.llm import LLMConfigurationError, OpenAILLM, RuleBasedLLM
+from openfoam_agent.llm import LLMConfigurationError, OpenAILLM, RuleBasedLLM, WorkflowLLMs
 from openfoam_agent.postprocessing import PostProcessingPolicy
 from openfoam_agent.progress import CLIProgressReporter, ProgressLevel, ProgressReporter
 from openfoam_agent.schemas.intake import CFDIntakeSpec
@@ -92,7 +92,32 @@ def build_parser() -> argparse.ArgumentParser:
             "autonomous engineering requires --backend openai."
         ),
     )
-    parser.add_argument("--model", help="OpenAI model; otherwise use OPENAI_MODEL.")
+    parser.add_argument(
+        "--model",
+        help=(
+            "Default OpenAI model for every role; otherwise use OPENAI_MODEL. "
+            "Role-specific model flags override this default."
+        ),
+    )
+    parser.add_argument(
+        "--intake-model",
+        help="Override the model used for intake analysis (or OPENAI_INTAKE_MODEL).",
+    )
+    parser.add_argument(
+        "--engineering-model",
+        help=(
+            "Override the model used for engineering, mesh/case repair, runtime repair, "
+            "and confirmed revisions (or OPENAI_ENGINEERING_MODEL)."
+        ),
+    )
+    parser.add_argument(
+        "--postprocess-model",
+        help="Override the model used for post-processing (or OPENAI_POSTPROCESS_MODEL).",
+    )
+    parser.add_argument(
+        "--review-model",
+        help="Override the model used for human-feedback review (or OPENAI_REVIEW_MODEL).",
+    )
     parser.add_argument(
         "--llm-max-output-tokens",
         type=int,
@@ -213,8 +238,18 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
     if args.solve and args.dry_run:
         parser.error("--solve cannot be combined with --dry-run.")
     if args.backend == "rule-based-intake":
-        if args.model:
-            parser.error("--model is only valid with --backend openai.")
+        role_model_flags = {
+            "--model": args.model,
+            "--intake-model": args.intake_model,
+            "--engineering-model": args.engineering_model,
+            "--postprocess-model": args.postprocess_model,
+            "--review-model": args.review_model,
+        }
+        invalid_model_flags = [flag for flag, value in role_model_flags.items() if value]
+        if invalid_model_flags:
+            parser.error(
+                f"{', '.join(invalid_model_flags)} are only valid with --backend openai."
+            )
         if args.confirm_api_calls:
             parser.error("--confirm-api-calls is only valid with --backend openai.")
         if args.confirm_intake:
@@ -252,15 +287,77 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
     return selected.strip() if selected is not None else None
 
 
+_ROLE_MODEL_ENV = {
+    "intake": "OPENAI_INTAKE_MODEL",
+    "engineering": "OPENAI_ENGINEERING_MODEL",
+    "postprocessing": "OPENAI_POSTPROCESS_MODEL",
+    "review": "OPENAI_REVIEW_MODEL",
+}
+
+
+def _resolve_openai_model_names(
+    args: argparse.Namespace,
+    *,
+    environ: dict[str, str] | None = None,
+) -> tuple[str | None, dict[str, str]]:
+    env = os.environ if environ is None else environ
+
+    def cleaned(value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+    default_model = cleaned(args.model) or cleaned(env.get("OPENAI_MODEL"))
+    cli_overrides = {
+        "intake": cleaned(args.intake_model),
+        "engineering": cleaned(args.engineering_model),
+        "postprocessing": cleaned(args.postprocess_model),
+        "review": cleaned(args.review_model),
+    }
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for role, env_name in _ROLE_MODEL_ENV.items():
+        model_name = cli_overrides[role] or cleaned(env.get(env_name)) or default_model
+        if model_name is None:
+            missing.append(role)
+        else:
+            resolved[role] = model_name
+    if missing:
+        roles = ", ".join(missing)
+        raise LLMConfigurationError(
+            "No OpenAI model is configured for role(s): "
+            f"{roles}. Set --model/OPENAI_MODEL or provide every missing role override."
+        )
+    return default_model, resolved
+
+
 def _build_llm(args: argparse.Namespace):
     if args.backend == "rule-based-intake":
-        return RuleBasedLLM(), "rule-based-intake", None
-    llm = (
-        OpenAILLM(model=args.model, max_output_tokens=args.llm_max_output_tokens)
-        if args.model
-        else OpenAILLM.from_env(max_output_tokens=args.llm_max_output_tokens)
+        return WorkflowLLMs.uniform(RuleBasedLLM()), "rule-based-intake", None
+
+    default_model, names = _resolve_openai_model_names(args)
+    clients: dict[str, OpenAILLM] = {}
+
+    def client(model_name: str) -> OpenAILLM:
+        if model_name not in clients:
+            clients[model_name] = OpenAILLM(
+                model=model_name,
+                max_output_tokens=args.llm_max_output_tokens,
+            )
+        return clients[model_name]
+
+    llms = WorkflowLLMs(
+        intake=client(names["intake"]),
+        engineering=client(names["engineering"]),
+        postprocessing=client(names["postprocessing"]),
+        review=client(names["review"]),
     )
-    return llm, "openai", llm.model
+    return llms, "openai", default_model
+
+
+def _model_routes(llm: Any) -> dict[str, str | None]:
+    return WorkflowLLMs.coerce(llm).model_names()
 
 
 def _policies_from_args(
@@ -294,9 +391,10 @@ def build_report(
     engineering_policy: EngineeringPolicy,
     runtime_policy: RuntimePolicy,
     postprocessing_policy: PostProcessingPolicy,
+    model_routes: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
     return {
-        "architecture": "v2.5",
+        "architecture": "v2.6",
         "run_id": state.run_id,
         "prompt": request.prompt,
         "conversation_turns": list(request.conversation_turns),
@@ -304,6 +402,12 @@ def build_report(
         "exploratory_completion_authorized": request.exploratory_completion_authorized,
         "backend": backend,
         "model": model,
+        "model_routes": model_routes or {
+            "intake": model,
+            "engineering": model,
+            "postprocessing": model,
+            "review": model,
+        },
         "final_state": state.current_state.value,
         "message": state.history[-1]["note"] if state.history else "",
         "workspace": str(workspace),
@@ -617,6 +721,7 @@ def run_prompt(
         backend=backend,
         model=model,
         request=request,
+        model_routes=_model_routes(llm),
         workspace=run_workspace,
         engineering_policy=engineering_policy,
         runtime_policy=runtime_policy,
@@ -779,6 +884,7 @@ def _feedback_session(session, args, llm, backend, model, feedback_text: str) ->
         backend=backend,
         model=model,
         request=session.to_request(),
+        model_routes=_model_routes(llm),
         workspace=run_workspace,
         engineering_policy=engineering_policy,
         runtime_policy=runtime_policy,
@@ -840,6 +946,7 @@ def _confirm_revision_session(session, args, llm, backend, model) -> None:
             backend=backend,
             model=model,
             request=session.to_request(),
+            model_routes=_model_routes(llm),
             workspace=run_workspace,
             engineering_policy=engineering_policy,
             runtime_policy=runtime_policy,
@@ -858,6 +965,7 @@ def _confirm_revision_session(session, args, llm, backend, model) -> None:
         backend=backend,
         model=model,
         request=session.to_request(),
+        model_routes=_model_routes(llm),
         workspace=run_workspace,
         engineering_policy=engineering_policy,
         runtime_policy=runtime_policy,
@@ -883,6 +991,7 @@ def _reject_revision_session(session, args, llm, backend, model) -> None:
         backend=backend,
         model=model,
         request=session.to_request(),
+        model_routes=_model_routes(llm),
         workspace=run_workspace,
         engineering_policy=engineering_policy,
         runtime_policy=runtime_policy,
@@ -908,6 +1017,7 @@ def _accept_session(session, args, llm, backend, model) -> None:
         backend=backend,
         model=model,
         request=session.to_request(),
+        model_routes=_model_routes(llm),
         workspace=run_workspace,
         engineering_policy=engineering_policy,
         runtime_policy=runtime_policy,
@@ -953,6 +1063,7 @@ def _solve_session(session, args, llm, backend, model) -> None:
         backend=backend,
         model=model,
         request=session.to_request(),
+        model_routes=_model_routes(llm),
         workspace=run_workspace,
         engineering_policy=engineering_policy,
         runtime_policy=runtime_policy,
@@ -1037,9 +1148,17 @@ def _handle_command(command, session, args, llm, backend, model) -> bool:
 
 def _interactive(args, llm, backend, model) -> int:
     session = ConversationSession(mode=InteractionMode(args.mode))
-    print(f"OpenFOAM Agent v2.5 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
+    print(f"OpenFOAM Agent v2.6 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
     if backend == "openai":
-        print(f"OpenAI model: {model}; cloud agent API calls authorized (task data/tool observations are transmitted; local paths are redacted).")
+        routes = _model_routes(llm)
+        print(
+            "OpenAI model routing: "
+            f"intake={routes['intake']}, engineering={routes['engineering']}, "
+            f"postprocess={routes['postprocessing']}, review={routes['review']}; "
+            "runtime-repair/revision use the engineering model. "
+            "Cloud agent API calls authorized (task data/tool observations are transmitted; "
+            "local paths are redacted)."
+        )
     while True:
         try:
             prompt = input("OpenFOAM Agent> ").strip()

@@ -153,6 +153,12 @@ This compaction never authorizes an engineering claim. Final plan/evidence valid
 
 The CLI progress stream exposes request-size telemetry (`promptChars`, structured-schema characters, and a conservative tokenizer-free `approxTokens` estimate). The estimate is diagnostic only. When the provider returns usage metadata, a separate `LLM-USAGE` event exposes exact input/output/total token counts. The OpenAI adapter also receives an explicit CLI-default `max_output_tokens=16000`, preventing a small structured action from leaving the model's full output window uncapped.
 
+## Role-based model routing (v2.6.0)
+
+The workflow accepts either one legacy `StructuredLLM` or a `WorkflowLLMs` bundle. A single LLM is expanded uniformly for backward compatibility. Routed workflows bind intake, engineering, post-processing, and human-feedback review to independent model adapters. Runtime repair and confirmed case revision are intentionally not separate model roles: both continue through the same `CFDEngineeringAgent` and therefore inherit the engineering model.
+
+Model routing changes reasoning capacity/cost allocation only. It does not grant additional tools, relax deterministic gates, change confirmed facts, or make model output execution evidence. The CLI resolves model names before workflow construction and records the resulting role map in reports/progress for auditability.
+
 ## Unified native failure observation (v2.5.0)
 
 All failed allowlisted OpenFOAM executions now pass through one `NativeFailureDiagnostic` observation path rather than command-specific error handling. This covers engineering utilities (`foamDictionary`, `surfaceCheck`, `blockMesh`, `surfaceFeatureExtract`, `snappyHexMesh`, `createPatch`, `checkMesh`), runtime `foamRun`, and post-processing `foamPostProcess`.

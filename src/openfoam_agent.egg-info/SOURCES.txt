@@ -22,6 +22,7 @@ src/openfoam_agent/llm/__init__.py
 src/openfoam_agent/llm/context.py
 src/openfoam_agent/llm/openai_client.py
 src/openfoam_agent/llm/protocol.py
+src/openfoam_agent/llm/routing.py
 src/openfoam_agent/llm/rule_based.py
 src/openfoam_agent/llm/prompts/__init__.py
 src/openfoam_agent/llm/prompts/engineering.py
@@ -68,6 +69,7 @@ tests/test_v242_blockmesh_diagnostics.py
 tests/test_v24_context_compaction.py
 tests/test_v250_native_failure_diagnostics.py
 tests/test_v251_presolve_completeness.py
+tests/test_v260_model_routing.py
 tests/test_v2_adversarial_integration.py
 tests/test_v2_architecture.py
 tests/test_v2_budgets.py
