@@ -14,7 +14,6 @@ from .openai_client import (
     DEFAULT_SYSTEM_PROMPT,
     LLMConfigurationError,
     StructuredOutputError,
-    validate_structured_output_schema,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -23,6 +22,7 @@ DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_OLLAMA_MODEL = "gemma4:31b"
 DEFAULT_OLLAMA_API_KEY = "ollama"
 DEFAULT_OLLAMA_HEALTH_TIMEOUT = 3.0
+DEFAULT_OLLAMA_STRUCTURED_REPAIRS = 2
 _ALLOWED_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -140,18 +140,22 @@ class OllamaLLM:
         client: Any | None = None,
         default_system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_output_tokens: int | None = None,
+        structured_repair_attempts: int = DEFAULT_OLLAMA_STRUCTURED_REPAIRS,
     ) -> None:
         normalized_model = model.strip()
         if not normalized_model:
             raise LLMConfigurationError("An Ollama model name is required.")
         if max_output_tokens is not None and max_output_tokens <= 0:
             raise LLMConfigurationError("max_output_tokens must be positive when set.")
+        if structured_repair_attempts < 0:
+            raise LLMConfigurationError("structured_repair_attempts must be non-negative.")
 
         self.model = normalized_model
         self.base_url = normalize_ollama_base_url(base_url)
         self.api_key = api_key or DEFAULT_OLLAMA_API_KEY
         self.default_system_prompt = default_system_prompt.strip()
         self.max_output_tokens = max_output_tokens
+        self.structured_repair_attempts = structured_repair_attempts
         self.last_usage: dict[str, int] | None = None
         self._client = client if client is not None else self._build_client()
 
@@ -180,9 +184,17 @@ class OllamaLLM:
         *,
         system_prompt: str | None = None,
     ) -> T:
+        """Generate JSON, validate it in Python, and repair invalid local-model output.
+
+        The Ollama adapter intentionally does *not* send the full Pydantic model as a
+        constrained-decoding grammar. Complex Agent schemas (notably EngineeringTurn)
+        can exceed what some Ollama/llama.cpp grammar paths accept. Instead Ollama is
+        asked for generic JSON mode, while Pydantic remains the authoritative schema
+        validator before any Agent action can execute.
+        """
+
         if not isinstance(schema, type) or not issubclass(schema, BaseModel):
             raise TypeError("schema must be a Pydantic BaseModel class.")
-        validate_structured_output_schema(schema)
 
         normalized_prompt = prompt.strip()
         if not normalized_prompt:
@@ -191,42 +203,114 @@ class OllamaLLM:
         effective_system_prompt = (
             self.default_system_prompt if system_prompt is None else system_prompt.strip()
         )
+        schema_json = json.dumps(
+            schema.model_json_schema(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        output_contract = (
+            "\n\nOUTPUT CONTRACT FOR LOCAL JSON MODE:\n"
+            "Return exactly one JSON object and no Markdown/code fences or commentary. "
+            "The JSON must validate against the following schema. This schema is guidance "
+            "for generation only; Python/Pydantic performs the authoritative validation "
+            "after the response:\n"
+            f"{schema_json}"
+        )
+
         messages: list[dict[str, str]] = []
         if effective_system_prompt:
             messages.append({"role": "system", "content": effective_system_prompt})
-        messages.append({"role": "user", "content": normalized_prompt})
-
-        request: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "response_format": schema,
-        }
-        if self.max_output_tokens is not None:
-            # Ollama's OpenAI-compatible /v1/chat/completions endpoint documents max_tokens.
-            request["max_tokens"] = self.max_output_tokens
+        messages.append({"role": "user", "content": normalized_prompt + output_contract})
 
         self.last_usage = None
-        try:
-            completion = self._client.chat.completions.parse(**request)
-        except Exception as exc:
-            if _looks_like_connection_error(exc):
-                raise OllamaConnectionError(_connection_message(self.base_url)) from exc
-            raise
+        cumulative_usage: dict[str, int] = {}
+        last_error = "The model did not return valid structured JSON."
+        last_content = ""
+        max_attempts = 1 + self.structured_repair_attempts
 
-        self.last_usage = _chat_completion_usage(completion)
-        choices = getattr(completion, "choices", None) or []
-        message = getattr(choices[0], "message", None) if choices else None
-        parsed = getattr(message, "parsed", None) if message is not None else None
-        if parsed is None:
+        for attempt in range(max_attempts):
+            request: dict[str, Any] = {
+                "model": self.model,
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+            }
+            if self.max_output_tokens is not None:
+                # Ollama's OpenAI-compatible /v1/chat/completions endpoint documents max_tokens.
+                request["max_tokens"] = self.max_output_tokens
+
+            try:
+                completion = self._client.chat.completions.create(**request)
+            except Exception as exc:
+                if _looks_like_connection_error(exc):
+                    raise OllamaConnectionError(_connection_message(self.base_url)) from exc
+                raise
+
+            cumulative_usage = _add_usage(cumulative_usage, _chat_completion_usage(completion))
+            self.last_usage = cumulative_usage or None
+
+            choices = getattr(completion, "choices", None) or []
+            message = getattr(choices[0], "message", None) if choices else None
+            content = getattr(message, "content", None) if message is not None else None
             refusal = getattr(message, "refusal", None) if message is not None else None
-            suffix = f" refusal={refusal!r}" if refusal else ""
-            raise StructuredOutputError(
-                "The Ollama response had no parsed structured output; ensure the selected "
-                f"model supports reliable JSON-schema output.{suffix}"
+            last_content = content if isinstance(content, str) else ""
+
+            if not isinstance(content, str) or not content.strip():
+                last_error = "Response content was empty or missing."
+                if refusal:
+                    last_error += f" refusal={refusal!r}"
+            else:
+                try:
+                    return schema.model_validate_json(content)
+                except Exception as exc:
+                    last_error = _structured_validation_error(exc)
+
+            if attempt >= max_attempts - 1:
+                break
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": last_content or "{}",
+                }
             )
-        if isinstance(parsed, schema):
-            return parsed
-        return schema.model_validate(parsed)
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous JSON failed deterministic Python/Pydantic validation. "
+                        "Correct the JSON only; do not explain the correction and do not use "
+                        "Markdown. Preserve the intended engineering decision unless the "
+                        "validation error requires changing it.\n\n"
+                        f"VALIDATION ERROR:\n{last_error}"
+                    ),
+                }
+            )
+
+        raise StructuredOutputError(
+            f"Ollama model {self.model!r} failed Python/Pydantic structured-output "
+            f"validation after {max_attempts} attempt(s): {last_error}"
+        )
+
+
+def _structured_validation_error(exc: Exception, *, limit: int = 4000) -> str:
+    text = str(exc).strip() or type(exc).__name__
+    if len(text) > limit:
+        return text[:limit] + "...<truncated>"
+    return text
+
+
+def _add_usage(
+    total: dict[str, int],
+    usage: dict[str, int] | None,
+) -> dict[str, int]:
+    if not usage:
+        return dict(total)
+    merged = dict(total)
+    for key, value in usage.items():
+        if isinstance(value, int) and value >= 0:
+            merged[key] = merged.get(key, 0) + value
+    return merged
 
 
 def _looks_like_connection_error(exc: Exception) -> bool:

@@ -191,4 +191,8 @@ OpenFOAM Agent roles
 
 The Ollama provider is not an Agent and does not acquire tool authority. All filesystem mutation, native OpenFOAM execution, evidence validation, safety gates, retries, and state transitions remain in the existing deterministic/agent orchestration layers.
 
+### Provider-specific structured output (v2.7.2)
+
+`OpenAILLM` keeps the existing strict Structured Outputs path. `OllamaLLM` uses a different transport-level strategy while preserving the same `StructuredLLM.generate(...) -> Pydantic model` contract: it requests generic JSON mode from `/v1/chat/completions`, places the target Pydantic JSON schema in the prompt as guidance rather than as a constrained-decoding grammar, validates the returned JSON with Pydantic in Python, and returns validation errors to the same local model for at most two repair turns. This avoids local grammar-initialization failures on large union-heavy Agent schemas such as `EngineeringTurn` without weakening the deterministic execution boundary. No invalid JSON or schema-invalid action reaches tool dispatch.
+
 Ollama endpoint configuration is loopback-only by construction. A startup `/v1/models` probe verifies the tunnel/service and requested models before workflow execution. Provider failure is terminal for that backend invocation; there is no implicit OpenAI fallback.

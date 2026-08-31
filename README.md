@@ -170,7 +170,9 @@ OLLAMA_API_KEY (optional; defaults to ollama)
 --review-model / OLLAMA_REVIEW_MODEL
 ```
 
-The Ollama adapter reuses the installed OpenAI Python SDK against the OpenAI-compatible `/v1/chat/completions` endpoint and requests Pydantic structured output. `--confirm-api-calls` is intentionally not required for `--backend ollama` because requests stay on local loopback and traverse the user-created SSH tunnel; that flag remains mandatory for the cloud OpenAI backend.
+The Ollama adapter reuses the installed OpenAI Python SDK against the OpenAI-compatible `/v1/chat/completions` endpoint, but it deliberately does **not** send the full Pydantic Agent schema as an Ollama constrained-decoding grammar. Complex schemas such as `EngineeringTurn` can fail in local grammar initialization before the model runs. Ollama therefore uses generic JSON mode (`response_format={"type":"json_object"}`), includes the Pydantic JSON schema in the prompt as generation guidance, then performs authoritative `model_validate_json()` validation in Python. Invalid local-model output receives at most two structured-repair turns (three total generation attempts). Only a Pydantic-valid object proceeds to the existing Agent/safety/evidence gates. OpenAI keeps its existing strict Structured Outputs path unchanged.
+
+`--confirm-api-calls` is intentionally not required for `--backend ollama` because requests stay on local loopback and traverse the user-created SSH tunnel; that flag remains mandatory for the cloud OpenAI backend.
 
 ### Role-based model routing (v2.6.0)
 

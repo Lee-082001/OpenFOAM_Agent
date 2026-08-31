@@ -1,3 +1,15 @@
+# v2.7.2
+
+## Ollama JSON-mode structured repair
+
+- Changes only the Ollama/local structured-output transport; the OpenAI strict Structured Outputs path is unchanged.
+- Replaces Ollama `chat.completions.parse(..., response_format=PydanticModel)` with OpenAI-compatible JSON mode via `chat.completions.create(..., response_format={"type":"json_object"})`, avoiding constrained-decoding grammar compilation for large Agent schemas.
+- Supplies the target Pydantic JSON schema in the local-model prompt as guidance, then treats Python `model_validate_json()` as the authoritative structured-output validator.
+- Adds two bounded structured-repair turns (three total local generation attempts) that return deterministic Pydantic validation errors to the same Ollama model; invalid output never reaches Agent tool dispatch.
+- Aggregates Ollama token usage across internal repair attempts so existing usage reporting reflects the full local-model cost.
+- Adds regression coverage proving `EngineeringTurn` does not use Ollama grammar parsing, invalid JSON/schema output is repaired, retries are bounded, connection failures still do not fall back to OpenAI, and the existing OpenAI/backend routing behavior remains intact.
+- Synchronizes package/module/CLI/report metadata at 2.7.2.
+
 # v2.7.1
 
 ## Mesh-scoped checkMesh freshness

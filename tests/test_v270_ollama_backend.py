@@ -10,6 +10,8 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
+from openfoam_agent.schemas.engineering import EngineeringTurn
+
 from openfoam_agent.cli import (
     _build_llm,
     _resolve_ollama_model_names,
@@ -136,16 +138,26 @@ def test_ollama_rejects_direct_remote_base_url():
         normalize_ollama_base_url("http://0.0.0.0:11434/v1")
 
 
-def test_ollama_structured_adapter_uses_chat_completions_parse():
+def test_ollama_structured_adapter_uses_json_mode_then_python_validation():
     captured = {}
 
     class FakeCompletions:
-        def parse(self, **kwargs):
+        def create(self, **kwargs):
             captured.update(kwargs)
             return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(parsed=DemoOutput(action="run", reason="ok"), refusal=None))],
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps({"action": "run", "reason": "ok"}),
+                            refusal=None,
+                        )
+                    )
+                ],
                 usage=SimpleNamespace(prompt_tokens=123, completion_tokens=17, total_tokens=140),
             )
+
+        def parse(self, **kwargs):
+            raise AssertionError("Ollama must not compile Pydantic schemas as grammars")
 
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
     llm = OllamaLLM(
@@ -157,12 +169,13 @@ def test_ollama_structured_adapter_uses_chat_completions_parse():
     result = llm.generate(DemoOutput, "Return one action.", system_prompt="Be concise.")
     assert result.action == "run"
     assert captured["model"] == DEFAULT_OLLAMA_MODEL
-    assert captured["response_format"] is DemoOutput
+    assert captured["response_format"] == {"type": "json_object"}
+    assert captured["temperature"] == 0
     assert captured["max_tokens"] == 2048
-    assert captured["messages"] == [
-        {"role": "system", "content": "Be concise."},
-        {"role": "user", "content": "Return one action."},
-    ]
+    assert captured["messages"][0] == {"role": "system", "content": "Be concise."}
+    assert "Return one action." in captured["messages"][1]["content"]
+    assert "OUTPUT CONTRACT FOR LOCAL JSON MODE" in captured["messages"][1]["content"]
+    assert '"action"' in captured["messages"][1]["content"]
     assert llm.last_usage == {
         "inputTokens": 123,
         "outputTokens": 17,
@@ -170,12 +183,119 @@ def test_ollama_structured_adapter_uses_chat_completions_parse():
     }
 
 
+def test_ollama_repairs_invalid_json_with_pydantic_errors_and_sums_usage():
+    calls = []
+    payloads = [
+        {"action": "run"},  # missing reason
+        {"action": "run", "reason": "repaired"},
+    ]
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            payload = payloads[len(calls) - 1]
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=json.dumps(payload), refusal=None)
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    llm = OllamaLLM(model=DEFAULT_OLLAMA_MODEL, client=fake_client)
+
+    result = llm.generate(DemoOutput, "Return one action.")
+
+    assert result == DemoOutput(action="run", reason="repaired")
+    assert len(calls) == 2
+    repair_messages = calls[1]["messages"]
+    assert repair_messages[-2] == {"role": "assistant", "content": '{"action": "run"}'}
+    assert "VALIDATION ERROR" in repair_messages[-1]["content"]
+    assert "reason" in repair_messages[-1]["content"]
+    assert llm.last_usage == {
+        "inputTokens": 20,
+        "outputTokens": 10,
+        "totalTokens": 30,
+    }
+
+
+def test_ollama_structured_repair_stops_after_three_total_attempts():
+    calls = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"action":"run"}', refusal=None)
+                    )
+                ],
+                usage=None,
+            )
+
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    llm = OllamaLLM(
+        model=DEFAULT_OLLAMA_MODEL,
+        client=fake_client,
+        structured_repair_attempts=2,
+    )
+
+    from openfoam_agent.llm import StructuredOutputError
+
+    with pytest.raises(StructuredOutputError, match=r"after 3 attempt\(s\)"):
+        llm.generate(DemoOutput, "Return one action.")
+    assert len(calls) == 3
+
+
+def test_ollama_engineering_turn_avoids_complex_schema_grammar():
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps(
+                                {
+                                    "action": {
+                                        "type": "inspect_environment",
+                                        "rationale": "Inspect the OpenFOAM environment first.",
+                                    }
+                                }
+                            ),
+                            refusal=None,
+                        )
+                    )
+                ],
+                usage=None,
+            )
+
+        def parse(self, **kwargs):
+            raise AssertionError("EngineeringTurn must not be sent to Ollama grammar parsing")
+
+    llm = OllamaLLM(
+        model=DEFAULT_OLLAMA_MODEL,
+        client=SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions())),
+    )
+    turn = llm.generate(EngineeringTurn, "Choose the next engineering action.")
+
+    assert turn.action.type == "inspect_environment"
+    assert captured["response_format"] == {"type": "json_object"}
+    assert "EngineeringTurn" not in str(captured["response_format"])
+    assert '"anyOf"' in captured["messages"][1]["content"]
+
+
 def test_ollama_generate_connection_failure_never_falls_back_to_openai():
     class APIConnectionError(Exception):
         pass
 
     class FakeCompletions:
-        def parse(self, **kwargs):
+        def create(self, **kwargs):
             raise APIConnectionError("connection refused")
 
     fake_client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
