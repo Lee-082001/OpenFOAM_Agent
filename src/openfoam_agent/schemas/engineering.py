@@ -184,6 +184,27 @@ class RunMeshCommandAction(_EngineeringModel):
     rationale: str = Field(min_length=1, max_length=1500)
 
 
+class ValidatePreSolveAction(_EngineeringModel):
+    """Run deterministic solver-input completeness checks for Agent-declared files.
+
+    This deliberately carries only the solver-required file declaration needed by
+    the deterministic gate.  It does not encode solver-to-field policy in Python.
+    """
+
+    type: Literal["validate_pre_solve"]
+    required_case_files: list[str] = Field(min_length=1, max_length=80)
+    rationale: str = Field(min_length=1, max_length=1500)
+
+    @model_validator(mode="after")
+    def validate_required_case_files(self) -> Self:
+        if len(self.required_case_files) != len(set(self.required_case_files)):
+            raise ValueError("validate_pre_solve contains duplicate required case files.")
+        for path in self.required_case_files:
+            if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
+                raise ValueError(f"Unsafe required case file path: {path}")
+        return self
+
+
 class FinishPreviewAction(_EngineeringModel):
     type: Literal["finish_preview"]
     plan: EngineeringPlan
@@ -203,6 +224,62 @@ class BlockAction(_EngineeringModel):
     rationale: str = Field(min_length=1, max_length=1500)
 
 
+EngineeringSequenceMemberAction = (
+    WriteCaseFileAction
+    | DeleteCaseFileAction
+    | ValidateDictionaryAction
+    | SurfaceCheckAction
+    | RunMeshCommandAction
+    | ValidatePreSolveAction
+    | FinishPreviewAction
+    | RetrySolverAction
+)
+
+
+class EngineeringSequenceAction(_EngineeringModel):
+    """A short ordered engineering intention executed without intermediate LLM calls."""
+
+    type: Literal["sequence"]
+    goal: str = Field(min_length=1, max_length=1000)
+    actions: list[EngineeringSequenceMemberAction] = Field(min_length=2, max_length=6)
+    rationale: str = Field(min_length=1, max_length=1500)
+
+    @model_validator(mode="after")
+    def validate_sequence_shape(self) -> Self:
+        terminal_types = {"finish_preview", "retry_solver"}
+        for index, action in enumerate(self.actions):
+            if action.type in terminal_types and index != len(self.actions) - 1:
+                raise ValueError(
+                    f"{action.type} may appear only as the final action in an engineering sequence."
+                )
+
+        # Prevent the exact repair-thrashing pattern observed in long runs: the same
+        # file may not be rewritten repeatedly without an intervening deterministic
+        # validator/native execution.  The Agent may still rewrite after validation.
+        last_write_index: dict[str, int] = {}
+        validation_since_write: dict[str, bool] = {}
+        for index, action in enumerate(self.actions):
+            if isinstance(action, WriteCaseFileAction):
+                previous = last_write_index.get(action.path)
+                if previous is not None and not validation_since_write.get(action.path, False):
+                    raise ValueError(
+                        f"Sequence rewrites {action.path} without an intervening validation/native action."
+                    )
+                last_write_index[action.path] = index
+                validation_since_write[action.path] = False
+                continue
+            if isinstance(action, ValidateDictionaryAction):
+                validation_since_write[action.path] = True
+                continue
+            if isinstance(action, SurfaceCheckAction):
+                validation_since_write[action.path] = True
+                continue
+            if isinstance(action, (RunMeshCommandAction, ValidatePreSolveAction)):
+                for path in list(validation_since_write):
+                    validation_since_write[path] = True
+        return self
+
+
 # Keep this as a plain Union rather than a Pydantic discriminated union.
 # Pydantic emits `oneOf` + `discriminator` for discriminated unions, while
 # OpenAI Structured Outputs supports nested `anyOf` but rejects `oneOf`.
@@ -220,9 +297,11 @@ EngineeringAction = (
     | ValidateDictionaryAction
     | SurfaceCheckAction
     | RunMeshCommandAction
+    | ValidatePreSolveAction
     | FinishPreviewAction
     | RetrySolverAction
     | BlockAction
+    | EngineeringSequenceAction
 )
 
 
@@ -240,6 +319,10 @@ class EngineeringEvent(_EngineeringModel):
     native_command_executed: bool = False
     mesh_command_executed: bool = False
     observed_evidence: list[ObservedEngineeringEvidence] = Field(default_factory=list, max_length=24)
+    sequence_id: str | None = Field(default=None, max_length=120)
+    sequence_goal: str | None = Field(default=None, max_length=1000)
+    sequence_index: int | None = Field(default=None, ge=1, le=64)
+    sequence_length: int | None = Field(default=None, ge=2, le=64)
 
     @model_validator(mode="after")
     def validate_resource_markers(self) -> Self:

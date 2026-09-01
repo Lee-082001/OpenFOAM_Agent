@@ -136,6 +136,8 @@ def describe_action(action: object) -> str:
         "validate_dictionary": "foamDictionary 검사",
         "surface_check": "surfaceCheck 실행",
         "run_mesh_command": "mesh command 실행",
+        "validate_pre_solve": "pre-solve completeness 검사",
+        "sequence": "engineering sequence 계획",
         "finish_preview": "engineering plan 최종 검증 및 case seal",
         "retry_solver": "runtime repair 검증 및 solver 재시도 요청",
         "block": "engineering 중단/검토 요청",
@@ -160,6 +162,8 @@ def _safe_action_target(action: object) -> str:
         return str(getattr(action, "path", ""))
     if action_type == "run_mesh_command":
         return str(getattr(action, "command", ""))
+    if action_type == "sequence":
+        return _compact(str(getattr(action, "goal", "")), 120)
     if action_type in {"search_capabilities", "search_references", "search_postprocess_references"}:
         return _compact(str(getattr(action, "query", "")), 100)
     if action_type in {"read_reference", "read_postprocess_reference"}:

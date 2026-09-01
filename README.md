@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.7.1
+# OpenFOAM Agent v2.8.0
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -419,11 +419,19 @@ See `SECURITY.md` for the threat model and residual limitations.
 
 ## Failure semantics
 
-A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.0.5 uses a progress-aware engineering budget: the default soft boundary is 120 actions, extensions are granted in 20-action chunks only when recent action/result evidence is genuinely new, and the absolute hard cap is 200. Repeating the same action/result loop does not earn more budget.
+A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.8.0 measures the progress-aware engineering budget in **LLM turns**: the default soft boundary is 120 turns, extensions are granted in 20-turn chunks only when recent action/result evidence is genuinely new, and the absolute hard cap is 200 turns. Deterministic tool actions have a separate default cap of 480 per engineering round. Repeating the same action/result loop does not earn more budget.
 
-Preparation also has independent default limits of 40 executed native OpenFOAM validation/mesh commands and 10 mesh-repair cycles. If the engineering window ends immediately after a current passing `checkMesh`, a finalization-only window of 8 actions lets the Agent submit `finish_preview` or `block`; it cannot run tools or edit the case.
+### Engineering action sequences (v2.8.0)
 
-During runtime, a failed `foamRun` log is returned to the same engineering agent. The default policy allows up to 8 autonomous repair/retry cycles (9 solver executions total), with up to 60 engineering actions inside each repair cycle. Automatic repair cannot switch the already approved solver. Only mesh-affecting edits invalidate current `checkMesh` evidence. Changes to `fvSchemes`, `fvSolution`, `controlDict`, initial fields, and other non-mesh solver inputs keep the existing mesh evidence current and are validated by their appropriate dictionary/pre-solve checks. Changes to mesh-generation dictionaries, geometry inputs, or generated `constant/polyMesh` require a fresh `checkMesh` before `retry_solver` is accepted.
+The Engineering Agent is no longer forced to spend one model call before every predictable tool action. A single `EngineeringTurn` may still contain one legacy action, or it may contain a bounded `sequence` of 2-6 ordered deterministic actions. Typical sequences are `write -> foamDictionary`, `write STL -> surfaceCheck`, `write mesh input -> blockMesh/snappyHexMesh -> checkMesh`, and solver-input construction ending in `validate_pre_solve`. Runtime repair can end a validated sequence with `retry_solver`.
+
+Python does **not** execute a sequence as an unchecked batch. Every member passes through the existing workspace sandbox, command allowlist, native-command budget, mesh-freshness rules, pre-solve completeness checks, and safety/evidence gates. The first failed/rejected member stops the remaining sequence immediately and returns the real diagnostic to the next Engineering Agent turn. Rewriting the same file twice inside one sequence without an intervening validation/native action is rejected before execution.
+
+Raw `EngineeringEvent` records remain local and complete for audit/provenance. Model context is different: consecutive events from one sequence are collapsed into one compact `engineering_sequence_summary`, with the failed diagnostic retained when applicable. Reports expose `engineering_llm_turns_used`, `engineering_tool_actions_used`, `engineering_sequences_used`, and `tool_actions_per_llm_turn` so token-efficiency improvements can be measured directly.
+
+Preparation also has independent default limits of 40 executed native OpenFOAM validation/mesh commands and 10 mesh-repair cycles. If the engineering window ends immediately after a current passing `checkMesh`, a finalization-only window of 8 LLM turns lets the Agent submit `finish_preview` or `block`; it cannot run tools or edit the case.
+
+During runtime, a failed `foamRun` log is returned to the same engineering agent. The default policy allows up to 8 autonomous repair/retry cycles (9 solver executions total), with up to 60 Engineering LLM turns and 180 deterministic actions inside each repair cycle. Automatic repair cannot switch the already approved solver. Only mesh-affecting edits invalidate current `checkMesh` evidence. Changes to `fvSchemes`, `fvSolution`, `controlDict`, initial fields, and other non-mesh solver inputs keep the existing mesh evidence current and are validated by their appropriate dictionary/pre-solve checks. Changes to mesh-generation dictionaries, geometry inputs, or generated `constant/polyMesh` require a fresh `checkMesh` before `retry_solver` is accepted.
 
 
 ### Budget controls
@@ -435,10 +443,12 @@ The CLI exposes the production defaults so operators can tighten them for expens
 --engineering-hard-cap 200
 --engineering-extension 20
 --finalization-steps 8
+--engineering-tool-budget 480
 --native-command-budget 40
 --mesh-repair-cycles 10
 --runtime-repair-cycles 8
 --runtime-repair-steps 60
+--runtime-repair-tool-budget 180
 --postprocess-steps 40
 --postprocess-native-budget 8
 --skip-postprocess

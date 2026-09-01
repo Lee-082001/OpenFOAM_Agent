@@ -74,6 +74,7 @@ tests/test_v260_model_routing.py
 tests/test_v270_ollama_backend.py
 tests/test_v271_mesh_freshness.py
 tests/test_v273_ollama_intake_provenance.py
+tests/test_v280_engineering_sequences.py
 tests/test_v2_adversarial_integration.py
 tests/test_v2_architecture.py
 tests/test_v2_budgets.py

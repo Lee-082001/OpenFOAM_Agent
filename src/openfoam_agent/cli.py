@@ -175,25 +175,34 @@ def build_parser() -> argparse.ArgumentParser:
         "--engineering-steps",
         type=int,
         default=120,
-        help="Initial autonomous engineering soft budget (default: 120 actions).",
+        help="Initial autonomous engineering LLM-turn soft budget (default: 120 turns).",
     )
     parser.add_argument(
         "--engineering-hard-cap",
         type=int,
         default=200,
-        help="Absolute engineering action cap after progress-aware extensions (default: 200).",
+        help="Absolute engineering LLM-turn cap after progress-aware extensions (default: 200).",
     )
     parser.add_argument(
         "--engineering-extension",
         type=int,
         default=20,
-        help="Progress-aware extension chunk size (default: 20 actions).",
+        help="Progress-aware LLM-turn extension chunk size (default: 20 turns).",
     )
     parser.add_argument(
         "--finalization-steps",
         type=int,
         default=8,
         help="Plan-finalization-only actions after validated case preparation (default: 8).",
+    )
+    parser.add_argument(
+        "--engineering-tool-budget",
+        type=int,
+        default=480,
+        help=(
+            "Maximum deterministic engineering actions executed across single actions and "
+            "short sequences in one engineering round (default: 480)."
+        ),
     )
     parser.add_argument(
         "--native-command-budget",
@@ -217,7 +226,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--runtime-repair-steps",
         type=int,
         default=60,
-        help="Maximum agent actions inside each runtime repair cycle (default: 60).",
+        help="Maximum LLM turns inside each runtime repair cycle (default: 60).",
+    )
+    parser.add_argument(
+        "--runtime-repair-tool-budget",
+        type=int,
+        default=180,
+        help="Maximum deterministic actions inside each runtime repair cycle (default: 180).",
     )
     parser.add_argument(
         "--postprocess-steps",
@@ -309,9 +324,11 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         "--engineering-hard-cap": args.engineering_hard_cap,
         "--engineering-extension": args.engineering_extension,
         "--finalization-steps": args.finalization_steps,
+        "--engineering-tool-budget": args.engineering_tool_budget,
         "--native-command-budget": args.native_command_budget,
         "--mesh-repair-cycles": args.mesh_repair_cycles,
         "--runtime-repair-steps": args.runtime_repair_steps,
+        "--runtime-repair-tool-budget": args.runtime_repair_tool_budget,
         "--postprocess-steps": args.postprocess_steps,
         "--postprocess-native-budget": args.postprocess_native_budget,
     }
@@ -474,9 +491,11 @@ def _policies_from_args(
         hard_max_agent_steps=args.engineering_hard_cap,
         step_extension=args.engineering_extension,
         max_finalization_steps=args.finalization_steps,
+        max_tool_actions=args.engineering_tool_budget,
         max_native_commands=args.native_command_budget,
         max_mesh_repair_cycles=args.mesh_repair_cycles,
         max_runtime_repair_steps=args.runtime_repair_steps,
+        max_runtime_repair_tool_actions=args.runtime_repair_tool_budget,
         require_solve_ready_gate=True,
     )
     runtime = RuntimePolicy(max_attempts=args.runtime_repair_cycles + 1)
@@ -499,8 +518,17 @@ def build_report(
     postprocessing_policy: PostProcessingPolicy,
     model_routes: dict[str, str | None] | None = None,
 ) -> dict[str, Any]:
+    round_events = state.engineering_events[state.engineering_round_start_index:]
+    round_llm_turns = len({item.step for item in round_events})
+    total_llm_turns = len({item.step for item in state.engineering_events})
+    round_sequences = len(
+        {item.sequence_id for item in round_events if item.sequence_id is not None}
+    )
+    tool_actions_per_llm_turn = (
+        len(round_events) / round_llm_turns if round_llm_turns else 0.0
+    )
     return {
-        "architecture": "v2.7.3",
+        "architecture": "v2.8.0",
         "run_id": state.run_id,
         "prompt": request.prompt,
         "conversation_turns": list(request.conversation_turns),
@@ -525,10 +553,18 @@ def build_report(
         ),
         "engineering_events": [item.model_dump(mode="json") for item in state.engineering_events],
         "budget": {
-            "engineering_actions_used": len(state.engineering_events[state.engineering_round_start_index:]),
+            # Backward-compatible aliases keep existing report consumers working.
+            "engineering_actions_used": len(round_events),
             "engineering_actions_total": len(state.engineering_events),
+            "engineering_llm_turns_used": round_llm_turns,
+            "engineering_llm_turns_total": total_llm_turns,
+            "engineering_tool_actions_used": len(round_events),
+            "engineering_tool_actions_total": len(state.engineering_events),
+            "engineering_sequences_used": round_sequences,
+            "tool_actions_per_llm_turn": round(tool_actions_per_llm_turn, 3),
             "engineering_soft_limit": engineering_policy.max_agent_steps,
             "engineering_hard_limit": engineering_policy.hard_max_agent_steps,
+            "engineering_tool_action_limit": engineering_policy.max_tool_actions,
             "engineering_extensions": [
                 item.model_dump(mode="json") for item in state.engineering_budget_extensions
             ],
@@ -544,6 +580,7 @@ def build_report(
             "mesh_repair_cycle_limit": engineering_policy.max_mesh_repair_cycles,
             "runtime_repair_cycles_limit": runtime_policy.max_repair_cycles,
             "runtime_repair_steps_per_cycle": engineering_policy.max_runtime_repair_steps,
+            "runtime_repair_tool_actions_per_cycle": engineering_policy.max_runtime_repair_tool_actions,
             "postprocess_actions_used": len(state.postprocessing_events),
             "postprocess_action_limit": postprocessing_policy.max_steps,
             "postprocess_native_commands_executed": sum(
@@ -656,7 +693,9 @@ def _print_human_report(report: dict[str, Any]) -> None:
         )
         print(
             "engineering budget: "
-            f"actions={budget['engineering_actions_used']}, "
+            f"llmTurns={budget.get('engineering_llm_turns_used', budget['engineering_actions_used'])}, "
+            f"toolActions={budget.get('engineering_tool_actions_used', budget['engineering_actions_used'])}, "
+            f"actionsPerTurn={budget.get('tool_actions_per_llm_turn', 1.0)}, "
             f"native={budget['native_commands_executed']}/{budget['native_command_limit']}, "
             f"extensions={extension_text}"
         )
@@ -1254,7 +1293,7 @@ def _handle_command(command, session, args, llm, backend, model) -> bool:
 
 def _interactive(args, llm, backend, model) -> int:
     session = ConversationSession(mode=InteractionMode(args.mode))
-    print(f"OpenFOAM Agent v2.7.3 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
+    print(f"OpenFOAM Agent v2.8.0 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
     if backend == "openai":
         routes = _model_routes(llm)
         print(

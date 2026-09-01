@@ -50,7 +50,13 @@ INIT -> INTAKE_ANALYSIS -> INTAKE_REVIEW_REQUIRED
 
 ## 4. CFDEngineeringAgent
 
-One production engineering agent owns solver, mesh, BC, normalization, numerics, motion, repair and case implementation. It uses capability/reference/file/native-tool actions. Preparation has a 120-action soft budget, progress-aware +20 extensions, and 200 hard cap by default, plus separate native-command, mesh-repair and runtime-repair budgets.
+One production engineering agent owns solver, mesh, BC, normalization, numerics, motion, repair and case implementation. It uses capability/reference/file/native-tool actions. Preparation has a 120-LLM-turn soft budget, progress-aware +20-turn extensions, and 200-turn hard cap by default, plus separate deterministic-action, native-command, mesh-repair and runtime-repair budgets.
+
+### Short-horizon EngineeringSequence execution (v2.8.0)
+
+`EngineeringTurn` remains backward compatible with one action, but may now choose a bounded `sequence` containing 2-6 ordered actions. Sequence members are intentionally restricted to deterministic construction/validation operations (`write/delete`, dictionary validation, `surfaceCheck`, mesh commands, pre-solve completeness, and terminal finish/retry actions). Search/reference-reading actions remain single-turn checkpoints because their results normally require a new engineering decision.
+
+The Sequence Executor is deterministic orchestration, not a second engineering brain. It dispatches each member through the exact existing validators and stops at the first failed/rejected result. A failed `blockMesh` therefore prevents a planned `checkMesh`; a failed pre-solve completeness check prevents `retry_solver`. Raw member events remain durable provenance. Only the LLM projection groups them into one compact sequence summary, which reduces both model-call count and repeated observation history without weakening final safety/evidence validation.
 
 Human-confirmed revisions use the same engineering tools and safety gates but start a **fresh resource-accounting round**. Older EngineeringEvents remain available as provenance/evidence; they do not consume the new revision's action/native/mesh-repair budget.
 
@@ -149,7 +155,7 @@ The durable local audit state and the remote model working context are intention
 - Feedback review receives a compact runtime report and bounded recent feedback history.
 - Every model prompt passes a deterministic pre-API character budget. If the domain-specific projection is still unexpectedly large, a generic marked compaction pass reduces long strings/lists before an API call is allowed.
 
-This compaction never authorizes an engineering claim. Final plan/evidence validation continues to inspect the original local EngineeringEvents, case hashes, native evidence, and confirmed intake rather than trusting compact summaries.
+This compaction never authorizes an engineering claim. Final plan/evidence validation continues to inspect the original local EngineeringEvents, case hashes, native evidence, and confirmed intake rather than trusting compact summaries. v2.8.0 additionally collapses raw member events from one EngineeringSequence into a single model-facing summary while retaining every raw event locally.
 
 The CLI progress stream exposes request-size telemetry (`promptChars`, structured-schema characters, and a conservative tokenizer-free `approxTokens` estimate). The estimate is diagnostic only. When the provider returns usage metadata, a separate `LLM-USAGE` event exposes exact input/output/total token counts. The OpenAI adapter also receives an explicit CLI-default `max_output_tokens=16000`, preventing a small structured action from leaving the model's full output window uncapped.
 

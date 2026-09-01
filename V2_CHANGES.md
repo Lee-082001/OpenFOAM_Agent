@@ -1,3 +1,18 @@
+# v2.8.0
+
+- Adds bounded `EngineeringSequenceAction`: one Engineering LLM turn may authorize 2-6 ordered deterministic case-construction/validation actions instead of requiring one model call before every tool action.
+- Preserves the legacy single-action `EngineeringTurn(action=...)` path for backward compatibility.
+- Adds deterministic stop-on-first-failure execution. Skipped actions are never run after a failed/rejected member, and all members still pass through existing sandbox, allowlist, native budgets, mesh freshness, safety, provenance, and sealing gates.
+- Adds sequence discipline that rejects repeated writes to the same path without an intervening validation/native action, targeting observed write/write/write repair thrashing.
+- Adds `validate_pre_solve` as an explicit deterministic action so solver-input construction can chain dictionary/field writes into completeness + boundary-patch coverage validation without invoking `foamRun` as a missing-file detector.
+- Extends runtime repair sequences to support `write repair -> relevant validation -> validate_pre_solve -> retry_solver` in one LLM turn. `retry_solver` remains terminal and is never reached after an earlier sequence failure.
+- Reuses current pre-solve evidence within the unchanged case manifest/required-file declaration to avoid duplicate readiness validation immediately before retry; any case edit or mesh-generation action invalidates that cached readiness.
+- Separates LLM-turn budgets from deterministic-action budgets (`max_tool_actions=480`, runtime-repair tool-action cap `180`) while preserving native-command and mesh-repair resource limits.
+- Keeps every raw sequence member as an `EngineeringEvent` for deterministic evidence/audit, but collapses consecutive members into one model-facing `engineering_sequence_summary` for recent-history context.
+- Adds report KPIs: engineering LLM turns, deterministic tool actions, sequences used, and tool-actions-per-LLM-turn.
+- Adds CLI controls `--engineering-tool-budget` and `--runtime-repair-tool-budget`; existing `--engineering-steps`/hard-cap/runtime-repair-steps now explicitly refer to LLM turns.
+- Adds regression coverage for OpenAI strict-schema compatibility, LLM-turn reduction, stop-on-failure semantics, compact sequence history, solver-input pre-solve sequencing, and one-turn runtime repair/retry.
+
 # v2.7.3
 
 ## Ollama intake provenance-aware repair

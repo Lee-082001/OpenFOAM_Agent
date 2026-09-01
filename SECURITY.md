@@ -57,7 +57,7 @@ Solver/post-processing success ends at `RESULT_REVIEW_REQUIRED`. Only explicit `
 
 ## Resource exhaustion
 
-Engineering, native commands, mesh repair, runtime repair, solver attempts, post-processing actions and post-processing commands have independent bounds. Human-confirmed revisions receive fresh per-round engineering/native/mesh-repair budgets while old events remain audit provenance. This avoids penalizing legitimate iterative review without allowing one autonomous round to run indefinitely.
+Engineering LLM turns, deterministic engineering actions, native commands, mesh repair, runtime repair, solver attempts, post-processing actions and post-processing commands have independent bounds. Human-confirmed revisions receive fresh per-round engineering/native/mesh-repair budgets while old events remain audit provenance. A v2.8 EngineeringSequence does not bypass any bound: each member is dispatched through the same safety checks and the sequence stops on the first rejected/failed member. This avoids penalizing legitimate iterative review without allowing one autonomous round to run indefinitely.
 
 ## Residual risks
 

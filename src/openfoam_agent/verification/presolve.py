@@ -35,9 +35,21 @@ class PreSolveCompletenessGate:
         self.workspace = workspace
 
     def validate(self, plan: EngineeringPlan) -> PreSolveValidationResult:
+        return self.validate_required_case_files(plan.required_case_files)
+
+    def validate_required_case_files(
+        self,
+        required_case_files: list[str],
+    ) -> PreSolveValidationResult:
+        """Validate an Agent-declared solver-input file set without a full plan.
+
+        This supports short engineering sequences such as write -> dictionary check ->
+        pre-solve readiness while keeping the final EngineeringPlan validation intact.
+        """
+
         failures: list[str] = []
-        required = list(dict.fromkeys([*_CORE_SYSTEM_FILES, *plan.required_case_files]))
-        field_files = [item for item in plan.required_case_files if item.startswith(_FIELD_DIR)]
+        required = list(dict.fromkeys([*_CORE_SYSTEM_FILES, *required_case_files]))
+        field_files = [item for item in required_case_files if item.startswith(_FIELD_DIR)]
         if not field_files:
             failures.append(
                 "EngineeringPlan.required_case_files must declare the solver-required initial field files under 0/."
