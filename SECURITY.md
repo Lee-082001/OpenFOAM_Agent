@@ -30,6 +30,10 @@ Failed allowlisted native commands preserve their complete stdout/stderr only in
 
 Agent writes are sandboxed. Traversal, absolute paths, symlinked execution inputs, NUL content, executable directives (`#codeStream`, `#calc`, runtime coded constructs, `system(...)`, etc.) and non-allowlisted libraries are rejected. Before solve, every input under `0/`, `constant/`, and `system/` is SHA-256 sealed. `MESH_READY` additionally requires current trusted `checkMesh` evidence bound to a mesh-only manifest covering mesh-generation dictionaries, geometry inputs, and generated `constant/polyMesh`; non-mesh solver inputs remain protected by the full case seal and their own validators.
 
+## Confirmed-fact semantic-drift boundary (v2.10.1)
+
+Compact prompts retain a shared invariant that confirmed intake values must be implemented faithfully in the actual case, not merely preserved as fact IDs or metadata. `EngineeringPlan.confirmed_fact_bindings` gives every non-context confirmed fact an auditable implementation mapping. Python verifies binding coverage and referenced-file existence but deliberately does not decide CFD semantics (for example, it does not recompute Reynolds number or infer whether a BC is physically appropriate). If faithful implementation would require changing confirmed intake, the Agent is instructed to block and return to human review rather than silently changing the problem.
+
 ## Runtime self-deception resistance
 
 Runtime success is not accepted from model prose. It requires a successful native return status, at least one parsed `Time = ...` record (including OF13 unit-suffixed forms), an `End` marker, and no fatal/non-finite/SIGFPE evidence. Failed logs are preserved and returned to the engineering agent as observations.

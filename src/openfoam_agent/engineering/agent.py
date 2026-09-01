@@ -2161,6 +2161,10 @@ class CFDEngineeringAgent:
                         "motion_kind": state.engineering_plan.motion_kind,
                         "mesh_motion_requirement": state.engineering_plan.mesh_motion_requirement,
                         "required_case_files": state.engineering_plan.required_case_files,
+                        "confirmed_fact_bindings": [
+                            item.model_dump(mode="json")
+                            for item in state.engineering_plan.confirmed_fact_bindings
+                        ],
                         "confirmed_intake_sha256": state.engineering_plan.confirmed_intake_sha256,
                     }
                     if state.engineering_plan is not None
@@ -2169,6 +2173,10 @@ class CFDEngineeringAgent:
                             "solver": self._pending_execution_plan.solver,
                             "solver_provider_id": self._pending_execution_plan.solver_provider_id,
                             "required_case_files": self._pending_execution_plan.required_case_files,
+                            "confirmed_fact_bindings": [
+                                item.model_dump(mode="json")
+                                for item in self._pending_execution_plan.confirmed_fact_bindings
+                            ],
                             "confirmed_intake_sha256": self._pending_execution_plan.confirmed_intake_sha256,
                         }
                         if self._pending_execution_plan is not None else None

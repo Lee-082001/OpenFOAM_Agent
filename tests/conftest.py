@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from openfoam_agent.schemas.common import ToolResult
-from openfoam_agent.schemas.engineering import EngineeringPlan, EngineeringTurn
+from openfoam_agent.schemas.engineering import ConfirmedFactBinding, EngineeringPlan, EngineeringTurn
 from openfoam_agent.schemas.postprocessing import PostProcessingTurn
 from openfoam_agent.schemas.feedback import FeedbackAssessment
 from openfoam_agent.schemas.intake import CFDIntakeSpec, IntakeFact
@@ -86,6 +86,14 @@ def make_plan(intake: CFDIntakeSpec, *, solver: str = "incompressibleFluid") -> 
         assumptions=["Exploratory domain dimensions selected by the engineering agent."],
         confirmed_fact_ids=[
             fact.id for fact in intake.facts if fact.category != "context"
+        ],
+        confirmed_fact_bindings=[
+            ConfirmedFactBinding(
+                fact_id=fact.id,
+                implementation_refs=["plan:problem_interpretation"],
+                explanation="Test fixture binds the confirmed fact to the engineering interpretation.",
+            )
+            for fact in intake.facts if fact.category != "context"
         ],
         evidence=[],
         postprocess_strategy=["Inspect wake unsteadiness and force history."],

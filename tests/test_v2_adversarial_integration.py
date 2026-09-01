@@ -6,6 +6,7 @@ from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
 from openfoam_agent.runtime import RuntimeOrchestrator
 from openfoam_agent.schemas.common import ToolResult
 from openfoam_agent.schemas.engineering import (
+    ConfirmedFactBinding,
     EngineeringDecision,
     EngineeringEvidence,
     canonical_engineering_evidence_id,
@@ -146,6 +147,14 @@ def _dynamic_plan(intake: CFDIntakeSpec) -> EngineeringPlan:
         ],
         assumptions=["Exploratory far-field dimensions are agent-selected."],
         confirmed_fact_ids=[fact.id for fact in intake.facts if fact.category != "context"],
+        confirmed_fact_bindings=[
+            ConfirmedFactBinding(
+                fact_id=fact.id,
+                implementation_refs=["plan:problem_interpretation"],
+                explanation="Adversarial fixture binds each confirmed fact to the plan interpretation.",
+            )
+            for fact in intake.facts if fact.category != "context"
+        ],
         evidence=[
             EngineeringEvidence(
                 evidence_id=canonical_engineering_evidence_id(

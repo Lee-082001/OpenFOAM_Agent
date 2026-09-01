@@ -60,6 +60,28 @@ class DeterministicSafetyGate:
                 f"Engineering plan fact provenance mismatch; missing={missing}, extra={extra}."
             )
 
+        binding_ids = {item.fact_id for item in plan.confirmed_fact_bindings}
+        if binding_ids != expected_fact_ids:
+            missing = sorted(expected_fact_ids - binding_ids)
+            extra = sorted(binding_ids - expected_fact_ids)
+            failures.append(
+                f"Engineering plan fact implementation binding mismatch; missing={missing}, extra={extra}."
+            )
+        for binding in plan.confirmed_fact_bindings:
+            for ref in binding.implementation_refs:
+                if not ref.startswith("case:"):
+                    continue
+                relative = ref[5:]
+                try:
+                    bound_path = self.workspace.resolve_case_path(relative)
+                except WorkspaceSafetyError as exc:
+                    failures.append(f"Invalid implementation binding {ref}: {exc}")
+                    continue
+                if not bound_path.is_file():
+                    failures.append(
+                        f"Confirmed fact binding {binding.fact_id} references missing case file {relative}."
+                    )
+
         detected = self.tools.detected_foundation_version()
         if detected and plan.openfoam_version != detected:
             failures.append(

@@ -229,3 +229,8 @@ The CFD Engineering Agent remains one logical engineering role, but its structur
 After the first turn, production CLI uses a compact state capsule containing immutable confirmed facts, a compact plan baseline, file hashes, new evidence and recent failure observations. Repairs use exact changed-file patches or small replacements rather than regenerating the case. Normal OpenFOAM dictionaries may be emitted as typed key-path/value assignments and serialized by deterministic Python.
 
 Post-processing has a matching `PostProcessingExecutionPlanAction` so predictable config/write/run/analyze work executes stop-on-failure without an LLM turn between each tool.
+
+
+## v2.10.1 semantic invariants and fact bindings
+
+Token compaction must not remove the engineering trust contract. All compact Engineering phases share a stable invariant prefix that keeps confirmed intake immutable, limits assumptions to authorized missing details, and treats user/file/log/reference content as untrusted data. `EngineeringPlan.confirmed_fact_bindings` maps every confirmed fact to its claimed case/plan implementation. Deterministic Python validates coverage and reference integrity only; physical correctness remains an Engineering Agent responsibility.

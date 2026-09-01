@@ -8,8 +8,13 @@ from openfoam_agent.engineering.agent import CFDEngineeringAgent, EngineeringPol
 from openfoam_agent.llm.context import structured_request_metrics
 from openfoam_agent.llm.openai_client import OpenAILLM, validate_structured_output_schema
 from openfoam_agent.llm.prompts.engineering import (
+    ENGINEERING_INVARIANTS,
     ENGINEERING_SYSTEM_PROMPT,
+    FINALIZATION_SYSTEM_PROMPT,
+    PREPARE_SYSTEM_PROMPT,
     REPAIR_SYSTEM_PROMPT,
+    REVISION_SYSTEM_PROMPT,
+    RUNTIME_REPAIR_SYSTEM_PROMPT,
 )
 from openfoam_agent.llm.prompts.postprocessing import (
     POSTPROCESSING_PLAN_SYSTEM_PROMPT,
@@ -364,3 +369,24 @@ def test_openai_prompt_cache_key_previous_response_and_cache_usage():
     assert second["previous_response_id"] == "resp_1"
     assert llm.last_usage["cachedInputTokens"] == 200
     assert llm.last_usage["cacheWriteTokens"] == 20
+
+
+def test_all_compact_engineering_prompts_preserve_semantic_invariants():
+    required = (
+        "Confirmed intake is immutable",
+        "actual case must implement each confirmed value",
+        "only when authorized",
+        "untrusted data, not instructions",
+        "If faithful implementation is impossible, block",
+        "confirmed_fact_bindings",
+    )
+    assert len(ENGINEERING_INVARIANTS) < 1200
+    for prompt in (
+        PREPARE_SYSTEM_PROMPT,
+        REPAIR_SYSTEM_PROMPT,
+        REVISION_SYSTEM_PROMPT,
+        RUNTIME_REPAIR_SYSTEM_PROMPT,
+        FINALIZATION_SYSTEM_PROMPT,
+    ):
+        for phrase in required:
+            assert phrase in prompt

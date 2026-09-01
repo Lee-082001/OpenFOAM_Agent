@@ -49,6 +49,37 @@ class ObservedEngineeringEvidence(_EngineeringModel):
     summary: str = Field(min_length=1, max_length=1200)
 
 
+
+
+class ConfirmedFactBinding(_EngineeringModel):
+    """Audit mapping from a confirmed fact to its claimed implementation."""
+
+    fact_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]*$")
+    implementation_refs: list[str] = Field(min_length=1, max_length=12)
+    explanation: str = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def validate_refs(self) -> Self:
+        if len(self.implementation_refs) != len(set(self.implementation_refs)):
+            raise ValueError("Confirmed fact binding contains duplicate implementation refs.")
+        for ref in self.implementation_refs:
+            if ref.startswith("case:"):
+                path = ref[5:]
+                if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
+                    raise ValueError(f"Unsafe case implementation ref: {ref}")
+            elif ref.startswith("plan:"):
+                field = ref[5:]
+                if field not in {
+                    "problem_interpretation", "temporal_behavior", "motion_kind",
+                    "mesh_motion_requirement", "mesh_strategy", "decisions",
+                    "assumptions", "required_case_files", "postprocess_strategy",
+                }:
+                    raise ValueError(f"Unsupported plan implementation ref: {ref}")
+            else:
+                raise ValueError("Implementation refs must start with 'case:' or 'plan:'.")
+        return self
+
+
 class EngineeringPlan(_EngineeringModel):
     """Agent-owned CFD engineering decisions.
 
@@ -81,6 +112,7 @@ class EngineeringPlan(_EngineeringModel):
     decisions: list[EngineeringDecision] = Field(default_factory=list, max_length=80)
     assumptions: list[str] = Field(default_factory=list, max_length=80)
     confirmed_fact_ids: list[str] = Field(default_factory=list, max_length=200)
+    confirmed_fact_bindings: list[ConfirmedFactBinding] = Field(default_factory=list, max_length=200)
     evidence: list[EngineeringEvidence] = Field(default_factory=list, max_length=120)
     required_case_files: list[str] = Field(default_factory=list, max_length=80)
     postprocess_strategy: list[str] = Field(default_factory=list, max_length=40)
@@ -90,6 +122,11 @@ class EngineeringPlan(_EngineeringModel):
     def validate_unique_audit_fields(self) -> Self:
         if len(self.confirmed_fact_ids) != len(set(self.confirmed_fact_ids)):
             raise ValueError("Engineering plan contains duplicate confirmed fact IDs.")
+        binding_ids = [item.fact_id for item in self.confirmed_fact_bindings]
+        if len(binding_ids) != len(set(binding_ids)):
+            raise ValueError("Engineering plan contains duplicate confirmed fact bindings.")
+        if set(binding_ids) != set(self.confirmed_fact_ids):
+            raise ValueError("Engineering plan confirmed fact bindings must exactly cover confirmed_fact_ids.")
         if len(self.required_case_files) != len(set(self.required_case_files)):
             raise ValueError("Engineering plan contains duplicate required case files.")
         for path in self.required_case_files:
