@@ -51,33 +51,71 @@ class ObservedEngineeringEvidence(_EngineeringModel):
 
 
 
+_BINDABLE_PLAN_FIELDS = Literal[
+    "problem_interpretation",
+    "temporal_behavior",
+    "motion_kind",
+    "mesh_motion_requirement",
+    "mesh_strategy",
+    "decisions",
+    "assumptions",
+    "required_case_files",
+    "postprocess_strategy",
+]
+
+
 class ConfirmedFactBinding(_EngineeringModel):
-    """Audit mapping from a confirmed fact to its claimed implementation."""
+    """Audit mapping from a confirmed fact to its claimed implementation.
+
+    The wire format deliberately separates case-file paths from plan fields so the
+    model does not need to memorize a string-prefix mini-protocol such as
+    ``case:...``/``plan:...``.  A small legacy adapter still accepts that older
+    representation when loading persisted v2.10.1 state.
+    """
 
     fact_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]*$")
-    implementation_refs: list[str] = Field(min_length=1, max_length=12)
+    case_files: list[str] = Field(default_factory=list, max_length=12)
+    plan_fields: list[_BINDABLE_PLAN_FIELDS] = Field(default_factory=list, max_length=12)
     explanation: str = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_refs(cls, value):
+        if not isinstance(value, dict) or "implementation_refs" not in value:
+            return value
+        migrated = dict(value)
+        refs = migrated.pop("implementation_refs") or []
+        case_files = list(migrated.get("case_files") or [])
+        plan_fields = list(migrated.get("plan_fields") or [])
+        for ref in refs:
+            if not isinstance(ref, str):
+                continue
+            if ref.startswith("case:"):
+                case_files.append(ref[5:])
+            elif ref.startswith("plan:"):
+                plan_fields.append(ref[5:])
+        migrated["case_files"] = case_files
+        migrated["plan_fields"] = plan_fields
+        return migrated
 
     @model_validator(mode="after")
     def validate_refs(self) -> Self:
-        if len(self.implementation_refs) != len(set(self.implementation_refs)):
-            raise ValueError("Confirmed fact binding contains duplicate implementation refs.")
-        for ref in self.implementation_refs:
-            if ref.startswith("case:"):
-                path = ref[5:]
-                if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
-                    raise ValueError(f"Unsafe case implementation ref: {ref}")
-            elif ref.startswith("plan:"):
-                field = ref[5:]
-                if field not in {
-                    "problem_interpretation", "temporal_behavior", "motion_kind",
-                    "mesh_motion_requirement", "mesh_strategy", "decisions",
-                    "assumptions", "required_case_files", "postprocess_strategy",
-                }:
-                    raise ValueError(f"Unsupported plan implementation ref: {ref}")
-            else:
-                raise ValueError("Implementation refs must start with 'case:' or 'plan:'.")
+        if not self.case_files and not self.plan_fields:
+            raise ValueError("Confirmed fact binding requires at least one case_files or plan_fields entry.")
+        if len(self.case_files) != len(set(self.case_files)):
+            raise ValueError("Confirmed fact binding contains duplicate case file refs.")
+        if len(self.plan_fields) != len(set(self.plan_fields)):
+            raise ValueError("Confirmed fact binding contains duplicate plan field refs.")
+        for path in self.case_files:
+            if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
+                raise ValueError(f"Unsafe case implementation ref: {path}")
         return self
+
+    @property
+    def implementation_refs(self) -> list[str]:
+        """Compatibility/audit projection used by older internal callers."""
+
+        return [*(f"case:{path}" for path in self.case_files), *(f"plan:{field}" for field in self.plan_fields)]
 
 
 class EngineeringPlan(_EngineeringModel):

@@ -80,7 +80,7 @@ def test_safety_gate_rejects_binding_to_missing_case_file(tmp_path):
     bindings = list(plan.confirmed_fact_bindings)
     bindings[0] = ConfirmedFactBinding(
         fact_id=bindings[0].fact_id,
-        implementation_refs=["case:constant/physicalProperties"],
+        case_files=["constant/physicalProperties"],
         explanation="This confirmed fact is implemented by physicalProperties.",
     )
     plan = plan.model_copy(update={"confirmed_fact_bindings": bindings})

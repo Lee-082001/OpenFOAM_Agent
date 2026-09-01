@@ -150,7 +150,7 @@ def _dynamic_plan(intake: CFDIntakeSpec) -> EngineeringPlan:
         confirmed_fact_bindings=[
             ConfirmedFactBinding(
                 fact_id=fact.id,
-                implementation_refs=["plan:problem_interpretation"],
+                plan_fields=["problem_interpretation"],
                 explanation="Adversarial fixture binds each confirmed fact to the plan interpretation.",
             )
             for fact in intake.facts if fact.category != "context"

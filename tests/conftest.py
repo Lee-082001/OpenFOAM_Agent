@@ -90,7 +90,7 @@ def make_plan(intake: CFDIntakeSpec, *, solver: str = "incompressibleFluid") -> 
         confirmed_fact_bindings=[
             ConfirmedFactBinding(
                 fact_id=fact.id,
-                implementation_refs=["plan:problem_interpretation"],
+                plan_fields=["problem_interpretation"],
                 explanation="Test fixture binds the confirmed fact to the engineering interpretation.",
             )
             for fact in intake.facts if fact.category != "context"

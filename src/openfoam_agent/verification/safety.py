@@ -68,14 +68,11 @@ class DeterministicSafetyGate:
                 f"Engineering plan fact implementation binding mismatch; missing={missing}, extra={extra}."
             )
         for binding in plan.confirmed_fact_bindings:
-            for ref in binding.implementation_refs:
-                if not ref.startswith("case:"):
-                    continue
-                relative = ref[5:]
+            for relative in binding.case_files:
                 try:
                     bound_path = self.workspace.resolve_case_path(relative)
                 except WorkspaceSafetyError as exc:
-                    failures.append(f"Invalid implementation binding {ref}: {exc}")
+                    failures.append(f"Invalid implementation binding case:{relative}: {exc}")
                     continue
                 if not bound_path.is_file():
                     failures.append(
