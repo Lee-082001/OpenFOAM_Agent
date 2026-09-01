@@ -174,34 +174,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--engineering-steps",
         type=int,
-        default=120,
-        help="Initial autonomous engineering LLM-turn soft budget (default: 120 turns).",
+        default=20,
+        help="Initial autonomous engineering LLM-turn soft budget (default: 20 turns).",
     )
     parser.add_argument(
         "--engineering-hard-cap",
         type=int,
-        default=200,
-        help="Absolute engineering LLM-turn cap after progress-aware extensions (default: 200).",
+        default=40,
+        help="Absolute engineering LLM-turn cap after progress-aware extensions (default: 40).",
     )
     parser.add_argument(
         "--engineering-extension",
         type=int,
-        default=20,
-        help="Progress-aware LLM-turn extension chunk size (default: 20 turns).",
+        default=10,
+        help="Progress-aware LLM-turn extension chunk size (default: 10 turns).",
     )
     parser.add_argument(
         "--finalization-steps",
         type=int,
-        default=8,
-        help="Plan-finalization-only actions after validated case preparation (default: 8).",
+        default=3,
+        help="Plan-finalization-only actions after validated case preparation (default: 3).",
     )
     parser.add_argument(
         "--engineering-tool-budget",
         type=int,
-        default=480,
+        default=160,
         help=(
             "Maximum deterministic engineering actions executed across single actions and "
-            "short sequences in one engineering round (default: 480)."
+            "short sequences/execution plans in one engineering round (default: 160)."
         ),
     )
     parser.add_argument(
@@ -213,32 +213,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mesh-repair-cycles",
         type=int,
-        default=10,
-        help="Maximum file-repair cycles triggered by failed mesh commands (default: 10).",
+        default=6,
+        help="Maximum file-repair cycles triggered by failed mesh commands (default: 6).",
     )
     parser.add_argument(
         "--runtime-repair-cycles",
         type=int,
-        default=8,
-        help="Maximum autonomous foamRun failure-repair-retry cycles (default: 8).",
+        default=3,
+        help="Maximum autonomous foamRun failure-repair-retry cycles (default: 3).",
     )
     parser.add_argument(
         "--runtime-repair-steps",
         type=int,
-        default=60,
-        help="Maximum LLM turns inside each runtime repair cycle (default: 60).",
+        default=10,
+        help="Maximum LLM turns inside each runtime repair cycle (default: 10).",
     )
     parser.add_argument(
         "--runtime-repair-tool-budget",
         type=int,
-        default=180,
-        help="Maximum deterministic actions inside each runtime repair cycle (default: 180).",
+        default=48,
+        help="Maximum deterministic actions inside each runtime repair cycle (default: 48).",
     )
     parser.add_argument(
         "--postprocess-steps",
         type=int,
-        default=40,
-        help="Maximum autonomous post-processing actions after a successful solve (default: 40).",
+        default=12,
+        help="Maximum autonomous post-processing actions after a successful solve (default: 12).",
     )
     parser.add_argument(
         "--postprocess-native-budget",
@@ -497,6 +497,7 @@ def _policies_from_args(
         max_runtime_repair_steps=args.runtime_repair_steps,
         max_runtime_repair_tool_actions=args.runtime_repair_tool_budget,
         require_solve_ready_gate=True,
+        preload_capabilities=True,
     )
     runtime = RuntimePolicy(max_attempts=args.runtime_repair_cycles + 1)
     postprocessing = PostProcessingPolicy(
@@ -528,7 +529,7 @@ def build_report(
         len(round_events) / round_llm_turns if round_llm_turns else 0.0
     )
     return {
-        "architecture": "v2.8.0",
+        "architecture": "v2.9.0",
         "run_id": state.run_id,
         "prompt": request.prompt,
         "conversation_turns": list(request.conversation_turns),

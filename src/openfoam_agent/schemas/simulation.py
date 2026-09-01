@@ -18,8 +18,8 @@ class ResidualSample(_RuntimeModel):
 
 
 class RuntimePolicy(_RuntimeModel):
-    # One initial solver execution plus up to eight autonomous repair/retry cycles.
-    max_attempts: int = Field(default=9, ge=1, le=13)
+    # One initial solver execution plus up to three autonomous repair/retry cycles.
+    max_attempts: int = Field(default=4, ge=1, le=13)
     solver_timeout_seconds: int = Field(default=3600, ge=1, le=86_400)
 
     @property

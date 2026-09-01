@@ -52,6 +52,20 @@ INIT -> INTAKE_ANALYSIS -> INTAKE_REVIEW_REQUIRED
 
 One production engineering agent owns solver, mesh, BC, normalization, numerics, motion, repair and case implementation. It uses capability/reference/file/native-tool actions. Preparation has a 120-LLM-turn soft budget, progress-aware +20-turn extensions, and 200-turn hard cap by default, plus separate deterministic-action, native-command, mesh-repair and runtime-repair budgets.
 
+
+### High-level ExecuteCasePlan fast path (v2.9.0)
+
+For a greenfield case, the Engineering Agent may return one `execute_case_plan` containing
+the case-file bundle, deterministic dictionary/surface validations, mesh commands ending in
+`checkMesh`, the required solver-input file declaration, and the final `EngineeringPlan`. The
+executor expands this into the same primitive dispatch path used by ordinary actions, so the
+fast path does not bypass workspace safety, native command allowlists, budgets, checkMesh
+evidence parsing, pre-solve completeness, provenance validation, or CaseSeal integrity.
+Execution is stop-on-failure. A native failure is compacted into the next LLM observation,
+which becomes the next engineering decision point. CLI runs additionally preload small
+capability graphs as deterministic evidence to remove an otherwise mandatory capability-search
+round trip.
+
 ### Short-horizon EngineeringSequence execution (v2.8.0)
 
 `EngineeringTurn` remains backward compatible with one action, but may now choose a bounded `sequence` containing 2-6 ordered actions. Sequence members are intentionally restricted to deterministic construction/validation operations (`write/delete`, dictionary validation, `surfaceCheck`, mesh commands, pre-solve completeness, and terminal finish/retry actions). Search/reference-reading actions remain single-turn checkpoints because their results normally require a new engineering decision.

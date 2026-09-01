@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.8.0
+# OpenFOAM Agent v2.9.0
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -7,6 +7,40 @@ The central design rule is:
 > The agent chooses and designs. Python validates authority, safety, integrity, bounded execution, and evidence.
 
 v2 is intentionally not a collection of hand-written CFD case templates. There is no production rule such as `if vortex shedding -> square obstacle template`, `if static -> snappyHexMesh`, or `if prescribed deformation -> displacementLaplacian`.
+
+## v2.9.0: execution-plan fast path
+
+v2.9 adds a high-level `execute_case_plan` action for the common greenfield path. One
+Engineering LLM turn can now author a bounded case-file bundle, dictionary/surface checks,
+the ordered mesh pipeline ending in `checkMesh`, solver-required files, and the final
+`EngineeringPlan`. Python expands that plan into the existing primitive actions and executes
+them through the same sandbox, command allowlists, budgets, mesh evidence parser, pre-solve
+gate, and CaseSeal validation. Execution stops on the first real failure; only then is the LLM
+called again with the compact native failure evidence.
+
+When the bundled capability graph is small, CLI runs preload its provider evidence into the
+first engineering prompt. Solver choice remains agent-owned, but the old
+LLM -> `search_capabilities` -> LLM round trip is not required merely to rediscover the same
+provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
+case manifest and required-file declaration are unchanged.
+
+The production defaults are intentionally tighter: 20 engineering LLM turns soft / 40 hard,
+10-turn extensions, 3 finalization turns, 3 automatic runtime repair cycles with 10 LLM turns
+per repair cycle, and 12 post-processing turns. All remain configurable from the CLI.
+
+Typical fast path:
+
+```text
+LLM #1: CFD decision + execute_case_plan
+        |
+        v
+Python: write bundle -> validate -> mesh -> checkMesh -> preSolve -> CaseSeal
+        |                                      |
+        | PASS                                 | FAIL
+        v                                      v
+    SOLVE_READY                            LLM #2 repair
+```
+
 
 ## Architecture
 
@@ -419,7 +453,7 @@ See `SECURITY.md` for the threat model and residual limitations.
 
 ## Failure semantics
 
-A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.8.0 measures the progress-aware engineering budget in **LLM turns**: the default soft boundary is 120 turns, extensions are granted in 20-turn chunks only when recent action/result evidence is genuinely new, and the absolute hard cap is 200 turns. Deterministic tool actions have a separate default cap of 480 per engineering round. Repeating the same action/result loop does not earn more budget.
+A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.9.0 measures the progress-aware engineering budget in **LLM turns**: the default soft boundary is 20 turns, extensions are granted in 10-turn chunks only when recent action/result evidence is genuinely new, and the absolute hard cap is 40 turns. Deterministic tool actions have a separate default cap of 160 per engineering round. Repeating the same action/result loop does not earn more budget.
 
 ### Engineering action sequences (v2.8.0)
 

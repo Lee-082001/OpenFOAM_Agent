@@ -154,6 +154,19 @@ class WriteCaseFileAction(_EngineeringModel):
     rationale: str = Field(min_length=1, max_length=1500)
 
 
+class CaseBundleFile(_EngineeringModel):
+    """One agent-authored OpenFOAM case file in a high-level execution plan."""
+
+    path: str = Field(min_length=1, max_length=240)
+    content: str = Field(min_length=1, max_length=1_000_000)
+
+    @model_validator(mode="after")
+    def validate_path(self) -> Self:
+        if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", self.path) or ".." in self.path:
+            raise ValueError(f"Unsafe case bundle path: {self.path}")
+        return self
+
+
 class DeleteCaseFileAction(_EngineeringModel):
     type: Literal["delete_case_file"]
     path: str = Field(min_length=1, max_length=240)
@@ -236,6 +249,61 @@ EngineeringSequenceMemberAction = (
 )
 
 
+class ExecuteCasePlanAction(_EngineeringModel):
+    """High-level case construction + deterministic validation/execution plan.
+
+    One LLM turn may author the complete case bundle and the predictable native
+    pipeline. Python still executes every file write and native validation through
+    the existing sandbox, budgets, safety gates and stop-on-failure semantics.
+    On success the supplied EngineeringPlan is finalized and sealed in the same
+    LLM turn; on the first failure execution stops and the native evidence is
+    returned to the next LLM turn for repair.
+    """
+
+    type: Literal["execute_case_plan"]
+    goal: str = Field(min_length=1, max_length=1000)
+    files: list[CaseBundleFile] = Field(min_length=1, max_length=40)
+    validate_dictionaries: list[str] = Field(default_factory=list, max_length=40)
+    surface_checks: list[str] = Field(default_factory=list, max_length=16)
+    mesh_commands: list[Literal[
+        "blockMesh",
+        "surfaceFeatureExtract",
+        "snappyHexMesh",
+        "createPatch",
+        "checkMesh",
+    ]] = Field(min_length=1, max_length=8)
+    required_case_files: list[str] = Field(min_length=1, max_length=80)
+    plan: EngineeringPlan
+    rationale: str = Field(min_length=1, max_length=1500)
+
+    @model_validator(mode="after")
+    def validate_execution_plan(self) -> Self:
+        paths = [item.path for item in self.files]
+        if len(paths) != len(set(paths)):
+            raise ValueError("execute_case_plan contains duplicate file paths.")
+
+        for collection_name, paths_to_check in (
+            ("validate_dictionaries", self.validate_dictionaries),
+            ("surface_checks", self.surface_checks),
+            ("required_case_files", self.required_case_files),
+        ):
+            if len(paths_to_check) != len(set(paths_to_check)):
+                raise ValueError(f"execute_case_plan contains duplicate {collection_name} paths.")
+            for path in paths_to_check:
+                if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
+                    raise ValueError(f"Unsafe {collection_name} path: {path}")
+
+        if self.mesh_commands[-1] != "checkMesh":
+            raise ValueError("execute_case_plan mesh_commands must end with checkMesh.")
+        if self.mesh_commands.count("checkMesh") != 1:
+            raise ValueError("execute_case_plan must contain exactly one checkMesh command.")
+        if set(self.required_case_files) != set(self.plan.required_case_files):
+            raise ValueError(
+                "execute_case_plan required_case_files must exactly match plan.required_case_files."
+            )
+        return self
+
+
 class EngineeringSequenceAction(_EngineeringModel):
     """A short ordered engineering intention executed without intermediate LLM calls."""
 
@@ -302,6 +370,7 @@ EngineeringAction = (
     | RetrySolverAction
     | BlockAction
     | EngineeringSequenceAction
+    | ExecuteCasePlanAction
 )
 
 
@@ -322,7 +391,7 @@ class EngineeringEvent(_EngineeringModel):
     sequence_id: str | None = Field(default=None, max_length=120)
     sequence_goal: str | None = Field(default=None, max_length=1000)
     sequence_index: int | None = Field(default=None, ge=1, le=64)
-    sequence_length: int | None = Field(default=None, ge=2, le=64)
+    sequence_length: int | None = Field(default=None, ge=2, le=128)
 
     @model_validator(mode="after")
     def validate_resource_markers(self) -> Self:

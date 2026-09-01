@@ -27,15 +27,15 @@ def test_default_budgets_are_production_sized():
     engineering = EngineeringPolicy()
     runtime = RuntimePolicy()
 
-    assert engineering.max_agent_steps == 120
-    assert engineering.hard_max_agent_steps == 200
-    assert engineering.step_extension == 20
-    assert engineering.max_finalization_steps == 8
+    assert engineering.max_agent_steps == 20
+    assert engineering.hard_max_agent_steps == 40
+    assert engineering.step_extension == 10
+    assert engineering.max_finalization_steps == 3
     assert engineering.max_native_commands == 40
-    assert engineering.max_mesh_repair_cycles == 10
-    assert engineering.max_runtime_repair_steps == 60
-    assert runtime.max_attempts == 9
-    assert runtime.max_repair_cycles == 8
+    assert engineering.max_mesh_repair_cycles == 6
+    assert engineering.max_runtime_repair_steps == 10
+    assert runtime.max_attempts == 4
+    assert runtime.max_repair_cycles == 3
 
 
 def test_progress_at_soft_boundary_extends_engineering_window(tmp_path, graph_path):
@@ -311,7 +311,7 @@ def test_mesh_repair_cycle_budget_blocks_eleventh_style_repair_group(tmp_path, g
     assert agent._mesh_repair_cycle_count(state) == 1
 
 
-def test_runtime_default_allows_eight_repair_cycles(tmp_path, graph_path):
+def test_runtime_default_allows_three_repair_cycles(tmp_path, graph_path):
     from openfoam_agent.runtime import RuntimeOrchestrator
     from openfoam_agent.schemas.common import ToolResult
     from openfoam_agent.schemas.engineering import RetrySolverAction
@@ -347,7 +347,7 @@ def test_runtime_default_allows_eight_repair_cycles(tmp_path, graph_path):
             plan=plan,
             rationale=f"Retry unchanged approved solver after failure {index}.",
         )
-        for index in range(1, 9)
+        for index in range(1, 4)
     ]
     llm = ScriptedLLM([*prepare_actions, *repair_actions])
     failed_runs = [
@@ -357,13 +357,13 @@ def test_runtime_default_allows_eight_repair_cycles(tmp_path, graph_path):
             return_code=1,
             stderr=f"Time = {index / 10}\n--> FOAM FATAL ERROR: scripted failure {index}\n",
         )
-        for index in range(1, 9)
+        for index in range(1, 4)
     ]
     final_run = ToolResult(
         success=True,
         command=["foamRun"],
         return_code=0,
-        stdout="Time = 0.9\nCourant Number mean: 0.1 max: 0.2\nEnd\n",
+        stdout="Time = 0.4\nCourant Number mean: 0.1 max: 0.2\nEnd\n",
     )
     tools = FakeOpenFOAMTools(
         mesh_results={
@@ -387,9 +387,9 @@ def test_runtime_default_allows_eight_repair_cycles(tmp_path, graph_path):
 
     assert state.current_state == State.EXECUTION_DONE
     assert state.runtime_report is not None
-    assert len(state.runtime_report.attempts) == 9
-    assert sum(attempt.repair_requested for attempt in state.runtime_report.attempts) == 8
-    assert len(tools.foam_run_solvers) == 9
+    assert len(state.runtime_report.attempts) == 4
+    assert sum(attempt.repair_requested for attempt in state.runtime_report.attempts) == 3
+    assert len(tools.foam_run_solvers) == 4
 
 
 def test_cli_budget_flags_build_the_same_policy_defaults(graph_path):
@@ -400,13 +400,13 @@ def test_cli_budget_flags_build_the_same_policy_defaults(graph_path):
     assert _validate_args(args, parser) == "test prompt"
     engineering, runtime, postprocessing = _policies_from_args(args)
 
-    assert engineering.max_agent_steps == 120
-    assert engineering.hard_max_agent_steps == 200
-    assert engineering.max_finalization_steps == 8
+    assert engineering.max_agent_steps == 20
+    assert engineering.hard_max_agent_steps == 40
+    assert engineering.max_finalization_steps == 3
     assert engineering.max_native_commands == 40
-    assert engineering.max_mesh_repair_cycles == 10
-    assert runtime.max_repair_cycles == 8
-    assert postprocessing.max_steps == 40
+    assert engineering.max_mesh_repair_cycles == 6
+    assert runtime.max_repair_cycles == 3
+    assert postprocessing.max_steps == 12
     assert postprocessing.max_native_commands == 8
 
 
@@ -592,7 +592,7 @@ def test_resource_accounting_survives_engineering_agent_rehydration(tmp_path, gr
     assert second_tools.mesh_calls == []
 
 
-def test_default_soft_boundary_120_extends_to_140_on_new_artifact(tmp_path, graph_path):
+def test_default_soft_boundary_20_extends_to_30_on_new_artifact(tmp_path, graph_path):
     state = make_state()
     actions = [
         SearchCapabilitiesAction(
@@ -600,18 +600,18 @@ def test_default_soft_boundary_120_extends_to_140_on_new_artifact(tmp_path, grap
             query="incompressibleFluid",
             rationale=f"Repeated capability observation {index}.",
         )
-        for index in range(1, 120)
+        for index in range(1, 20)
     ]
     actions.extend([
         WriteCaseFileAction(
             type="write_case_file",
             path="system/controlDict",
             content=control_dict(),
-            rationale="A genuinely new artifact appears exactly at the default soft boundary.",
+            rationale="A genuinely new artifact appears exactly at the v2.9 default soft boundary.",
         ),
         BlockAction(
             type="block",
-            reason="Stop after proving the 120->140 extension.",
+            reason="Stop after proving the 20->30 extension.",
             needs_user_input=False,
             rationale="Test terminal.",
         ),
@@ -628,13 +628,13 @@ def test_default_soft_boundary_120_extends_to_140_on_new_artifact(tmp_path, grap
 
     assert len(state.engineering_budget_extensions) == 1
     extension = state.engineering_budget_extensions[0]
-    assert extension.boundary_step == 120
-    assert extension.previous_limit == 120
-    assert extension.new_limit == 140
-    assert len(state.engineering_events) == 121
+    assert extension.boundary_step == 20
+    assert extension.previous_limit == 20
+    assert extension.new_limit == 30
+    assert len(state.engineering_events) == 21
 
 
-def test_default_soft_boundary_120_rejects_stagnant_loop(tmp_path, graph_path):
+def test_default_soft_boundary_20_rejects_stagnant_loop(tmp_path, graph_path):
     state = make_state()
     llm = ScriptedLLM([
         SearchCapabilitiesAction(
@@ -642,7 +642,7 @@ def test_default_soft_boundary_120_rejects_stagnant_loop(tmp_path, graph_path):
             query="incompressibleFluid",
             rationale=f"Repeated capability observation {index}.",
         )
-        for index in range(1, 121)
+        for index in range(1, 21)
     ])
     agent = CFDEngineeringAgent(
         llm,
@@ -654,6 +654,6 @@ def test_default_soft_boundary_120_rejects_stagnant_loop(tmp_path, graph_path):
     agent.prepare(state, native_execution=True)
 
     assert state.current_state == State.ENGINEERING_BLOCKED
-    assert len(state.engineering_events) == 120
+    assert len(state.engineering_events) == 20
     assert state.engineering_budget_extensions == []
     assert "without new deterministic progress evidence" in state.history[-1]["note"]

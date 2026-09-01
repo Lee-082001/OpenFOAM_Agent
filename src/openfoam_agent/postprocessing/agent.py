@@ -49,7 +49,7 @@ from openfoam_agent.workflow.states import State
 
 @dataclass
 class PostProcessingPolicy:
-    max_steps: int = 40
+    max_steps: int = 12
     max_native_commands: int = 8
     observation_history: int = 8
     max_observation_chars: int = 12_000
