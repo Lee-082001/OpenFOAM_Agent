@@ -33,3 +33,5 @@ separately, and a human must /accept or /feedback before COMPLETE.
 
 Return exactly one PostProcessingTurn per step.
 """
+
+POSTPROCESSING_PLAN_SYSTEM_PROMPT = """You are the CFD post-processing planner after a successful sealed solve. Return one execute_postprocessing_plan whenever the requested strategy can be carried out predictably. The plan may write only postprocessConfig/, run foamPostProcess, and request deterministic force-coefficient analysis. Prefer typed_configs so Python renders dictionary syntax. Result inventory is already supplied; do not request a listing action. If a native post-process step failed, return only the changed config and necessary rerun/analysis. Do not alter solver inputs or invent numerical results."""

@@ -220,3 +220,12 @@ The Ollama provider is not an Agent and does not acquire tool authority. All fil
 Intake provenance is request-context validation rather than pure Pydantic shape validation. `IntakeAgent` therefore honors an optional adapter capability hint for bounded semantic repairs. `OllamaLLM` advertises two such repairs; adapters without the hint retain the historical single retry. On failure, the local model receives the exact cumulative user turns/file names, the deterministic validation error, and its previous invalid intake. The validator itself is unchanged: `source=user` still requires one verbatim contiguous evidence substring, while multi-turn synthesis must be represented as derived provenance.
 
 Ollama endpoint configuration is loopback-only by construction. A startup `/v1/models` probe verifies the tunnel/service and requested models before workflow execution. Provider failure is terminal for that backend invocation; there is no implicit OpenAI fallback.
+
+
+### Token-optimized phase contracts (v2.10.0)
+
+The CFD Engineering Agent remains one logical engineering role, but its structured-output permission surface is phase-specific: `PrepareTurn`, `RepairTurn`, `RuntimeRepairTurn`, `RevisionTurn`, and `FinalizationTurn`. This avoids repeatedly transmitting actions that cannot be legal in the current phase.
+
+After the first turn, production CLI uses a compact state capsule containing immutable confirmed facts, a compact plan baseline, file hashes, new evidence and recent failure observations. Repairs use exact changed-file patches or small replacements rather than regenerating the case. Normal OpenFOAM dictionaries may be emitted as typed key-path/value assignments and serialized by deterministic Python.
+
+Post-processing has a matching `PostProcessingExecutionPlanAction` so predictable config/write/run/analyze work executes stop-on-failure without an LLM turn between each tool.

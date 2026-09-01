@@ -5,6 +5,8 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from openfoam_agent.schemas.engineering import TypedFoamDictionaryFile
+
 
 class _PostModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -86,7 +88,7 @@ class SearchPostProcessReferencesAction(_PostModel):
     type: Literal["search_postprocess_references"]
     query: str = Field(min_length=1, max_length=500)
     scope: Literal["all", "tutorials", "source", "etc"] = "all"
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class ReadPostProcessReferenceAction(_PostModel):
@@ -94,14 +96,14 @@ class ReadPostProcessReferenceAction(_PostModel):
     reference: str = Field(min_length=1, max_length=1000)
     start_line: int = Field(default=1, ge=1, le=1_000_000)
     line_count: int = Field(default=160, ge=1, le=400)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class WritePostProcessConfigAction(_PostModel):
     type: Literal["write_postprocess_config"]
     path: str = Field(min_length=1, max_length=240)
     content: str = Field(min_length=1, max_length=1_000_000)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class RunFoamPostProcessAction(_PostModel):
@@ -109,20 +111,20 @@ class RunFoamPostProcessAction(_PostModel):
     dictionary_path: str = Field(min_length=1, max_length=240)
     time_selection: Literal["all", "latest"] = "all"
     use_solver_context: bool = True
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class ListResultFilesAction(_PostModel):
     type: Literal["list_result_files"]
     prefix: str = Field(default="", max_length=240)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class ReadResultFileAction(_PostModel):
     type: Literal["read_result_file"]
     path: str = Field(min_length=1, max_length=500)
     max_chars: int = Field(default=40_000, ge=1, le=120_000)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class AnalyzeForceCoefficientsAction(_PostModel):
@@ -130,7 +132,52 @@ class AnalyzeForceCoefficientsAction(_PostModel):
     coefficient_path: str = Field(min_length=1, max_length=500)
     dictionary_path: str = Field(min_length=1, max_length=240)
     discard_fraction: float = Field(default=0.25, ge=0.0, lt=0.9)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
+
+
+class PostProcessConfigFile(_PostModel):
+    path: str = Field(min_length=1, max_length=240)
+    content: str = Field(min_length=1, max_length=300_000)
+
+
+class PostProcessRunSpec(_PostModel):
+    dictionary_path: str = Field(min_length=1, max_length=240)
+    time_selection: Literal["all", "latest"] = "all"
+    use_solver_context: bool = True
+
+
+class ForceAnalysisSpec(_PostModel):
+    coefficient_path: str = Field(min_length=1, max_length=500)
+    dictionary_path: str = Field(min_length=1, max_length=240)
+    discard_fraction: float = Field(default=0.25, ge=0.0, lt=0.9)
+
+
+class PostProcessingExecutionPlanAction(_PostModel):
+    """Execute predictable post-processing work without an LLM turn per tool."""
+
+    type: Literal["execute_postprocessing_plan"]
+    goal: str = Field(min_length=1, max_length=500)
+    configs: list[PostProcessConfigFile] = Field(default_factory=list, max_length=12)
+    typed_configs: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=12)
+    runs: list[PostProcessRunSpec] = Field(default_factory=list, max_length=12)
+    force_analyses: list[ForceAnalysisSpec] = Field(default_factory=list, max_length=8)
+    summary: str = Field(min_length=1, max_length=1500)
+    limitations: list[str] = Field(default_factory=list, max_length=30)
+    scientific_confidence: Literal["unknown", "low", "moderate", "high"] = "unknown"
+    review_reasons: list[str] = Field(default_factory=list, max_length=24)
+    recommended_human_checks: list[str] = Field(default_factory=list, max_length=24)
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> Self:
+        if not (self.configs or self.typed_configs or self.runs or self.force_analyses):
+            raise ValueError("Post-processing execution plan must contain deterministic work.")
+        paths = [x.path for x in self.configs] + [x.path for x in self.typed_configs]
+        if len(paths) != len(set(paths)):
+            raise ValueError("Post-processing plan contains duplicate config paths.")
+        for path in paths:
+            if not path.startswith("postprocessConfig/") or ".." in path:
+                raise ValueError("Post-processing config must live under postprocessConfig/.")
+        return self
 
 
 class FinishPostProcessingAction(_PostModel):
@@ -140,13 +187,13 @@ class FinishPostProcessingAction(_PostModel):
     scientific_confidence: Literal["unknown", "low", "moderate", "high"] = "unknown"
     review_reasons: list[str] = Field(default_factory=list, max_length=40)
     recommended_human_checks: list[str] = Field(default_factory=list, max_length=40)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class BlockPostProcessingAction(_PostModel):
     type: Literal["block_postprocessing"]
     reason: str = Field(min_length=1, max_length=4000)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 PostProcessingAction = (
@@ -157,9 +204,23 @@ PostProcessingAction = (
     | ListResultFilesAction
     | ReadResultFileAction
     | AnalyzeForceCoefficientsAction
+    | PostProcessingExecutionPlanAction
     | FinishPostProcessingAction
     | BlockPostProcessingAction
 )
+
+
+CompactPostProcessingAction = (
+    SearchPostProcessReferencesAction
+    | ReadPostProcessReferenceAction
+    | ReadResultFileAction
+    | PostProcessingExecutionPlanAction
+    | BlockPostProcessingAction
+)
+
+
+class PostProcessingPlanTurn(_PostModel):
+    action: CompactPostProcessingAction
 
 
 class PostProcessingTurn(_PostModel):

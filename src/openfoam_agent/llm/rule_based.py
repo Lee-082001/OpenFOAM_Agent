@@ -35,8 +35,11 @@ class RuleBasedLLM:
         prompt: str,
         *,
         system_prompt: str | None = None,
+        conversation_key: str | None = None,
+        use_previous_response: bool = False,
+        prompt_cache_key: str | None = None,
     ) -> T:
-        del system_prompt
+        del system_prompt, conversation_key, use_previous_response, prompt_cache_key
         if schema is CFDIntakeSpec:
             return _intake_from_prompt(prompt)  # type: ignore[return-value]
         raise NotImplementedError(

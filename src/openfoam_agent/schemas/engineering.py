@@ -15,7 +15,7 @@ class _EngineeringModel(BaseModel):
 class EngineeringDecision(_EngineeringModel):
     area: str = Field(min_length=1, max_length=80)
     choice: str = Field(min_length=1, max_length=500)
-    rationale: str = Field(min_length=1, max_length=2000)
+    rationale: str = Field(min_length=1, max_length=500)
 
 
 def canonical_engineering_evidence_id(kind: str, reference: str) -> str:
@@ -37,7 +37,7 @@ class EngineeringEvidence(_EngineeringModel):
     """
 
     evidence_id: str = Field(pattern=r"^ev_(?:cap|ref)_[0-9a-f]{20}$")
-    note: str = Field(default="", max_length=1000)
+    note: str = Field(default="", max_length=300)
 
 
 class ObservedEngineeringEvidence(_EngineeringModel):
@@ -112,20 +112,20 @@ class EngineeringPlan(_EngineeringModel):
 
 class InspectEnvironmentAction(_EngineeringModel):
     type: Literal["inspect_environment"]
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class SearchCapabilitiesAction(_EngineeringModel):
     type: Literal["search_capabilities"]
     query: str = Field(min_length=1, max_length=500)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class SearchReferencesAction(_EngineeringModel):
     type: Literal["search_references"]
     query: str = Field(min_length=1, max_length=500)
     scope: Literal["all", "tutorials", "source", "etc"] = "all"
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class ReadReferenceAction(_EngineeringModel):
@@ -133,25 +133,25 @@ class ReadReferenceAction(_EngineeringModel):
     reference: str = Field(min_length=1, max_length=1000)
     start_line: int = Field(default=1, ge=1, le=1_000_000)
     line_count: int = Field(default=160, ge=1, le=400)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class ListCaseFilesAction(_EngineeringModel):
     type: Literal["list_case_files"]
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class ReadCaseFileAction(_EngineeringModel):
     type: Literal["read_case_file"]
     path: str = Field(min_length=1, max_length=240)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class WriteCaseFileAction(_EngineeringModel):
     type: Literal["write_case_file"]
     path: str = Field(min_length=1, max_length=240)
     content: str = Field(min_length=1, max_length=1_000_000)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class CaseBundleFile(_EngineeringModel):
@@ -167,22 +167,72 @@ class CaseBundleFile(_EngineeringModel):
         return self
 
 
+class FoamDictionaryEntry(_EngineeringModel):
+    """One deterministic OpenFOAM dictionary assignment.
+
+    ``path`` expresses dictionary nesting while ``value`` carries only the Agent-owned
+    OpenFOAM value expression. Python owns braces and semicolons.
+    """
+
+    path: str = Field(
+        min_length=1,
+        max_length=300,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_:+-]*(?:\.[A-Za-z_][A-Za-z0-9_:+-]*)*$",
+    )
+    value: str = Field(min_length=1, max_length=20_000)
+
+
+class TypedFoamDictionaryFile(_EngineeringModel):
+    """Compact dictionary representation serialized by deterministic Python."""
+
+    path: str = Field(min_length=1, max_length=240)
+    entries: list[FoamDictionaryEntry] = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def validate_path_and_entries(self) -> Self:
+        if not re.fullmatch(r"(?:0|constant|system|postprocessConfig)/[A-Za-z0-9_.\/-]+", self.path) or ".." in self.path:
+            raise ValueError(f"Unsafe typed dictionary path: {self.path}")
+        keys = [item.path for item in self.entries]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Typed dictionary contains duplicate entry paths.")
+        return self
+
+
+class CaseFilePatch(_EngineeringModel):
+    """Exact deterministic patch for one already-observed case file."""
+
+    path: str = Field(min_length=1, max_length=240)
+    old: str = Field(min_length=1, max_length=80_000)
+    new: str = Field(max_length=80_000)
+
+    @model_validator(mode="after")
+    def validate_path(self) -> Self:
+        if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", self.path) or ".." in self.path:
+            raise ValueError(f"Unsafe patch path: {self.path}")
+        return self
+
+
+class PatchCaseFileAction(_EngineeringModel):
+    type: Literal["patch_case_file"]
+    patch: CaseFilePatch
+
+
 class DeleteCaseFileAction(_EngineeringModel):
     type: Literal["delete_case_file"]
     path: str = Field(min_length=1, max_length=240)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class ValidateDictionaryAction(_EngineeringModel):
     type: Literal["validate_dictionary"]
     path: str = Field(min_length=1, max_length=240)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class SurfaceCheckAction(_EngineeringModel):
     type: Literal["surface_check"]
     path: str = Field(min_length=1, max_length=240)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class RunMeshCommandAction(_EngineeringModel):
@@ -194,7 +244,7 @@ class RunMeshCommandAction(_EngineeringModel):
         "createPatch",
         "checkMesh",
     ]
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class ValidatePreSolveAction(_EngineeringModel):
@@ -206,7 +256,7 @@ class ValidatePreSolveAction(_EngineeringModel):
 
     type: Literal["validate_pre_solve"]
     required_case_files: list[str] = Field(min_length=1, max_length=80)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
     @model_validator(mode="after")
     def validate_required_case_files(self) -> Self:
@@ -221,20 +271,20 @@ class ValidatePreSolveAction(_EngineeringModel):
 class FinishPreviewAction(_EngineeringModel):
     type: Literal["finish_preview"]
     plan: EngineeringPlan
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class RetrySolverAction(_EngineeringModel):
     type: Literal["retry_solver"]
     plan: EngineeringPlan
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 class BlockAction(_EngineeringModel):
     type: Literal["block"]
     reason: str = Field(min_length=1, max_length=4000)
     needs_user_input: bool = False
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
 
 EngineeringSequenceMemberAction = (
@@ -262,7 +312,8 @@ class ExecuteCasePlanAction(_EngineeringModel):
 
     type: Literal["execute_case_plan"]
     goal: str = Field(min_length=1, max_length=1000)
-    files: list[CaseBundleFile] = Field(min_length=1, max_length=40)
+    files: list[CaseBundleFile] = Field(default_factory=list, max_length=40)
+    typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=40)
     validate_dictionaries: list[str] = Field(default_factory=list, max_length=40)
     surface_checks: list[str] = Field(default_factory=list, max_length=16)
     mesh_commands: list[Literal[
@@ -274,11 +325,13 @@ class ExecuteCasePlanAction(_EngineeringModel):
     ]] = Field(min_length=1, max_length=8)
     required_case_files: list[str] = Field(min_length=1, max_length=80)
     plan: EngineeringPlan
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
     @model_validator(mode="after")
     def validate_execution_plan(self) -> Self:
-        paths = [item.path for item in self.files]
+        if not self.files and not self.typed_dictionaries:
+            raise ValueError("execute_case_plan requires at least one raw or typed case file.")
+        paths = [item.path for item in self.files] + [item.path for item in self.typed_dictionaries]
         if len(paths) != len(set(paths)):
             raise ValueError("execute_case_plan contains duplicate file paths.")
 
@@ -304,13 +357,65 @@ class ExecuteCasePlanAction(_EngineeringModel):
         return self
 
 
+class RepairCasePlanAction(_EngineeringModel):
+    """Delta-only repair plan. Existing plan and unchanged files remain Python state."""
+
+    type: Literal["repair_case_plan"]
+    diagnosis: str = Field(min_length=1, max_length=800)
+    patches: list[CaseFilePatch] = Field(default_factory=list, max_length=20)
+    replacement_files: list[CaseBundleFile] = Field(default_factory=list, max_length=12)
+    typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=12)
+    validate_dictionaries: list[str] = Field(default_factory=list, max_length=24)
+    surface_checks: list[str] = Field(default_factory=list, max_length=12)
+    mesh_commands: list[Literal[
+        "blockMesh", "surfaceFeatureExtract", "snappyHexMesh", "createPatch", "checkMesh"
+    ]] = Field(default_factory=list, max_length=8)
+    validate_pre_solve: bool = True
+    retry_solver: bool = False
+    updated_plan: EngineeringPlan | None = None
+
+    @model_validator(mode="after")
+    def validate_repair(self) -> Self:
+        if not (self.patches or self.replacement_files or self.typed_dictionaries):
+            raise ValueError("repair_case_plan requires at least one changed file/patch.")
+        paths = [x.path for x in self.patches] + [x.path for x in self.replacement_files] + [x.path for x in self.typed_dictionaries]
+        if len(paths) != len(set(paths)):
+            raise ValueError("repair_case_plan may change each file at most once per turn.")
+        if self.mesh_commands and self.mesh_commands.count("checkMesh") > 1:
+            raise ValueError("repair_case_plan may run checkMesh at most once.")
+        return self
+
+
+# Phase-specific compact contracts. Agent identity remains one CFDEngineeringAgent; only
+# permissions/schema vary by phase so repeated calls do not carry the giant all-phase union.
+PrepareAction = SearchCapabilitiesAction | SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | ExecuteCasePlanAction | BlockAction
+class PrepareTurn(_EngineeringModel):
+    action: PrepareAction
+
+RepairAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
+class RepairTurn(_EngineeringModel):
+    action: RepairAction
+
+RevisionAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
+class RevisionTurn(_EngineeringModel):
+    action: RevisionAction
+
+FinalizationAction = FinishPreviewAction | BlockAction
+class FinalizationTurn(_EngineeringModel):
+    action: FinalizationAction
+
+RuntimeRepairAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
+class RuntimeRepairTurn(_EngineeringModel):
+    action: RuntimeRepairAction
+
+
 class EngineeringSequenceAction(_EngineeringModel):
     """A short ordered engineering intention executed without intermediate LLM calls."""
 
     type: Literal["sequence"]
     goal: str = Field(min_length=1, max_length=1000)
     actions: list[EngineeringSequenceMemberAction] = Field(min_length=2, max_length=6)
-    rationale: str = Field(min_length=1, max_length=1500)
+    rationale: str = Field(default="", max_length=200)
 
     @model_validator(mode="after")
     def validate_sequence_shape(self) -> Self:
@@ -361,6 +466,7 @@ EngineeringAction = (
     | ListCaseFilesAction
     | ReadCaseFileAction
     | WriteCaseFileAction
+    | PatchCaseFileAction
     | DeleteCaseFileAction
     | ValidateDictionaryAction
     | SurfaceCheckAction
@@ -371,6 +477,7 @@ EngineeringAction = (
     | BlockAction
     | EngineeringSequenceAction
     | ExecuteCasePlanAction
+    | RepairCasePlanAction
 )
 
 

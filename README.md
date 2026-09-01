@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.9.0
+# OpenFOAM Agent v2.10.0
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -7,6 +7,11 @@ The central design rule is:
 > The agent chooses and designs. Python validates authority, safety, integrity, bounded execution, and evidence.
 
 v2 is intentionally not a collection of hand-written CFD case templates. There is no production rule such as `if vortex shedding -> square obstacle template`, `if static -> snappyHexMesh`, or `if prescribed deformation -> displacementLaplacian`.
+
+
+## v2.10.0: token-optimized phase contracts
+
+v2.10 builds on the v2.9 execution-plan fast path. Production CLI now uses compact phase-specific schemas, delta-only repair patches, a typed OpenFOAM dictionary serializer, one-shot post-processing execution plans, compact state capsules after the first turn, and OpenAI prompt-cache telemetry. The deterministic sandbox, provenance, checkMesh, pre-solve and CaseSeal gates are unchanged. See `V2_10_CHANGES.md` for measured reductions and migration details.
 
 ## v2.9.0: execution-plan fast path
 
@@ -453,7 +458,7 @@ See `SECURITY.md` for the threat model and residual limitations.
 
 ## Failure semantics
 
-A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.9.0 measures the progress-aware engineering budget in **LLM turns**: the default soft boundary is 20 turns, extensions are granted in 10-turn chunks only when recent action/result evidence is genuinely new, and the absolute hard cap is 40 turns. Deterministic tool actions have a separate default cap of 160 per engineering round. Repeating the same action/result loop does not earn more budget.
+A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.10.0 measures the progress-aware engineering budget in **LLM turns**: production CLI defaults to a 12-turn soft boundary, 6-turn progress extensions and a 24-turn hard cap. Deterministic tool actions retain a separate cap, and all limits remain configurable. Repeating the same action/result loop does not earn more budget.
 
 ### Engineering action sequences (v2.8.0)
 

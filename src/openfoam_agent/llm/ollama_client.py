@@ -193,6 +193,9 @@ class OllamaLLM:
         prompt: str,
         *,
         system_prompt: str | None = None,
+        conversation_key: str | None = None,
+        use_previous_response: bool = False,
+        prompt_cache_key: str | None = None,
     ) -> T:
         """Generate JSON, validate it in Python, and repair invalid local-model output.
 
@@ -203,6 +206,7 @@ class OllamaLLM:
         validator before any Agent action can execute.
         """
 
+        del conversation_key, use_previous_response, prompt_cache_key
         if not isinstance(schema, type) or not issubclass(schema, BaseModel):
             raise TypeError("schema must be a Pydantic BaseModel class.")
 

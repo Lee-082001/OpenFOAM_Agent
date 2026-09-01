@@ -400,14 +400,18 @@ def test_cli_budget_flags_build_the_same_policy_defaults(graph_path):
     assert _validate_args(args, parser) == "test prompt"
     engineering, runtime, postprocessing = _policies_from_args(args)
 
-    assert engineering.max_agent_steps == 20
-    assert engineering.hard_max_agent_steps == 40
-    assert engineering.max_finalization_steps == 3
+    assert engineering.max_agent_steps == 12
+    assert engineering.hard_max_agent_steps == 24
+    assert engineering.max_finalization_steps == 2
     assert engineering.max_native_commands == 40
     assert engineering.max_mesh_repair_cycles == 6
     assert runtime.max_repair_cycles == 3
-    assert postprocessing.max_steps == 12
+    assert postprocessing.max_steps == 4
     assert postprocessing.max_native_commands == 8
+    assert engineering.compact_phase_schemas is True
+    assert engineering.state_delta_context is True
+    assert postprocessing.compact_execution_plan is True
+    assert postprocessing.state_delta_context is True
 
 
 def test_cli_budget_flags_are_configurable(graph_path):

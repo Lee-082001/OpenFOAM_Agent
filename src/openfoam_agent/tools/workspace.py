@@ -123,6 +123,25 @@ class CaseWorkspace:
         self._assert_total_size()
         return hashlib.sha256(encoded).hexdigest()
 
+    def patch_text_once(self, relative_text: str, old: str, new: str) -> str:
+        """Apply one exact text replacement through the normal write safety path.
+
+        The old fragment must occur exactly once. This makes LLM repair output delta-only
+        without introducing fuzzy or position-based edits that could silently target the
+        wrong OpenFOAM entry.
+        """
+        if not old:
+            raise WorkspaceSafetyError("Patch old text must not be empty.")
+        current = self.read_text(relative_text, max_chars=self.max_file_bytes + 1)
+        if current.endswith("\n... [truncated]"):
+            raise WorkspaceSafetyError(f"Case file is too large for exact patching: {relative_text}")
+        count = current.count(old)
+        if count != 1:
+            raise WorkspaceSafetyError(
+                f"Exact patch requires one match in {relative_text}; observed {count}."
+            )
+        return self.write_text(relative_text, current.replace(old, new, 1))
+
     def read_text(self, relative_text: str, *, max_chars: int = 40_000) -> str:
         path = self.resolve_case_path(relative_text, must_exist=True)
         data = path.read_text(encoding="utf-8", errors="replace")

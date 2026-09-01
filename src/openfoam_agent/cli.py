@@ -174,26 +174,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--engineering-steps",
         type=int,
-        default=20,
-        help="Initial autonomous engineering LLM-turn soft budget (default: 20 turns).",
+        default=12,
+        help="Initial autonomous engineering LLM-turn soft budget (default: 12 turns).",
     )
     parser.add_argument(
         "--engineering-hard-cap",
         type=int,
-        default=40,
-        help="Absolute engineering LLM-turn cap after progress-aware extensions (default: 40).",
+        default=24,
+        help="Absolute engineering LLM-turn cap after progress-aware extensions (default: 24).",
     )
     parser.add_argument(
         "--engineering-extension",
         type=int,
-        default=10,
-        help="Progress-aware LLM-turn extension chunk size (default: 10 turns).",
+        default=6,
+        help="Progress-aware LLM-turn extension chunk size (default: 6 turns).",
     )
     parser.add_argument(
         "--finalization-steps",
         type=int,
-        default=3,
-        help="Plan-finalization-only actions after validated case preparation (default: 3).",
+        default=2,
+        help="Plan-finalization-only actions after validated case preparation (default: 2).",
     )
     parser.add_argument(
         "--engineering-tool-budget",
@@ -225,8 +225,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runtime-repair-steps",
         type=int,
-        default=10,
-        help="Maximum LLM turns inside each runtime repair cycle (default: 10).",
+        default=4,
+        help="Maximum LLM turns inside each runtime repair cycle (default: 4).",
     )
     parser.add_argument(
         "--runtime-repair-tool-budget",
@@ -237,8 +237,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--postprocess-steps",
         type=int,
-        default=12,
-        help="Maximum autonomous post-processing actions after a successful solve (default: 12).",
+        default=4,
+        help="Maximum post-processing LLM plans after a successful solve (default: 4).",
     )
     parser.add_argument(
         "--postprocess-native-budget",
@@ -498,11 +498,15 @@ def _policies_from_args(
         max_runtime_repair_tool_actions=args.runtime_repair_tool_budget,
         require_solve_ready_gate=True,
         preload_capabilities=True,
+        compact_phase_schemas=True,
+        state_delta_context=True,
     )
     runtime = RuntimePolicy(max_attempts=args.runtime_repair_cycles + 1)
     postprocessing = PostProcessingPolicy(
         max_steps=args.postprocess_steps,
         max_native_commands=args.postprocess_native_budget,
+        compact_execution_plan=True,
+        state_delta_context=True,
     )
     return engineering, runtime, postprocessing
 
@@ -529,7 +533,7 @@ def build_report(
         len(round_events) / round_llm_turns if round_llm_turns else 0.0
     )
     return {
-        "architecture": "v2.9.0",
+        "architecture": "v2.10.0",
         "run_id": state.run_id,
         "prompt": request.prompt,
         "conversation_turns": list(request.conversation_turns),

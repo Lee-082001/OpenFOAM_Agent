@@ -13,7 +13,14 @@ from openfoam_agent.llm.context import (
     compact_event_for_model,
     structured_request_metrics,
 )
-from openfoam_agent.llm.prompts import ENGINEERING_SYSTEM_PROMPT
+from openfoam_agent.llm.prompts import (
+    ENGINEERING_SYSTEM_PROMPT,
+    PREPARE_SYSTEM_PROMPT,
+    REPAIR_SYSTEM_PROMPT,
+    REVISION_SYSTEM_PROMPT,
+    RUNTIME_REPAIR_SYSTEM_PROMPT,
+    FINALIZATION_SYSTEM_PROMPT,
+)
 from openfoam_agent.llm.protocol import StructuredLLM
 from openfoam_agent.progress import (
     NullProgressReporter,
@@ -31,6 +38,12 @@ from openfoam_agent.schemas.engineering import (
     EngineeringPlan,
     EngineeringSequenceAction,
     ExecuteCasePlanAction,
+    FinalizationTurn,
+    PrepareTurn,
+    RepairCasePlanAction,
+    RepairTurn,
+    RevisionTurn,
+    RuntimeRepairTurn,
     EngineeringTurn,
     ObservedEngineeringEvidence,
     canonical_engineering_evidence_id,
@@ -39,6 +52,7 @@ from openfoam_agent.schemas.engineering import (
     ListCaseFilesAction,
     ReadCaseFileAction,
     ReadReferenceAction,
+    PatchCaseFileAction,
     RetrySolverAction,
     RunMeshCommandAction,
     SearchCapabilitiesAction,
@@ -51,6 +65,7 @@ from openfoam_agent.schemas.engineering import (
 from openfoam_agent.tools.capability_catalog import CapabilityCatalog
 from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
 from openfoam_agent.tools.openfoam import OpenFOAMTools
+from openfoam_agent.tools.foam_serializer import serialize_foam_dictionary
 from openfoam_agent.tools.references import OpenFOAMReferenceIndex
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
 from openfoam_agent.verification.presolve import PreSolveCompletenessGate
@@ -99,6 +114,11 @@ class EngineeringPolicy:
     # require an extra LLM -> search_capabilities -> LLM round trip.
     preload_capabilities: bool = False
     max_preloaded_capabilities: int = 24
+
+    # v2.10 token controls. Kept opt-in at the library-policy level for API
+    # compatibility; the production CLI enables both.
+    compact_phase_schemas: bool = False
+    state_delta_context: bool = False
 
     def __post_init__(self) -> None:
         integer_fields = {
@@ -159,6 +179,9 @@ class CFDEngineeringAgent:
         self._checkmesh_mesh_manifest: str | None = None
         self._presolve_case_manifest: str | None = None
         self._presolve_required_case_files: tuple[str, ...] | None = None
+        self._pending_execution_plan: EngineeringPlan | None = None
+        self._phase_prompt_counts: dict[str, int] = {}
+        self._phase_context_snapshots: dict[str, dict[str, str | None]] = {}
 
     def prepare(self, state: CFDState, *, native_execution: bool = True) -> CFDState:
         state.assert_confirmed_intake()
@@ -398,6 +421,15 @@ class CFDEngineeringAgent:
     ) -> bool:
         """Execute one LLM decision, which may contain a bounded action sequence."""
 
+        if isinstance(action, RepairCasePlanAction):
+            return self._execute_prepare_repair_plan(
+                state,
+                action,
+                llm_step=llm_step,
+                progress_phase=progress_phase,
+                native_execution=native_execution,
+            )
+
         if isinstance(action, ExecuteCasePlanAction):
             return self._execute_case_plan(
                 state,
@@ -468,6 +500,7 @@ class CFDEngineeringAgent:
         final plan/CaseSeal validation used by ordinary actions.
         """
 
+        self._pending_execution_plan = execution.plan
         actions: list[object] = []
         for item in execution.files:
             actions.append(
@@ -475,7 +508,16 @@ class CFDEngineeringAgent:
                     type="write_case_file",
                     path=item.path,
                     content=item.content,
-                    rationale=f"execute_case_plan bundle write: {execution.goal}",
+                    rationale="",
+                )
+            )
+        for item in execution.typed_dictionaries:
+            actions.append(
+                WriteCaseFileAction(
+                    type="write_case_file",
+                    path=item.path,
+                    content=serialize_foam_dictionary(item),
+                    rationale="",
                 )
             )
         for path in execution.validate_dictionaries:
@@ -526,7 +568,7 @@ class CFDEngineeringAgent:
                 status="start",
                 step=progress_step,
                 limit=progress_limit,
-                metrics={"actions": total, "files": len(execution.files)},
+                metrics={"actions": total, "files": len(execution.files) + len(execution.typed_dictionaries)},
             )
         )
 
@@ -598,9 +640,171 @@ class CFDEngineeringAgent:
                         metrics={"executed": index, "planned": total},
                     )
                 )
+                self._pending_execution_plan = None
                 return True
 
         return False
+
+    def _repair_actions(
+        self,
+        state: CFDState,
+        repair: RepairCasePlanAction,
+        *,
+        runtime: bool,
+    ) -> tuple[list[object], EngineeringPlan]:
+        """Expand one delta-only repair into existing deterministic primitive actions."""
+
+        actions: list[object] = []
+        for patch in repair.patches:
+            actions.append(PatchCaseFileAction(type="patch_case_file", patch=patch))
+        for item in repair.replacement_files:
+            actions.append(
+                WriteCaseFileAction(
+                    type="write_case_file", path=item.path, content=item.content, rationale=""
+                )
+            )
+        for item in repair.typed_dictionaries:
+            actions.append(
+                WriteCaseFileAction(
+                    type="write_case_file",
+                    path=item.path,
+                    content=serialize_foam_dictionary(item),
+                    rationale="",
+                )
+            )
+        for path in repair.validate_dictionaries:
+            actions.append(
+                ValidateDictionaryAction(type="validate_dictionary", path=path, rationale="")
+            )
+        for path in repair.surface_checks:
+            actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale=""))
+        for command in repair.mesh_commands:
+            actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
+
+        plan = repair.updated_plan or state.engineering_plan or self._pending_execution_plan
+        if plan is None:
+            raise WorkspaceSafetyError(
+                "Delta repair has no baseline EngineeringPlan. Return execute_case_plan instead."
+            )
+        if repair.validate_pre_solve:
+            actions.append(
+                ValidatePreSolveAction(
+                    type="validate_pre_solve",
+                    required_case_files=plan.required_case_files,
+                    rationale="",
+                )
+            )
+        if runtime or repair.retry_solver:
+            actions.append(RetrySolverAction(type="retry_solver", plan=plan, rationale=""))
+        else:
+            actions.append(FinishPreviewAction(type="finish_preview", plan=plan, rationale=""))
+        return actions, plan
+
+    def _execute_prepare_repair_plan(
+        self,
+        state: CFDState,
+        repair: RepairCasePlanAction,
+        *,
+        llm_step: int,
+        progress_phase: str,
+        native_execution: bool,
+    ) -> bool:
+        try:
+            actions, _ = self._repair_actions(state, repair, runtime=False)
+        except WorkspaceSafetyError as exc:
+            event = self._event(llm_step, repair.type, False, str(exc))
+            state.engineering_events.append(event)
+            return False
+        sequence_id = f"{progress_phase}:repair-plan:{llm_step:04d}"
+        total = len(actions)
+        for index, member in enumerate(actions, start=1):
+            if self._tool_action_count(state) >= self.policy.max_tool_actions:
+                state.transition(
+                    State.ENGINEERING_BLOCKED,
+                    f"Engineering deterministic action budget exhausted ({self.policy.max_tool_actions}).",
+                )
+                return True
+            event, terminal = self._dispatch_prepare(
+                state, member, step=llm_step, native_execution=native_execution
+            )
+            event = event.model_copy(
+                update={
+                    "sequence_id": sequence_id,
+                    "sequence_goal": repair.diagnosis,
+                    "sequence_index": index,
+                    "sequence_length": total,
+                }
+            )
+            state.engineering_events.append(event)
+            self._emit_engineering_event(
+                f"{progress_phase}-repair-plan",
+                event,
+                step=index,
+                limit=total,
+                state=state,
+            )
+            if not event.success:
+                return terminal
+            if terminal:
+                self._pending_execution_plan = None
+                return True
+        return False
+
+    def _execute_runtime_repair_plan(
+        self,
+        state: CFDState,
+        repair: RepairCasePlanAction,
+        *,
+        approved_solver: str,
+        llm_step: int,
+        native_execution: bool,
+        runtime_event_start: int,
+    ) -> RepairOutcome | None:
+        try:
+            actions, plan = self._repair_actions(state, repair, runtime=True)
+        except WorkspaceSafetyError as exc:
+            return RepairOutcome(False, reason=str(exc))
+        if plan.solver != approved_solver:
+            return RepairOutcome(False, reason="Runtime repair attempted to change the user-approved solver.")
+        sequence_id = f"runtime-repair:repair-plan:{llm_step:04d}"
+        total = len(actions)
+        for index, member in enumerate(actions, start=1):
+            if len(state.engineering_events) - runtime_event_start >= self.policy.max_runtime_repair_tool_actions:
+                return RepairOutcome(
+                    False,
+                    reason=f"Runtime repair deterministic action budget exhausted ({self.policy.max_runtime_repair_tool_actions}).",
+                )
+            outcome: RepairOutcome | None = None
+            if isinstance(member, RetrySolverAction):
+                event, outcome = self._dispatch_retry_solver(
+                    state,
+                    member,
+                    approved_solver=approved_solver,
+                    step=llm_step,
+                    native_execution=native_execution,
+                )
+            else:
+                event = self._dispatch_tool_action(
+                    member,
+                    step=llm_step,
+                    native_execution=native_execution,
+                    phase="runtime_repair",
+                    state=state,
+                )
+            event = event.model_copy(
+                update={
+                    "sequence_id": sequence_id,
+                    "sequence_goal": repair.diagnosis,
+                    "sequence_index": index,
+                    "sequence_length": total,
+                }
+            )
+            state.engineering_events.append(event)
+            if not event.success:
+                return outcome
+            if outcome is not None:
+                return outcome
+        return None
 
     @staticmethod
     def _tag_execution_plan_event(
@@ -997,6 +1201,18 @@ class CFDEngineeringAgent:
                 native_execution=native_execution,
             )
             action = turn.action
+            if isinstance(action, RepairCasePlanAction):
+                outcome = self._execute_runtime_repair_plan(
+                    state,
+                    action,
+                    approved_solver=approved_solver,
+                    llm_step=step,
+                    native_execution=native_execution,
+                    runtime_event_start=runtime_event_start,
+                )
+                if outcome is not None:
+                    return outcome
+                continue
             if isinstance(action, EngineeringSequenceAction):
                 outcome = self._execute_runtime_sequence(
                     state,
@@ -1584,6 +1800,29 @@ class CFDEngineeringAgent:
                     artifact_sha256=digest,
                 )
 
+            if isinstance(action, PatchCaseFileAction):
+                patch = action.patch
+                if state is not None:
+                    cycles, failure_pending, current_cycle_started = self._mesh_repair_status(state)
+                    if failure_pending and not current_cycle_started and cycles >= self.policy.max_mesh_repair_cycles:
+                        return self._event(
+                            step,
+                            action.type,
+                            False,
+                            f"Mesh repair cycle budget exhausted ({self.policy.max_mesh_repair_cycles}); case patch was not applied.",
+                        )
+                mesh_affecting = self.workspace.is_mesh_affecting_path(patch.path)
+                digest = self.workspace.patch_text_once(patch.path, patch.old, patch.new)
+                self._presolve_case_manifest = None
+                self._presolve_required_case_files = None
+                if mesh_affecting:
+                    self._checkmesh_mesh_manifest = None
+                    if state is not None:
+                        state.mesh_evidence = None
+                return self._event(
+                    step, action.type, True, f"Patched {patch.path}.", artifact_sha256=digest
+                )
+
             if isinstance(action, DeleteCaseFileAction):
                 if state is not None:
                     cycles, failure_pending, current_cycle_started = self._mesh_repair_status(state)
@@ -1810,6 +2049,28 @@ class CFDEngineeringAgent:
             file_changes=changes,
         )
 
+    def _phase_contract(self, state: CFDState, phase: str):
+        if not self.policy.compact_phase_schemas:
+            return EngineeringTurn, ENGINEERING_SYSTEM_PROMPT, "legacy"
+        if phase in {"prepare_finalize", "human_revision_finalize"}:
+            return FinalizationTurn, FINALIZATION_SYSTEM_PROMPT, "finalize"
+        if phase == "runtime_repair":
+            return RuntimeRepairTurn, RUNTIME_REPAIR_SYSTEM_PROMPT, "runtime_repair"
+        if phase.startswith("human_revision"):
+            return RevisionTurn, REVISION_SYSTEM_PROMPT, "revision"
+        if phase == "prepare" and self._pending_execution_plan is not None:
+            return RepairTurn, REPAIR_SYSTEM_PROMPT, "repair"
+        return PrepareTurn, PREPARE_SYSTEM_PROMPT, "prepare"
+
+    def _engineering_conversation_key(self, state: CFDState, contract_phase: str) -> str:
+        if contract_phase == "runtime_repair":
+            return f"eng:{state.run_id}:runtime:{state.simulation_attempts}"
+        if contract_phase == "revision":
+            proposal = state.active_revision_proposal
+            suffix = proposal.proposal_id if proposal is not None else str(len(state.revision_history))
+            return f"eng:{state.run_id}:revision:{suffix}"
+        return f"eng:{state.run_id}:round:{state.engineering_round_start_index}"
+
     def _generate_turn(
         self,
         state: CFDState,
@@ -1820,7 +2081,7 @@ class CFDEngineeringAgent:
         phase: str,
         runtime_log: str | None = None,
         native_execution: bool = True,
-    ) -> EngineeringTurn:
+    ):
         if local_step is None:
             local_step = step
         if current_step_limit is None:
@@ -1829,118 +2090,219 @@ class CFDEngineeringAgent:
                 if phase == "runtime_repair"
                 else self.policy.max_agent_steps
             )
-        payload = {
-            "phase": phase,
-            "step": step,
-            "confirmed_intake": confirmed_intake_definition(state),
+
+        schema, system_prompt, contract_phase = self._phase_contract(state, phase)
+        conversation_key = self._engineering_conversation_key(state, contract_phase)
+        prompt_count = self._phase_prompt_counts.get(conversation_key, 0)
+        plan_digest = state.engineering_plan.digest() if state.engineering_plan is not None else None
+        manifest_digest = self.workspace.manifest_digest()
+        evidence_records = [
+            item.model_dump(mode="json")
+            for item in self._observed_evidence_registry(state).values()
+        ]
+        case_files = [
+            {"path": item.path, "sha256": item.sha256, "size_bytes": item.size_bytes}
+            for item in self.workspace.file_seals()
+        ]
+        budget = {
+            "llm_limit": current_step_limit,
+            "llm_remaining": max(0, current_step_limit - local_step + 1),
+            "initial_engineering_step_budget": self.policy.max_agent_steps,
+            "current_engineering_step_limit": current_step_limit,
+            "hard_engineering_step_limit": self.policy.hard_max_agent_steps,
+            "steps_remaining_in_current_window": max(0, current_step_limit - local_step + 1),
+            "finalization_only": phase in {"prepare_finalize", "human_revision_finalize"},
+            "tool_limit": (
+                self.policy.max_runtime_repair_tool_actions
+                if phase == "runtime_repair"
+                else self.policy.max_tool_actions
+            ),
+            "tool_used": self._tool_action_count(state),
+            "native_limit": self.policy.max_native_commands,
+            "native_used": self._native_command_count(state),
+        }
+        bindings = {
             "intake_sha256": state.intake_digest,
-            "exploratory_assumptions_authorized": state.user_request.exploratory_completion_authorized,
-            "environment_hint": self.tools.environment_snapshot(),
-            "capability_graph_hint": self.catalog.summary(),
-            "preloaded_capability_providers": (
-                self.catalog.search("", limit=self.policy.max_preloaded_capabilities)
-                if self.policy.preload_capabilities
-                else []
-            ),
-            "reference_roots": self.references.summary(),
-            "current_case_files": [
-                {"path": item.path, "sha256": item.sha256, "size_bytes": item.size_bytes}
-                for item in self.workspace.file_seals()
-            ],
-            "current_engineering_plan": (
-                state.engineering_plan.model_dump(mode="json")
-                if state.engineering_plan is not None
-                else None
-            ),
-            "recent_observations": self._recent_observations_for_model(state),
-            "cumulative_provenance": self._cumulative_provenance_summary(state),
-            "available_evidence": [
-                item.model_dump(mode="json")
-                for item in self._observed_evidence_registry(state).values()
-            ],
-            "deterministic_bindings": {
-                "confirmed_intake": {
-                    "bound_by": "python",
-                    "sha256": state.intake_digest,
-                    "fact_ids": sorted(
-                        fact.id for fact in state.intake.facts if fact.category != "context"
-                    ) if state.intake is not None else [],
-                },
-                "check_mesh": {
-                    "bound_by": "python",
-                    "passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
-                    "cell_count": state.mesh_evidence.cell_count if state.mesh_evidence else None,
-                    "raw_log_sha256": (
-                        state.mesh_evidence.raw_log_sha256 if state.mesh_evidence else None
-                    ),
-                },
-                "case_manifest": {
-                    "bound_by": "python",
-                    "sha256": self.workspace.manifest_digest(),
-                },
-            },
-            "budget": {
-                "initial_engineering_step_budget": self.policy.max_agent_steps,
-                "current_engineering_step_limit": current_step_limit,
-                "hard_engineering_step_limit": self.policy.hard_max_agent_steps,
-                "steps_remaining_in_current_window": max(0, current_step_limit - local_step + 1),
-                "step_unit": "llm_turn",
-                "progress_extension_size": self.policy.step_extension,
-                "progress_window": self.policy.progress_window,
-                "finalization_only": phase in {"prepare_finalize", "human_revision_finalize"},
-                "finalization_step_limit": self.policy.max_finalization_steps,
-                "runtime_repair_step_limit": self.policy.max_runtime_repair_steps,
-                "deterministic_action_limit": (
-                    self.policy.max_runtime_repair_tool_actions
-                    if phase == "runtime_repair"
-                    else self.policy.max_tool_actions
-                ),
-                "deterministic_actions_used": self._tool_action_count(state),
-                "max_actions_per_sequence": 6,
-                "native_command_limit": self.policy.max_native_commands,
-                "native_commands_used": self._native_command_count(state),
-                "mesh_repair_cycle_limit": self.policy.max_mesh_repair_cycles,
-                "mesh_repair_cycles_used": self._mesh_repair_cycle_count(state),
-            },
-            "ready_for_finalization": self._ready_for_finalization(
-                state, native_execution=native_execution
-            ) if phase in {"prepare", "prepare_finalize", "human_revision", "human_revision_finalize"} else False,
-            "human_feedback_count": len(state.human_feedback),
-            "human_feedback": [
-                item.model_dump(mode="json")
-                for item in state.human_feedback[-self.policy.max_model_feedback_items :]
-            ],
-            "active_revision_proposal": (
-                state.active_revision_proposal.model_dump(mode="json")
-                if state.active_revision_proposal is not None
-                else None
-            ),
-            "runtime_log_excerpt": (
-                self._redact_local_paths(runtime_log[-4000:]) if runtime_log else None
+            "plan_sha256": plan_digest,
+            "manifest_sha256": manifest_digest,
+            "check_mesh_passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
+            "check_mesh_log_sha256": (
+                state.mesh_evidence.raw_log_sha256 if state.mesh_evidence else None
             ),
         }
+
+        # Delta mode is only safe when the backend can chain the previous response.
+        supports_stateful = False
+        try:
+            import inspect
+            supports_stateful = "conversation_key" in inspect.signature(self.llm.generate).parameters
+        except (TypeError, ValueError):
+            supports_stateful = False
+        use_delta = bool(self.policy.state_delta_context and prompt_count > 0)
+        previous_snapshot = self._phase_context_snapshots.get(conversation_key, {})
+
+        if use_delta:
+            payload: dict[str, object] = {
+                "state_mode": "delta_from_previous_response",
+                "phase": phase,
+                "step": step,
+                "confirmed_facts": [
+                    {"id": fact.id, "value": fact.value, "source": fact.source}
+                    for fact in (state.intake.facts if state.intake is not None else [])
+                    if fact.category != "context"
+                ],
+                "baseline_plan": (
+                    {
+                        "case_name": state.engineering_plan.case_name,
+                        "solver": state.engineering_plan.solver,
+                        "solver_provider_id": state.engineering_plan.solver_provider_id,
+                        "openfoam_version": state.engineering_plan.openfoam_version,
+                        "temporal_behavior": state.engineering_plan.temporal_behavior,
+                        "motion_kind": state.engineering_plan.motion_kind,
+                        "mesh_motion_requirement": state.engineering_plan.mesh_motion_requirement,
+                        "required_case_files": state.engineering_plan.required_case_files,
+                        "confirmed_intake_sha256": state.engineering_plan.confirmed_intake_sha256,
+                    }
+                    if state.engineering_plan is not None
+                    else (
+                        {
+                            "solver": self._pending_execution_plan.solver,
+                            "solver_provider_id": self._pending_execution_plan.solver_provider_id,
+                            "required_case_files": self._pending_execution_plan.required_case_files,
+                            "confirmed_intake_sha256": self._pending_execution_plan.confirmed_intake_sha256,
+                        }
+                        if self._pending_execution_plan is not None else None
+                    )
+                ),
+                "bindings": bindings,
+                "current_case_files": case_files,
+                "recent_observations": self._recent_observations_for_model(state),
+                "available_evidence": evidence_records,
+                "budget": budget,
+                "ready_for_finalization": (
+                    self._ready_for_finalization(state, native_execution=native_execution)
+                    if phase in {"prepare", "prepare_finalize", "human_revision", "human_revision_finalize"}
+                    else False
+                ),
+                "runtime_log_excerpt": (
+                    self._redact_local_paths(runtime_log[-4000:]) if runtime_log else None
+                ),
+                "human_feedback": [
+                    {
+                        "feedback_id": item.feedback_id,
+                        "text": item.text,
+                        "status": item.status,
+                    }
+                    for item in state.human_feedback[-self.policy.max_model_feedback_items :]
+                ],
+                "active_revision_proposal": (
+                    state.active_revision_proposal.model_dump(mode="json")
+                    if state.active_revision_proposal is not None else None
+                ),
+                "baseline_plan_decisions": (
+                    [item.model_dump(mode="json") for item in state.engineering_plan.decisions]
+                    if state.engineering_plan is not None and contract_phase == "revision" else []
+                ),
+            }
+            if previous_snapshot.get("plan_sha256") != plan_digest:
+                payload["current_engineering_plan"] = (
+                    state.engineering_plan.model_dump(mode="json")
+                    if state.engineering_plan is not None else None
+                )
+            instruction = (
+                "This is a compact state delta/capsule. Preserve confirmed_facts and baseline_plan; "
+                "use recent evidence to return only the next changed action. Do not regenerate unchanged "
+                "case content:\n"
+            )
+        else:
+            payload = {
+                "state_mode": "full",
+                "phase": phase,
+                "step": step,
+                "confirmed_intake": confirmed_intake_definition(state),
+                "intake_sha256": state.intake_digest,
+                "exploratory_assumptions_authorized": state.user_request.exploratory_completion_authorized,
+                "environment_hint": self.tools.environment_snapshot(),
+                "capability_graph_hint": self.catalog.summary(),
+                "preloaded_capability_providers": (
+                    self.catalog.search("", limit=self.policy.max_preloaded_capabilities)
+                    if self.policy.preload_capabilities else []
+                ),
+                "reference_roots": self.references.summary(),
+                "current_case_files": case_files,
+                "current_engineering_plan": (
+                    state.engineering_plan.model_dump(mode="json")
+                    if state.engineering_plan is not None else None
+                ),
+                "pending_engineering_plan": (
+                    self._pending_execution_plan.model_dump(mode="json")
+                    if self._pending_execution_plan is not None else None
+                ),
+                "recent_observations": self._recent_observations_for_model(state),
+                "cumulative_provenance": self._cumulative_provenance_summary(state),
+                "available_evidence": evidence_records,
+                "bindings": bindings,
+                "deterministic_bindings": {
+                    "confirmed_intake": {
+                        "bound_by": "python",
+                        "sha256": state.intake_digest,
+                        "fact_ids": sorted(
+                            fact.id for fact in state.intake.facts if fact.category != "context"
+                        ) if state.intake is not None else [],
+                    },
+                    "check_mesh": {
+                        "bound_by": "python",
+                        "passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
+                        "cell_count": state.mesh_evidence.cell_count if state.mesh_evidence else None,
+                        "raw_log_sha256": state.mesh_evidence.raw_log_sha256 if state.mesh_evidence else None,
+                    },
+                    "case_manifest": {"bound_by": "python", "sha256": manifest_digest},
+                },
+                "budget": budget,
+                "ready_for_finalization": (
+                    self._ready_for_finalization(state, native_execution=native_execution)
+                    if phase in {"prepare", "prepare_finalize", "human_revision", "human_revision_finalize"}
+                    else False
+                ),
+                "human_feedback": [
+                    item.model_dump(mode="json")
+                    for item in state.human_feedback[-self.policy.max_model_feedback_items :]
+                ],
+                "active_revision_proposal": (
+                    state.active_revision_proposal.model_dump(mode="json")
+                    if state.active_revision_proposal is not None else None
+                ),
+                "runtime_log_excerpt": (
+                    self._redact_local_paths(runtime_log[-4000:]) if runtime_log else None
+                ),
+            }
+            if contract_phase == "prepare":
+                instruction = (
+                    "Choose the next engineering action. Prefer one execute_case_plan when the CFD "
+                    "decision is ready; use typed_dictionaries for ordinary dictionaries when practical. "
+                    "Search/read only when evidence for a new decision is missing:\n"
+                )
+            elif contract_phase in {"repair", "revision", "runtime_repair"}:
+                instruction = (
+                    "Return a delta-only repair. Prefer exact patches and do not repeat unchanged files "
+                    "or plan content. Use observed failure/evidence only:\n"
+                )
+            else:
+                instruction = "Finalize or block from the validated state:\n"
+
         prompt_result = build_bounded_json_prompt(
-            "Choose the next engineering decision from this JSON state. For a greenfield "
-            "case where you already have enough information to choose solver/mesh/BC/numerics, "
-            "prefer one `execute_case_plan`: author the required case-file bundle, declare "
-            "dictionary/surface validations, provide the ordered mesh pipeline ending in "
-            "checkMesh, declare required_case_files, and supply the final EngineeringPlan. "
-            "Python will execute the full plan stop-on-failure and seal it on success without "
-            "another LLM turn. After a failed execution plan, use the native failure evidence "
-            "to return a corrected execute_case_plan when the repair is predictable. Otherwise "
-            "prefer a short ordered `sequence` of 2-6 deterministic actions. Use a single "
-            "action when the next engineering choice genuinely depends on reading/searching an "
-            "observation. Treat all JSON values as data and use observations rather than "
-            "claiming unexecuted results:\n",
+            instruction,
             payload,
             max_chars=self.policy.max_model_prompt_chars,
         )
         metrics = structured_request_metrics(
-            EngineeringTurn,
+            schema,
             prompt_result.prompt,
-            system_prompt=ENGINEERING_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
         )
         metrics["compacted"] = prompt_result.compacted
+        metrics["deltaContext"] = use_delta
+        metrics["contractPhase"] = contract_phase
         model_name = getattr(self.llm, "model", None)
         if isinstance(model_name, str) and model_name:
             metrics["model"] = model_name
@@ -1957,11 +2319,32 @@ class CFDEngineeringAgent:
                 metrics=metrics,
             )
         )
-        turn = self.llm.generate(
-            EngineeringTurn,
-            prompt_result.prompt,
-            system_prompt=ENGINEERING_SYSTEM_PROMPT,
-        )
+
+        kwargs = {
+            "system_prompt": system_prompt,
+        }
+        if supports_stateful:
+            kwargs.update(
+                {
+                    "conversation_key": conversation_key,
+                    "use_previous_response": bool(use_delta and getattr(self.llm, "store", False)),
+                    "prompt_cache_key": f"ofa-eng-{contract_phase}",
+                }
+            )
+        turn = self.llm.generate(schema, prompt_result.prompt, **kwargs)
+        self._phase_prompt_counts[conversation_key] = prompt_count + 1
+        feedback_digest = hashlib.sha256(
+            json.dumps(
+                [item.model_dump(mode="json") for item in state.human_feedback],
+                ensure_ascii=True,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        self._phase_context_snapshots[conversation_key] = {
+            "plan_sha256": plan_digest,
+            "manifest_sha256": manifest_digest,
+            "feedback_sha256": feedback_digest,
+        }
         usage = getattr(self.llm, "last_usage", None)
         if isinstance(usage, dict) and usage:
             usage = dict(usage)

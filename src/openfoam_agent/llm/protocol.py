@@ -12,5 +12,8 @@ class StructuredLLM(Protocol):
         prompt: str,
         *,
         system_prompt: str | None = None,
+        conversation_key: str | None = None,
+        use_previous_response: bool = False,
+        prompt_cache_key: str | None = None,
     ) -> T:
         ...

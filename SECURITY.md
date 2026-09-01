@@ -84,3 +84,7 @@ The CLI configures an explicit OpenAI `max_output_tokens` ceiling (default 16000
 ## Canonical engineering evidence
 
 Engineering evidence authority is not delegated to model prose. Successful capability/reference tool observations receive deterministic opaque IDs (`ev_cap_*`, `ev_ref_*`) and are stored on local `EngineeringEvent` records. The cloud model receives a bounded `available_evidence` projection and may only select those IDs; finalization rejects any ID absent from the local registry. User facts, confirmed-intake binding, `checkMesh`, and case-manifest integrity are Python-owned deterministic checks and are intentionally excluded from model-selectable evidence.
+
+## v2.10 repair/serializer boundary
+
+Delta repair does not introduce fuzzy edits. `CaseFilePatch` is accepted only when its `old` fragment matches exactly once, and the resulting file is re-written through the existing workspace content/path safety checks. Typed OpenFOAM dictionaries do not choose engineering values; they only move brace/semicolon rendering into deterministic Python and the serialized content is still passed through the same workspace safety validation.

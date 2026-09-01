@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from typing import Any, TypeVar
 
@@ -122,6 +123,7 @@ class OpenAILLM:
         self.store = store
         self.max_output_tokens = max_output_tokens
         self.last_usage: dict[str, int] | None = None
+        self._previous_response_ids: dict[str, str] = {}
         self._client = client if client is not None else self._build_client()
 
     @classmethod
@@ -151,6 +153,9 @@ class OpenAILLM:
         prompt: str,
         *,
         system_prompt: str | None = None,
+        conversation_key: str | None = None,
+        use_previous_response: bool = False,
+        prompt_cache_key: str | None = None,
     ) -> T:
         """Generate and validate one Pydantic object from a user prompt."""
 
@@ -176,12 +181,27 @@ class OpenAILLM:
             "text_format": schema,
             "store": self.store,
         }
+        cache_key = prompt_cache_key or _stable_prompt_cache_key(
+            self.model, schema.__name__, effective_system_prompt
+        )
+        request["prompt_cache_key"] = cache_key
+        # GPT-5.6+ supports explicit prompt-cache options. Other models still
+        # benefit from normal automatic prefix caching and the stable cache key.
+        if self.model.casefold().startswith("gpt-5.6"):
+            request["prompt_cache_options"] = {"mode": "implicit", "ttl": "30m"}
+        if use_previous_response and conversation_key:
+            previous = self._previous_response_ids.get(conversation_key)
+            if previous:
+                request["previous_response_id"] = previous
         if self.max_output_tokens is not None:
             request["max_output_tokens"] = self.max_output_tokens
 
         self.last_usage = None
         response = self._client.responses.parse(**request)
         self.last_usage = _response_usage(response)
+        response_id = getattr(response, "id", None)
+        if self.store and conversation_key and isinstance(response_id, str) and response_id:
+            self._previous_response_ids[conversation_key] = response_id
         parsed = getattr(response, "output_parsed", None)
         if parsed is None:
             response_id = getattr(response, "id", None)
@@ -194,6 +214,13 @@ class OpenAILLM:
         if isinstance(parsed, schema):
             return parsed
         return schema.model_validate(parsed)
+
+
+def _stable_prompt_cache_key(model: str, schema_name: str, system_prompt: str) -> str:
+    digest = hashlib.sha256(
+        f"{model}\0{schema_name}\0{system_prompt}".encode("utf-8")
+    ).hexdigest()[:24]
+    return f"ofa:{schema_name[:20]}:{digest}"[:64]
 
 
 def _response_usage(response: Any) -> dict[str, int] | None:
@@ -213,4 +240,11 @@ def _response_usage(response: Any) -> dict[str, int] | None:
         "outputTokens": value("output_tokens"),
         "totalTokens": value("total_tokens"),
     }
+    details = usage.get("input_tokens_details") if isinstance(usage, dict) else getattr(usage, "input_tokens_details", None)
+    if details is not None:
+        def detail_value(name: str) -> int | None:
+            raw = details.get(name) if isinstance(details, dict) else getattr(details, name, None)
+            return raw if isinstance(raw, int) and raw >= 0 else None
+        mapped["cachedInputTokens"] = detail_value("cached_tokens")
+        mapped["cacheWriteTokens"] = detail_value("cache_write_tokens")
     return {key: item for key, item in mapped.items() if item is not None} or None
