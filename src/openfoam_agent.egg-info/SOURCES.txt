@@ -49,6 +49,7 @@ src/openfoam_agent/schemas/simulation.py
 src/openfoam_agent/tools/__init__.py
 src/openfoam_agent/tools/capability_catalog.py
 src/openfoam_agent/tools/diagnostics.py
+src/openfoam_agent/tools/foam_serializer.py
 src/openfoam_agent/tools/openfoam.py
 src/openfoam_agent/tools/parsers.py
 src/openfoam_agent/tools/references.py
@@ -61,6 +62,8 @@ src/openfoam_agent/workflow/__init__.py
 src/openfoam_agent/workflow/engine.py
 src/openfoam_agent/workflow/state.py
 src/openfoam_agent/workflow/states.py
+tests/test_v210_semantic_bindings.py
+tests/test_v210_token_optimization.py
 tests/test_v21_postprocessing.py
 tests/test_v22_human_feedback.py
 tests/test_v231_checkmesh_preflight.py
@@ -75,6 +78,7 @@ tests/test_v270_ollama_backend.py
 tests/test_v271_mesh_freshness.py
 tests/test_v273_ollama_intake_provenance.py
 tests/test_v280_engineering_sequences.py
+tests/test_v290_execution_plan.py
 tests/test_v2_adversarial_integration.py
 tests/test_v2_architecture.py
 tests/test_v2_budgets.py

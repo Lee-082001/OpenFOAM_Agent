@@ -65,7 +65,7 @@ from openfoam_agent.schemas.engineering import (
 from openfoam_agent.tools.capability_catalog import CapabilityCatalog
 from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
 from openfoam_agent.tools.openfoam import OpenFOAMTools
-from openfoam_agent.tools.foam_serializer import serialize_foam_dictionary
+from openfoam_agent.tools.foam_serializer import FoamSerializationError, serialize_foam_dictionary
 from openfoam_agent.tools.references import OpenFOAMReferenceIndex
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
 from openfoam_agent.verification.presolve import PreSolveCompletenessGate
@@ -500,7 +500,6 @@ class CFDEngineeringAgent:
         final plan/CaseSeal validation used by ordinary actions.
         """
 
-        self._pending_execution_plan = execution.plan
         actions: list[object] = []
         for item in execution.files:
             actions.append(
@@ -512,14 +511,40 @@ class CFDEngineeringAgent:
                 )
             )
         for item in execution.typed_dictionaries:
+            try:
+                content = serialize_foam_dictionary(item)
+            except FoamSerializationError as exc:
+                event = self._event(
+                    llm_step,
+                    "typed_dictionary_serialize",
+                    False,
+                    f"Typed dictionary serialization failed for {item.path}: {exc}",
+                )
+                state.engineering_events.append(event)
+                self._emit_engineering_event(
+                    f"{progress_phase}-execution-plan",
+                    event,
+                    step=progress_step,
+                    limit=progress_limit,
+                    state=state,
+                )
+                # No deterministic case action has executed yet. Ask for a fresh
+                # PrepareTurn with this diagnostic rather than crashing the workflow
+                # or entering delta-repair against a baseline that does not exist.
+                self._pending_execution_plan = None
+                return False
             actions.append(
                 WriteCaseFileAction(
                     type="write_case_file",
                     path=item.path,
-                    content=serialize_foam_dictionary(item),
+                    content=content,
                     rationale="",
                 )
             )
+        # Serialization is a pre-execution authoring check. Only establish the
+        # pending baseline after every typed dictionary can be rendered. Native or
+        # validation failures after this point may then use delta RepairTurn.
+        self._pending_execution_plan = execution.plan
         for path in execution.validate_dictionaries:
             actions.append(
                 ValidateDictionaryAction(
@@ -711,7 +736,7 @@ class CFDEngineeringAgent:
     ) -> bool:
         try:
             actions, _ = self._repair_actions(state, repair, runtime=False)
-        except WorkspaceSafetyError as exc:
+        except (WorkspaceSafetyError, FoamSerializationError) as exc:
             event = self._event(llm_step, repair.type, False, str(exc))
             state.engineering_events.append(event)
             return False
@@ -762,7 +787,7 @@ class CFDEngineeringAgent:
     ) -> RepairOutcome | None:
         try:
             actions, plan = self._repair_actions(state, repair, runtime=True)
-        except WorkspaceSafetyError as exc:
+        except (WorkspaceSafetyError, FoamSerializationError) as exc:
             return RepairOutcome(False, reason=str(exc))
         if plan.solver != approved_solver:
             return RepairOutcome(False, reason="Runtime repair attempted to change the user-approved solver.")

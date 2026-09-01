@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: openfoam-agent
-Version: 2.8.0
+Version: 2.10.3
 Summary: Agent-owned OpenFOAM CFD engineering behind deterministic safety gates
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
@@ -9,7 +9,7 @@ Requires-Dist: pydantic<3,>=2.8
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8; extra == "dev"
 
-# OpenFOAM Agent v2.8.0
+# OpenFOAM Agent v2.10.2
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -18,6 +18,49 @@ The central design rule is:
 > The agent chooses and designs. Python validates authority, safety, integrity, bounded execution, and evidence.
 
 v2 is intentionally not a collection of hand-written CFD case templates. There is no production rule such as `if vortex shedding -> square obstacle template`, `if static -> snappyHexMesh`, or `if prescribed deformation -> displacementLaplacian`.
+
+
+## v2.10.2: compact-contract invariant hardening
+
+v2.10.2 keeps the v2.10 token-optimized phase contracts but restores the semantic invariants that must never be compacted away: confirmed intake is immutable, assumptions may fill only genuinely missing details when authorized, and user/file/log/reference content is untrusted data rather than instruction. EngineeringPlan now also carries `confirmed_fact_bindings`, an auditable mapping from every confirmed fact to the case files or plan fields that implement it. Python checks coverage and referential integrity without taking over CFD semantic judgment. See `V2_10_1_CHANGES.md`.
+
+## v2.10.0: token-optimized phase contracts
+
+v2.10 builds on the v2.9 execution-plan fast path. Production CLI now uses compact phase-specific schemas, delta-only repair patches, a typed OpenFOAM dictionary serializer, one-shot post-processing execution plans, compact state capsules after the first turn, and OpenAI prompt-cache telemetry. The deterministic sandbox, provenance, checkMesh, pre-solve and CaseSeal gates are unchanged. See `V2_10_CHANGES.md` for measured reductions and migration details.
+
+## v2.9.0: execution-plan fast path
+
+v2.9 adds a high-level `execute_case_plan` action for the common greenfield path. One
+Engineering LLM turn can now author a bounded case-file bundle, dictionary/surface checks,
+the ordered mesh pipeline ending in `checkMesh`, solver-required files, and the final
+`EngineeringPlan`. Python expands that plan into the existing primitive actions and executes
+them through the same sandbox, command allowlists, budgets, mesh evidence parser, pre-solve
+gate, and CaseSeal validation. Execution stops on the first real failure; only then is the LLM
+called again with the compact native failure evidence.
+
+When the bundled capability graph is small, CLI runs preload its provider evidence into the
+first engineering prompt. Solver choice remains agent-owned, but the old
+LLM -> `search_capabilities` -> LLM round trip is not required merely to rediscover the same
+provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
+case manifest and required-file declaration are unchanged.
+
+The production defaults are intentionally tighter: 20 engineering LLM turns soft / 40 hard,
+10-turn extensions, 3 finalization turns, 3 automatic runtime repair cycles with 10 LLM turns
+per repair cycle, and 12 post-processing turns. All remain configurable from the CLI.
+
+Typical fast path:
+
+```text
+LLM #1: CFD decision + execute_case_plan
+        |
+        v
+Python: write bundle -> validate -> mesh -> checkMesh -> preSolve -> CaseSeal
+        |                                      |
+        | PASS                                 | FAIL
+        v                                      v
+    SOLVE_READY                            LLM #2 repair
+```
+
 
 ## Architecture
 
@@ -430,7 +473,7 @@ See `SECURITY.md` for the threat model and residual limitations.
 
 ## Failure semantics
 
-A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.8.0 measures the progress-aware engineering budget in **LLM turns**: the default soft boundary is 120 turns, extensions are granted in 20-turn chunks only when recent action/result evidence is genuinely new, and the absolute hard cap is 200 turns. Deterministic tool actions have a separate default cap of 480 per engineering round. Repeating the same action/result loop does not earn more budget.
+A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.10.2 measures the progress-aware engineering budget in **LLM turns**: production CLI defaults to a 12-turn soft boundary, 6-turn progress extensions and a 24-turn hard cap. Deterministic tool actions retain a separate cap, and all limits remain configurable. Repeating the same action/result loop does not earn more budget.
 
 ### Engineering action sequences (v2.8.0)
 

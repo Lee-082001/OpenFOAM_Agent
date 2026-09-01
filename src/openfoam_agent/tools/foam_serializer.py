@@ -20,12 +20,54 @@ def serialize_foam_dictionary(spec: TypedFoamDictionaryFile) -> str:
     """
 
     root: OrderedDict[str, object] = OrderedDict()
-    for entry in spec.entries:
+    entries = _normalize_entries(spec.entries)
+    for entry in entries:
         _insert(root, entry)
     lines: list[str] = []
     _render_mapping(root, lines, indent=0)
     text = "\n".join(lines).rstrip() + "\n"
     return text
+
+
+_STRUCTURAL_CONTAINER_MARKERS = frozenset({"{}", "{ }", "{\n}", "block", "dictionary"})
+
+
+def _normalize_entries(entries: Iterable[FoamDictionaryEntry]) -> list[FoamDictionaryEntry]:
+    """Normalize harmless container placeholders before deterministic rendering.
+
+    Typed dictionaries represent blocks implicitly through dotted leaf paths. Models may
+    occasionally emit a redundant container placeholder such as ``boundaryField = {}``
+    alongside ``boundaryField.inlet.type``. That carries no engineering value, so it is
+    safe to discard. A real scalar/container collision is still rejected with an
+    actionable diagnostic rather than silently changing CFD content.
+    """
+
+    items = list(entries)
+    descendant_parents: set[str] = set()
+    first_child: dict[str, str] = {}
+    for entry in items:
+        parts = entry.path.split(".")
+        for index in range(1, len(parts)):
+            parent = ".".join(parts[:index])
+            descendant_parents.add(parent)
+            first_child.setdefault(parent, entry.path)
+
+    normalized: list[FoamDictionaryEntry] = []
+    for entry in items:
+        if entry.path not in descendant_parents:
+            normalized.append(entry)
+            continue
+        marker = " ".join(entry.value.strip().lower().split())
+        if marker in _STRUCTURAL_CONTAINER_MARKERS:
+            # Container structure is already implied by descendant leaf paths.
+            continue
+        child = first_child.get(entry.path, f"{entry.path}.<leaf>")
+        raise FoamSerializationError(
+            f"Typed dictionary path {entry.path!r} is used both as a scalar and as a block "
+            f"(for example {child!r}). Container paths are implicit: omit the parent entry "
+            f"and provide leaf paths such as {child!r}."
+        )
+    return normalized
 
 
 def _insert(root: OrderedDict[str, object], entry: FoamDictionaryEntry) -> None:

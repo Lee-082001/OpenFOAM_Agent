@@ -390,3 +390,67 @@ def test_all_compact_engineering_prompts_preserve_semantic_invariants():
     ):
         for phrase in required:
             assert phrase in prompt
+
+
+def test_typed_serializer_ignores_redundant_container_placeholder():
+    text = serialize_foam_dictionary(
+        _typed(
+            "0/U",
+            [
+                (["boundaryField"], "{}"),
+                (["boundaryField", "inlet", "type"], "fixedValue"),
+                (["boundaryField", "inlet", "value"], "uniform (1 0 0)"),
+            ],
+        )
+    )
+    assert "boundaryField\n{" in text
+    assert "boundaryField {};" not in text
+    assert "type fixedValue;" in text
+
+
+def test_typed_serializer_failure_becomes_next_prepare_turn_not_workflow_failure(tmp_path, graph_path):
+    state = make_state()
+    bad = _compact_plan(state)
+    bad_u = bad.typed_dictionaries[-1].model_copy(
+        update={
+            "entries": [
+                FoamDictionaryEntry(path="dimensions", value="[0 1 -1 0 0 0 0]"),
+                # A real scalar/container collision cannot be silently normalized.
+                FoamDictionaryEntry(path="boundaryField", value="not-a-container"),
+                FoamDictionaryEntry(path="boundaryField.inlet.type", value="fixedValue"),
+            ]
+        }
+    )
+    bad = bad.model_copy(update={"typed_dictionaries": [*bad.typed_dictionaries[:-1], bad_u]})
+    good = _compact_plan(state)
+    llm = FlexibleScriptedLLM([bad, good])
+    tools = FakeOpenFOAMTools(
+        mesh_results={
+            "blockMesh": [tool_result("blockMesh", success=True, stdout="ok\n")],
+            "checkMesh": [tool_result("checkMesh", success=True, stdout=mesh_ok_log())],
+        }
+    )
+    agent = CFDEngineeringAgent(
+        llm,
+        workspace=tmp_path,
+        capability_db=graph_path,
+        tools=tools,
+        policy=EngineeringPolicy(
+            max_agent_steps=4,
+            hard_max_agent_steps=4,
+            require_solve_ready_gate=True,
+            preload_capabilities=True,
+            compact_phase_schemas=True,
+            state_delta_context=True,
+        ),
+    )
+    agent.workspace.write_text("constant/polyMesh/boundary", _boundary_file())
+    agent.prepare(state, native_execution=True)
+
+    assert state.current_state == State.SOLVE_READY
+    assert llm.schemas[:2] == [PrepareTurn, PrepareTurn]
+    assert any(
+        event.action_type == "typed_dictionary_serialize" and not event.success
+        for event in state.engineering_events
+    )
+    assert "used both as a scalar and as a block" in llm.prompts[1]

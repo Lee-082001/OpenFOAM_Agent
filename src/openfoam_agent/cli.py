@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from openfoam_agent import __version__
+
 import argparse
 import json
 import os
@@ -1298,7 +1300,7 @@ def _handle_command(command, session, args, llm, backend, model) -> bool:
 
 def _interactive(args, llm, backend, model) -> int:
     session = ConversationSession(mode=InteractionMode(args.mode))
-    print(f"OpenFOAM Agent v2.8.0 (mode={session.mode.value}; progress={args.progress}; /help for commands)")
+    print(f"OpenFOAM Agent v{__version__} (mode={session.mode.value}; progress={args.progress}; /help for commands)")
     if backend == "openai":
         routes = _model_routes(llm)
         print(
