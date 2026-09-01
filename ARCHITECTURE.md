@@ -195,4 +195,8 @@ The Ollama provider is not an Agent and does not acquire tool authority. All fil
 
 `OpenAILLM` keeps the existing strict Structured Outputs path. `OllamaLLM` uses a different transport-level strategy while preserving the same `StructuredLLM.generate(...) -> Pydantic model` contract: it requests generic JSON mode from `/v1/chat/completions`, places the target Pydantic JSON schema in the prompt as guidance rather than as a constrained-decoding grammar, validates the returned JSON with Pydantic in Python, and returns validation errors to the same local model for at most two repair turns. This avoids local grammar-initialization failures on large union-heavy Agent schemas such as `EngineeringTurn` without weakening the deterministic execution boundary. No invalid JSON or schema-invalid action reaches tool dispatch.
 
+### Local intake provenance repair (v2.7.3)
+
+Intake provenance is request-context validation rather than pure Pydantic shape validation. `IntakeAgent` therefore honors an optional adapter capability hint for bounded semantic repairs. `OllamaLLM` advertises two such repairs; adapters without the hint retain the historical single retry. On failure, the local model receives the exact cumulative user turns/file names, the deterministic validation error, and its previous invalid intake. The validator itself is unchanged: `source=user` still requires one verbatim contiguous evidence substring, while multi-turn synthesis must be represented as derived provenance.
+
 Ollama endpoint configuration is loopback-only by construction. A startup `/v1/models` probe verifies the tunnel/service and requested models before workflow execution. Provider failure is terminal for that backend invocation; there is no implicit OpenAI fallback.

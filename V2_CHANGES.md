@@ -1,3 +1,15 @@
+# v2.7.3
+
+## Ollama intake provenance-aware repair
+
+- Keeps deterministic intake provenance validation strict: `source=user` evidence must still be a verbatim substring of exactly one user turn or supplied file name.
+- Adds an Ollama-only semantic intake repair budget of two retries (three total intake generations); OpenAI and other adapters retain the historical single deterministic intake retry.
+- Replaces the previous generic intake retry message with a provenance-aware repair context containing the exact user turns/file names, the deterministic validation error, and the previous invalid intake draft.
+- Explicitly teaches local models during repair that multi-turn synthesis such as `request.summary` should normally be `source=derived` with `reason`/`depends_on`, while direct geometry/Re/objective facts remain `source=user` with short exact evidence.
+- Does not allow repair to weaken evidence checks, discard explicit user numbers, or bypass normal Pydantic/workflow validation. Persistent fabricated/paraphrased evidence still fails closed after the bounded local repair budget.
+- Adds regression coverage for the observed two-turn vortex-shedding failure, successful third-attempt provenance correction, bounded local failure, and unchanged non-Ollama retry behavior.
+- Synchronizes package/module/CLI/report metadata at 2.7.3.
+
 # v2.7.2
 
 ## Ollama JSON-mode structured repair

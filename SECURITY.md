@@ -8,6 +8,8 @@ Ollama uses the OpenAI-compatible API with a dummy `ollama` key. Failure to reac
 
 For structured Agent turns, Ollama uses generic JSON mode rather than compiling the full Agent Pydantic schema into a local decoding grammar. The returned text is still untrusted model output: Python/Pydantic must validate it successfully before the existing action schema, workspace safety, command allowlist, evidence, sealing, approval, and native-execution gates can act on it. Failed validation is returned only as a bounded repair prompt to the same Ollama backend; after two repair turns the call fails closed.
 
+Ollama multi-turn Intake additionally receives up to two semantic provenance repairs. These repairs do not relax the trust boundary: a `source=user` fact still requires verbatim evidence from exactly one supplied user turn/file name, explicit user numbers must remain represented, and a model that continues to fabricate or paraphrase evidence fails closed. The extra turns only provide the local model with clearer deterministic error/evidence context.
+
 ## Cloud disclosure boundary
 
 With `--backend openai --confirm-api-calls`, confirmed CFD task data, bounded tool observations, post-processing evidence, and human feedback/revision-review payloads are intentionally sent to the configured OpenAI model. API keys are never inserted into prompts; known local paths are redacted and `store=False` is used by default. Do not use the cloud backend for data that policy forbids leaving the host; a local model backend would be required for a zero-egress deployment.

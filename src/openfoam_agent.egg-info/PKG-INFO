@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: openfoam-agent
-Version: 2.7.2
+Version: 2.7.3
 Summary: Agent-owned OpenFOAM CFD engineering behind deterministic safety gates
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
@@ -182,6 +182,8 @@ OLLAMA_API_KEY (optional; defaults to ollama)
 ```
 
 The Ollama adapter reuses the installed OpenAI Python SDK against the OpenAI-compatible `/v1/chat/completions` endpoint, but it deliberately does **not** send the full Pydantic Agent schema as an Ollama constrained-decoding grammar. Complex schemas such as `EngineeringTurn` can fail in local grammar initialization before the model runs. Ollama therefore uses generic JSON mode (`response_format={"type":"json_object"}`), includes the Pydantic JSON schema in the prompt as generation guidance, then performs authoritative `model_validate_json()` validation in Python. Invalid local-model output receives at most two structured-repair turns (three total generation attempts). Only a Pydantic-valid object proceeds to the existing Agent/safety/evidence gates. OpenAI keeps its existing strict Structured Outputs path unchanged.
+
+For multi-turn Intake, v2.7.3 also gives only the Ollama/local adapter two bounded **semantic provenance** repair turns. If a local model marks a synthesized summary as `source=user` with translated/paraphrased evidence, the deterministic validator rejects it and the repair prompt re-supplies the exact user turns, the invalid draft, and the provenance rule. Multi-turn summaries should be corrected to `source=derived` with `reason`/`depends_on`; direct facts still require short verbatim evidence. Persistent fabricated evidence remains a terminal failure.
 
 `--confirm-api-calls` is intentionally not required for `--backend ollama` because requests stay on local loopback and traverse the user-created SSH tunnel; that flag remains mandatory for the cloud OpenAI backend.
 

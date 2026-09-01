@@ -23,6 +23,7 @@ DEFAULT_OLLAMA_MODEL = "gemma4:31b"
 DEFAULT_OLLAMA_API_KEY = "ollama"
 DEFAULT_OLLAMA_HEALTH_TIMEOUT = 3.0
 DEFAULT_OLLAMA_STRUCTURED_REPAIRS = 2
+DEFAULT_OLLAMA_INTAKE_VALIDATION_REPAIRS = 2
 _ALLOWED_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -141,6 +142,7 @@ class OllamaLLM:
         default_system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         max_output_tokens: int | None = None,
         structured_repair_attempts: int = DEFAULT_OLLAMA_STRUCTURED_REPAIRS,
+        intake_validation_repair_attempts: int = DEFAULT_OLLAMA_INTAKE_VALIDATION_REPAIRS,
     ) -> None:
         normalized_model = model.strip()
         if not normalized_model:
@@ -149,6 +151,10 @@ class OllamaLLM:
             raise LLMConfigurationError("max_output_tokens must be positive when set.")
         if structured_repair_attempts < 0:
             raise LLMConfigurationError("structured_repair_attempts must be non-negative.")
+        if intake_validation_repair_attempts < 0:
+            raise LLMConfigurationError(
+                "intake_validation_repair_attempts must be non-negative."
+            )
 
         self.model = normalized_model
         self.base_url = normalize_ollama_base_url(base_url)
@@ -156,6 +162,10 @@ class OllamaLLM:
         self.default_system_prompt = default_system_prompt.strip()
         self.max_output_tokens = max_output_tokens
         self.structured_repair_attempts = structured_repair_attempts
+        # Request-context provenance is validated above the generic Pydantic adapter.
+        # Local models receive two semantic repair turns; OpenAI keeps its historical
+        # IntakeAgent retry because it does not advertise this capability hint.
+        self.intake_validation_repair_attempts = intake_validation_repair_attempts
         self.last_usage: dict[str, int] | None = None
         self._client = client if client is not None else self._build_client()
 

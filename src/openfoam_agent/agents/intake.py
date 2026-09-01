@@ -129,31 +129,135 @@ def confirmed_intake_definition(state: CFDState) -> dict[str, object]:
     }
 
 
+def _uses_extended_intake_provenance_repair(llm: StructuredLLM) -> bool:
+    return hasattr(llm, "intake_validation_repair_attempts")
+
+
+def _legacy_intake_validation_repair_prompt(
+    *, base_prompt: str, error: ValueError
+) -> str:
+    """Preserve the pre-v2.7.3 repair prompt for adapters without the local hint."""
+
+    return (
+        base_prompt
+        + "\n\nThe previous draft failed deterministic intake validation. "
+        "Regenerate the full CFDIntakeSpec once. Preserve user numeric values "
+        "and exact evidence. Validation error: "
+        + json.dumps(str(error), ensure_ascii=False)
+    )
+
+
+def _intake_validation_repair_budget(llm: StructuredLLM) -> int:
+    """Return semantic intake-repair attempts advertised by an LLM adapter.
+
+    Cloud/OpenAI adapters intentionally keep the historical single deterministic
+    intake retry because they do not expose this capability hint. Local adapters
+    may opt into a slightly larger budget without making IntakeAgent provider-aware.
+    """
+
+    value = getattr(llm, "intake_validation_repair_attempts", 1)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        return 1
+    return min(value, 3)
+
+
+def _build_intake_validation_repair_prompt(
+    *,
+    base_prompt: str,
+    request: UserRequest,
+    previous: CFDIntakeSpec,
+    error: ValueError,
+    attempt: int,
+    max_attempts: int,
+) -> str:
+    """Build a provenance-aware deterministic repair prompt.
+
+    The important distinction for small/local models is that a normalized or
+    multi-turn synthesis is *not* verbatim user evidence. We therefore show the
+    exact user turns again and make the source=user/derived boundary explicit.
+    """
+
+    exact_turns = [request.prompt, *request.conversation_turns]
+    repair_context = {
+        "repair_attempt": attempt,
+        "repair_attempts_allowed": max_attempts,
+        "validation_error": str(error),
+        "exact_user_turns": [
+            {"turn": index, "text": text} for index, text in enumerate(exact_turns, 1)
+        ],
+        "exact_geometry_file_names": [
+            _file_name(path) for path in request.geometry_files
+        ],
+        "exact_additional_file_names": [
+            _file_name(path) for path in request.additional_files
+        ],
+        "previous_invalid_spec": previous.model_dump(mode="json"),
+    }
+    rules = (
+        "PROVENANCE REPAIR RULES:\n"
+        "1. For source=user, evidence MUST be one contiguous verbatim substring "
+        "copied from exactly one exact_user_turn or supplied file name. Do not "
+        "translate, normalize, paraphrase, concatenate multiple turns, or invent evidence.\n"
+        "2. Keep direct user facts such as geometry, Reynolds number, objective, "
+        "material, and explicitly stated conditions as source=user with short exact evidence.\n"
+        "3. If a fact synthesizes or summarizes information from multiple user turns, "
+        "use source=derived, provide a reason, and set depends_on to the direct fact IDs "
+        "that support it. request.summary commonly needs source=derived after follow-up turns.\n"
+        "4. Do not delete explicit user numbers or other supported facts merely to pass "
+        "validation. Preserve later-turn overrides.\n"
+        "5. Regenerate the COMPLETE CFDIntakeSpec, not only the offending fact."
+    )
+    return (
+        base_prompt
+        + "\n\nThe previous draft failed deterministic intake validation. "
+        "Repair the full CFDIntakeSpec using the exact evidence below.\n\n"
+        + rules
+        + "\n\nDETERMINISTIC REPAIR CONTEXT:\n"
+        + json.dumps(repair_context, ensure_ascii=False, indent=2)
+    )
+
+
 class IntakeAgent:
     def __init__(self, llm: StructuredLLM):
         self.llm = llm
 
     def run(self, state: CFDState) -> CFDState:
         prompt = build_intake_prompt(state.user_request)
-        try:
+        max_repairs = _intake_validation_repair_budget(self.llm)
+        result: CFDIntakeSpec | None = None
+        validation_error: ValueError | None = None
+
+        for attempt in range(max_repairs + 1):
+            current_prompt = prompt
+            if attempt > 0:
+                assert result is not None
+                assert validation_error is not None
+                if _uses_extended_intake_provenance_repair(self.llm):
+                    current_prompt = _build_intake_validation_repair_prompt(
+                        base_prompt=prompt,
+                        request=state.user_request,
+                        previous=result,
+                        error=validation_error,
+                        attempt=attempt,
+                        max_attempts=max_repairs,
+                    )
+                else:
+                    current_prompt = _legacy_intake_validation_repair_prompt(
+                        base_prompt=prompt, error=validation_error
+                    )
             result = self.llm.generate(
-                CFDIntakeSpec, prompt, system_prompt=INTAKE_SYSTEM_PROMPT
+                CFDIntakeSpec, current_prompt, system_prompt=INTAKE_SYSTEM_PROMPT
             )
-            validate_intake_provenance(result, state.user_request)
-        except ValueError as exc:
-            repair_prompt = (
-                prompt
-                + "\n\nThe previous draft failed deterministic intake validation. "
-                "Regenerate the full CFDIntakeSpec once. Preserve user numeric values "
-                "and exact evidence. Validation error: "
-                + json.dumps(str(exc), ensure_ascii=False)
-            )
-            result = self.llm.generate(
-                CFDIntakeSpec,
-                repair_prompt,
-                system_prompt=INTAKE_SYSTEM_PROMPT,
-            )
-            validate_intake_provenance(result, state.user_request)
+            try:
+                validate_intake_provenance(result, state.user_request)
+                validation_error = None
+                break
+            except ValueError as exc:
+                validation_error = exc
+                if attempt >= max_repairs:
+                    raise
+
+        assert result is not None
         state.intake = result
         state.intake_confirmed = False
         state.intake_digest = None
