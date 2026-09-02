@@ -179,6 +179,37 @@ def test_execute_case_plan_failure_returns_to_llm_then_repairs(tmp_path, graph_p
     assert all(e.action_type != "finish_preview" for e in first_plan_events)
 
 
+def test_execute_case_plan_long_goal_does_not_overflow_internal_rationale(tmp_path, graph_path):
+    state = make_state()
+    action = _full_execution_plan(state).model_copy(update={"goal": "G" * 1000})
+    llm = ScriptedLLM([action])
+    tools = FakeOpenFOAMTools(
+        mesh_results={
+            "blockMesh": [tool_result("blockMesh", success=True, stdout="blockMesh complete\n")],
+            "checkMesh": [tool_result("checkMesh", success=True, stdout=mesh_ok_log())],
+        }
+    )
+    agent = CFDEngineeringAgent(
+        llm,
+        workspace=tmp_path,
+        capability_db=graph_path,
+        tools=tools,
+        policy=EngineeringPolicy(
+            max_agent_steps=4,
+            hard_max_agent_steps=4,
+            require_solve_ready_gate=True,
+            preload_capabilities=True,
+        ),
+    )
+    agent.workspace.write_text("constant/polyMesh/boundary", _boundary_file())
+
+    agent.prepare(state, native_execution=True)
+
+    assert state.current_state == State.SOLVE_READY
+    assert len(llm.prompts) == 1
+    assert tools.mesh_calls == ["blockMesh", "checkMesh"]
+
+
 def test_execute_case_plan_schema_is_strict_output_compatible():
     from openfoam_agent.llm.openai_client import validate_structured_output_schema
     from openfoam_agent.schemas.engineering import EngineeringTurn

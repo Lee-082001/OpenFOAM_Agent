@@ -550,7 +550,7 @@ class CFDEngineeringAgent:
                 ValidateDictionaryAction(
                     type="validate_dictionary",
                     path=path,
-                    rationale=f"execute_case_plan dictionary validation: {execution.goal}",
+                    rationale="",
                 )
             )
         for path in execution.surface_checks:
@@ -558,7 +558,7 @@ class CFDEngineeringAgent:
                 SurfaceCheckAction(
                     type="surface_check",
                     path=path,
-                    rationale=f"execute_case_plan surface validation: {execution.goal}",
+                    rationale="",
                 )
             )
         for command in execution.mesh_commands:
@@ -566,21 +566,21 @@ class CFDEngineeringAgent:
                 RunMeshCommandAction(
                     type="run_mesh_command",
                     command=command,
-                    rationale=f"execute_case_plan mesh pipeline: {execution.goal}",
+                    rationale="",
                 )
             )
         actions.append(
             ValidatePreSolveAction(
                 type="validate_pre_solve",
                 required_case_files=execution.required_case_files,
-                rationale=f"execute_case_plan solve-readiness gate: {execution.goal}",
+                rationale="",
             )
         )
         actions.append(
             FinishPreviewAction(
                 type="finish_preview",
                 plan=execution.plan,
-                rationale=f"execute_case_plan finalize and seal: {execution.goal}",
+                rationale="",
             )
         )
 
