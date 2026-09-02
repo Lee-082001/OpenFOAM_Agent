@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.10.4
+# OpenFOAM Agent v2.11.0
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -8,6 +8,15 @@ The central design rule is:
 
 v2 is intentionally not a collection of hand-written CFD case templates. There is no production rule such as `if vortex shedding -> square obstacle template`, `if static -> snappyHexMesh`, or `if prescribed deformation -> displacementLaplacian`.
 
+
+
+## v2.11.0: transactional case authoring and bounded complete-plan retry
+
+v2.11.0 fixes the structural failure mode where an `execute_case_plan` could write the first few files, hit a deterministic workspace/serialization rejection on a later file, and then enter delta repair against a half-authored case. High-level case authoring is now **pre-commit transactional at the deterministic policy layer**: every raw and typed case file is rendered and checked for sandbox/content/library/size policy before the first candidate file is written. If authoring preflight fails, the workspace is left unchanged and the next compact LLM contract accepts only a corrected **complete** `execute_case_plan` or `block`; reference searches, file reads, and delta repair are intentionally unavailable because there is no partial case to repair. Complete-plan authoring failures have a separate 3-attempt bound, preventing them from consuming the full Engineering LLM budget. Once authoring preflight passes, the complete bundle is written before dictionary/native validation starts, so later OpenFOAM failures operate on a complete case and normal delta repair semantics remain valid. See `V2_11_CHANGES.md`.
+
+## v2.10.5: plan-only repair and solver metadata consistency
+
+v2.10.5 fixes a repair edge case discovered after a case had already passed dictionary validation, `blockMesh`, `checkMesh`, and pre-solve validation but the final `EngineeringPlan` contained inconsistent solver metadata. `repair_case_plan` now accepts an `updated_plan` without requiring a fake file mutation, so metadata-only repairs can be revalidated and sealed. The compact prepare prompt also requires `EngineeringPlan.solver` and `system/controlDict` to use the exact solver name of the selected observed capability provider and explicitly forbids placeholders such as `foamRunNameHere`, `solverName`, `TBD`, or `TODO`. Deterministic provider/case exact-match gates remain unchanged. See `V2_10_5_CHANGES.md`.
 
 ## v2.10.4: execution-plan robustness
 
@@ -45,7 +54,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-v2.9 introduced the execution-plan fast path. Current v2.10.4 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v2.11.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -561,7 +570,7 @@ See `SECURITY.md` for the threat model and residual limitations.
 
 ## Failure semantics
 
-A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.10.4 measures the progress-aware engineering budget in **LLM turns**: production CLI defaults to a 12-turn soft boundary, 6-turn progress extensions and a 24-turn hard cap. Deterministic tool actions retain a separate cap, and all limits remain configurable. Repeating the same action/result loop does not earn more budget.
+A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.11.0 measures the progress-aware engineering budget in **LLM turns**: production CLI defaults to a 12-turn soft boundary, 6-turn progress extensions and a 24-turn hard cap. Deterministic tool actions retain a separate cap, and all limits remain configurable. Repeating the same action/result loop does not earn more budget.
 
 ### Engineering action sequences (v2.8.0)
 
@@ -612,7 +621,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2.10.4 release tree currently passes **172 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v2.11.0 release tree currently passes **177 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;

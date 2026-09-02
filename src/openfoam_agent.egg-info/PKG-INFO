@@ -9,7 +9,7 @@ Requires-Dist: pydantic<3,>=2.8
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8; extra == "dev"
 
-# OpenFOAM Agent v2.10.2
+# OpenFOAM Agent v2.10.4
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -20,9 +20,21 @@ The central design rule is:
 v2 is intentionally not a collection of hand-written CFD case templates. There is no production rule such as `if vortex shedding -> square obstacle template`, `if static -> snappyHexMesh`, or `if prescribed deformation -> displacementLaplacian`.
 
 
-## v2.10.2: compact-contract invariant hardening
+## v2.10.4: execution-plan robustness
 
-v2.10.2 keeps the v2.10 token-optimized phase contracts but restores the semantic invariants that must never be compacted away: confirmed intake is immutable, assumptions may fill only genuinely missing details when authorized, and user/file/log/reference content is untrusted data rather than instruction. EngineeringPlan now also carries `confirmed_fact_bindings`, an auditable mapping from every confirmed fact to the case files or plan fields that implement it. Python checks coverage and referential integrity without taking over CFD semantic judgment. See `V2_10_1_CHANGES.md`.
+v2.10.4 fixes an internal execution-plan expansion bug where a long parent `execute_case_plan.goal` could overflow the 200-character `rationale` limit on deterministic child actions. Child actions now keep an empty internal rationale while the parent goal remains available for progress and audit output. This preserves the compact LLM-facing contract without allowing a Python-generated validation failure. See `V2_10_4_CHANGES.md`.
+
+## v2.10.3: typed-dictionary collision recovery
+
+v2.10.3 hardens typed OpenFOAM dictionary generation. Redundant container placeholders such as `boundaryField = {}` are normalized away when dotted leaf assignments already define the block. Genuine scalar/block collisions become bounded engineering observations and are returned to the next Engineering turn instead of terminating the workflow. The interactive banner also reports the package `__version__` instead of a stale hard-coded version string. See `V2_10_3_CHANGES.md`.
+
+## v2.10.2: confirmed-fact binding schema fix
+
+v2.10.2 replaces the fragile `case:` / `plan:` string-prefix binding protocol with explicit `case_files` and `plan_fields` fields. Persisted v2.10.1 bindings remain loadable through a compatibility migration. Python still validates only coverage and referential integrity; CFD semantic correctness remains Agent-owned. See `V2_10_2_CHANGES.md`.
+
+## v2.10.1: compact-contract semantic invariants
+
+v2.10.1 restores the semantic contracts that must not be removed by prompt compaction: confirmed intake is immutable, assumptions may fill only genuinely missing details when authorized, and user/file/log/reference content is untrusted data rather than instruction. `EngineeringPlan.confirmed_fact_bindings` makes every confirmed fact auditable against the case files or plan fields that are claimed to implement it. See `V2_10_1_CHANGES.md`.
 
 ## v2.10.0: token-optimized phase contracts
 
@@ -44,9 +56,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-The production defaults are intentionally tighter: 20 engineering LLM turns soft / 40 hard,
-10-turn extensions, 3 finalization turns, 3 automatic runtime repair cycles with 10 LLM turns
-per repair cycle, and 12 post-processing turns. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v2.10.4 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -178,6 +188,8 @@ openfoam-agent --interactive \
   --confirm-api-calls
 ```
 
+`OPENAI_MODEL` / `--model` is only the global default. Intake, Engineering, Post-processing, and Review may use different model IDs; see **Role-based model routing** below.
+
 ### Local Ollama backend over SSH tunnel (v2.7.0)
 
 The Agent can use an Ollama model through the same `StructuredLLM` boundary without changing intake, engineering, validation, OpenFOAM execution, repair, post-processing, or review orchestration. Ollama is only the text/reasoning backend.
@@ -230,25 +242,112 @@ For multi-turn Intake, v2.7.3 also gives only the Ollama/local adapter two bound
 
 `--confirm-api-calls` is intentionally not required for `--backend ollama` because requests stay on local loopback and traverse the user-created SSH tunnel; that flag remains mandatory for the cloud OpenAI backend.
 
-### Role-based model routing (v2.6.0)
+### Role-based model routing
 
-`--model` remains the backward-compatible default for every cloud role. Individual roles can override it without changing the workflow or safety gates:
+The workflow has four configurable LLM roles. `--backend` selects the backend for the **whole workflow**, while each role may select a different model ID within that backend. The current CLI does not mix OpenAI and Ollama in one run.
+
+| Role | CLI flag | Environment variable | Used for |
+| --- | --- | --- | --- |
+| Intake | `--intake-model` | `OPENAI_INTAKE_MODEL` / `OLLAMA_INTAKE_MODEL` | Natural-language intake, clarification, and solver-independent CFD problem definition |
+| Engineering | `--engineering-model` | `OPENAI_ENGINEERING_MODEL` / `OLLAMA_ENGINEERING_MODEL` | Initial CFD engineering, case/mesh repair, **runtime repair**, and confirmed revision engineering |
+| Post-processing | `--postprocess-model` | `OPENAI_POSTPROCESS_MODEL` / `OLLAMA_POSTPROCESS_MODEL` | Post-processing planning/reporting after a successful solve unless `--skip-postprocess` is used |
+| Review | `--review-model` | `OPENAI_REVIEW_MODEL` / `OLLAMA_REVIEW_MODEL` | Human-feedback diagnosis and revision proposal generation after `/feedback` |
+
+Runtime repair and confirmed case revision intentionally reuse the **Engineering** model because they continue the same solver/mesh/BC/numerics responsibility. The Review model only diagnoses feedback and proposes changes; it does not execute the revision.
+
+`--model` is the backward-compatible default model for every role. Resolution order for each role is:
+
+```text
+role-specific CLI flag
+  > role-specific environment variable
+  > --model
+  > OPENAI_MODEL / OLLAMA_MODEL
+  > Ollama built-in default (gemma4:31b only)
+```
+
+OpenAI has no built-in default model, so every role must resolve either through a global default or an explicit role override. A global default is optional when all four roles are configured explicitly. If multiple roles resolve to the same model ID, the CLI reuses one backend adapter instance for those roles.
+
+#### OpenAI examples
+
+**One model for every Agent:**
 
 ```bash
-export LUNA_MODEL="<exact API model id>"
-export SOL_MODEL="<exact API model id>"
+export OPENAI_API_KEY="..."
+export OPENAI_MODEL="<model-id>"
 
 openfoam-agent --interactive \
   --backend openai \
-  --confirm-api-calls \
-  --model "$LUNA_MODEL" \
-  --engineering-model "$SOL_MODEL" \
-  --review-model "$SOL_MODEL"
+  --confirm-api-calls
 ```
 
-With that configuration, intake and post-processing use the default/Luna model while engineering, mesh/case repair, runtime repair, confirmed revision engineering, and feedback review use the Sol overrides. Runtime repair intentionally follows `--engineering-model`; it is not a separate routing role.
+Equivalent CLI form:
 
-Available role overrides are `--intake-model`, `--engineering-model`, `--postprocess-model`, and `--review-model`. Resolution order is: role CLI flag, role environment variable (`OPENAI_INTAKE_MODEL`, `OPENAI_ENGINEERING_MODEL`, `OPENAI_POSTPROCESS_MODEL`, `OPENAI_REVIEW_MODEL`), `--model`, then `OPENAI_MODEL`. A global default is optional if every role is explicitly configured. The CLI startup line, `LLM-CONTEXT`/`LLM-USAGE` metrics, and JSON report `model_routes` expose the resolved routing.
+```bash
+openfoam-agent --interactive \
+  --backend openai \
+  --confirm-api-calls \
+  --model "<model-id>"
+```
+
+**Cost-aware routing: a lighter model for routine roles and a stronger model for Engineering:**
+
+```bash
+openfoam-agent --interactive \
+  --backend openai \
+  --confirm-api-calls \
+  --model "gpt-5.6-luna" \
+  --engineering-model "gpt-5.6-sol"
+```
+
+That resolves to:
+
+```text
+Intake           gpt-5.6-luna
+Engineering      gpt-5.6-sol
+Runtime repair   gpt-5.6-sol   # follows Engineering
+Revision         gpt-5.6-sol   # follows Engineering
+Post-processing  gpt-5.6-luna
+Review            gpt-5.6-luna
+```
+
+**Explicit model for every role:**
+
+```bash
+openfoam-agent --interactive \
+  --backend openai \
+  --confirm-api-calls \
+  --intake-model "gpt-5.6-luna" \
+  --engineering-model "gpt-5.6-sol" \
+  --postprocess-model "gpt-5.6-luna" \
+  --review-model "gpt-5.6-luna"
+```
+
+The OpenAI backend currently uses one `OPENAI_API_KEY`/OpenAI endpoint configuration for the run; the per-role settings choose **model IDs**, not separate API keys or separate providers. Per-role OpenAI/Ollama backend mixing or per-role API keys/base URLs are not exposed by the current CLI.
+
+#### Ollama role routing
+
+The same four role flags work with `--backend ollama`:
+
+```bash
+openfoam-agent --interactive \
+  --backend ollama \
+  --intake-model "<local-intake-model>" \
+  --engineering-model "<local-engineering-model>" \
+  --postprocess-model "<local-postprocess-model>" \
+  --review-model "<local-review-model>"
+```
+
+All Ollama roles use the same loopback `--base-url` / `OLLAMA_BASE_URL` and API-key setting. Startup health checking verifies every distinct requested role model before the workflow starts.
+
+#### Verify the resolved routing
+
+At startup the CLI prints the resolved models, for example:
+
+```text
+OpenAI model routing: intake=gpt-5.6-luna, engineering=gpt-5.6-sol, postprocess=gpt-5.6-luna, review=gpt-5.6-luna; runtime-repair/revision use the engineering model.
+```
+
+`LLM-CONTEXT` and `LLM-USAGE` progress events also include the model used for each call, and JSON reports expose the resolved `model_routes`.
 
 Typical interactive flow:
 
@@ -300,21 +399,21 @@ v2.3 adds an observational `ProgressEvent` bus shared by engineering, runtime re
 ```text
 OpenFOAM Agent> /confirm
 [ENGINEERING] 확정된 CFD 정의로 autonomous engineering 시작
-[ENGINEERING 01/120] capability graph 조회: incompressibleFluid
-[ENGINEERING 01/120] OK Capability search returned 1 provider(s).
-[ENGINEERING 07/120] case 파일 작성: system/controlDict
-[ENGINEERING 07/120] OK Wrote system/controlDict.
-[ENGINEERING 18/120] mesh command 실행: checkMesh
-[ENGINEERING 18/120] OK checkMesh returned status 0; evidence passed.
+[ENGINEERING 01/12] capability graph 조회: incompressibleFluid
+[ENGINEERING 01/12] OK Capability search returned 1 provider(s).
+[ENGINEERING 07/12] case 파일 작성: system/controlDict
+[ENGINEERING 07/12] OK Wrote system/controlDict.
+[ENGINEERING 08/12] mesh command 실행: checkMesh
+[ENGINEERING 08/12] OK checkMesh returned status 0; evidence passed.
   cells=23760, maxNonOrtho=0, maxSkew=2.84e-13
-[ENGINEERING 19/120] engineering plan 최종 검증 및 case seal
-[ENGINEERING 19/120] OK Engineering plan accepted and case sealed.
+[ENGINEERING 09/12] engineering plan 최종 검증 및 case seal
+[ENGINEERING 09/12] OK Engineering plan accepted and case sealed.
 ```
 
 If deterministic final validation rejects the plan, normal progress now exposes the bounded, path-redacted gate reason immediately instead of only showing a generic failure:
 
 ```text
-[FINALIZING 01/8] FAIL Engineering plan rejected by deterministic safety/evidence gate.
+[FINALIZING 01/2] FAIL Engineering plan rejected by deterministic safety/evidence gate.
   reason:
     - A successful current checkMesh result with cell-count evidence is required before solve approval.
 ```
@@ -353,7 +452,7 @@ Runtime residual evidence is projected as total sample count, latest residuals b
 Before each structured model call the progress stream reports approximate request size:
 
 ```text
-[LLM-CONTEXT 07/120] prepare LLM context 준비
+[LLM-CONTEXT 07/12] prepare LLM context 준비
   promptChars=18342, schemaChars=9470, approxTokens=15120, compacted=False
 ```
 
@@ -473,7 +572,7 @@ See `SECURITY.md` for the threat model and residual limitations.
 
 ## Failure semantics
 
-A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.10.2 measures the progress-aware engineering budget in **LLM turns**: production CLI defaults to a 12-turn soft boundary, 6-turn progress extensions and a 24-turn hard cap. Deterministic tool actions retain a separate cap, and all limits remain configurable. Repeating the same action/result loop does not earn more budget.
+A failed mesh or dictionary tool is an **observation**, not an automatic terminal failure. The result is returned to the engineering agent, which may inspect files/references, modify the case, and retry inside bounded resource budgets. v2.10.4 measures the progress-aware engineering budget in **LLM turns**: production CLI defaults to a 12-turn soft boundary, 6-turn progress extensions and a 24-turn hard cap. Deterministic tool actions retain a separate cap, and all limits remain configurable. Repeating the same action/result loop does not earn more budget.
 
 ### Engineering action sequences (v2.8.0)
 
@@ -483,9 +582,9 @@ Python does **not** execute a sequence as an unchecked batch. Every member passe
 
 Raw `EngineeringEvent` records remain local and complete for audit/provenance. Model context is different: consecutive events from one sequence are collapsed into one compact `engineering_sequence_summary`, with the failed diagnostic retained when applicable. Reports expose `engineering_llm_turns_used`, `engineering_tool_actions_used`, `engineering_sequences_used`, and `tool_actions_per_llm_turn` so token-efficiency improvements can be measured directly.
 
-Preparation also has independent default limits of 40 executed native OpenFOAM validation/mesh commands and 10 mesh-repair cycles. If the engineering window ends immediately after a current passing `checkMesh`, a finalization-only window of 8 LLM turns lets the Agent submit `finish_preview` or `block`; it cannot run tools or edit the case.
+Preparation also has independent default limits of 40 executed native OpenFOAM validation/mesh commands and 6 mesh-repair cycles. If the engineering window ends immediately after a current passing `checkMesh`, a finalization-only window of 2 LLM turns lets the Agent submit finalization/blocking actions; it cannot use that window as an unbounded second engineering phase.
 
-During runtime, a failed `foamRun` log is returned to the same engineering agent. The default policy allows up to 8 autonomous repair/retry cycles (9 solver executions total), with up to 60 Engineering LLM turns and 180 deterministic actions inside each repair cycle. Automatic repair cannot switch the already approved solver. Only mesh-affecting edits invalidate current `checkMesh` evidence. Changes to `fvSchemes`, `fvSolution`, `controlDict`, initial fields, and other non-mesh solver inputs keep the existing mesh evidence current and are validated by their appropriate dictionary/pre-solve checks. Changes to mesh-generation dictionaries, geometry inputs, or generated `constant/polyMesh` require a fresh `checkMesh` before `retry_solver` is accepted.
+During runtime, a failed `foamRun` log is returned to the same Engineering Agent/model. The default policy allows up to 3 autonomous repair/retry cycles (4 solver executions total), with up to 4 Engineering LLM turns and 48 deterministic actions inside each repair cycle. Automatic repair cannot switch the already approved solver. Only mesh-affecting edits invalidate current `checkMesh` evidence. Changes to `fvSchemes`, `fvSolution`, `controlDict`, initial fields, and other non-mesh solver inputs keep the existing mesh evidence current and are validated by their appropriate dictionary/pre-solve checks. Changes to mesh-generation dictionaries, geometry inputs, or generated `constant/polyMesh` require a fresh `checkMesh` before `retry_solver` is accepted.
 
 
 ### Budget controls
@@ -493,17 +592,17 @@ During runtime, a failed `foamRun` log is returned to the same engineering agent
 The CLI exposes the production defaults so operators can tighten them for expensive environments:
 
 ```bash
---engineering-steps 120
---engineering-hard-cap 200
---engineering-extension 20
---finalization-steps 8
---engineering-tool-budget 480
+--engineering-steps 12
+--engineering-hard-cap 24
+--engineering-extension 6
+--finalization-steps 2
+--engineering-tool-budget 160
 --native-command-budget 40
---mesh-repair-cycles 10
---runtime-repair-cycles 8
---runtime-repair-steps 60
---runtime-repair-tool-budget 180
---postprocess-steps 40
+--mesh-repair-cycles 6
+--runtime-repair-cycles 3
+--runtime-repair-steps 4
+--runtime-repair-tool-budget 48
+--postprocess-steps 4
 --postprocess-native-budget 8
 --skip-postprocess
 ```
@@ -524,7 +623,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2 tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v2.10.4 release tree currently passes **172 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;
@@ -560,7 +659,7 @@ When native execution is enabled, `/confirm` resolves only the trusted `checkMes
 Native failures no longer collapse to only `returned status 1`/`-6`. The same bounded `NativeFailureDiagnostic` path is used by `foamDictionary`, `surfaceCheck`, `blockMesh`, `surfaceFeatureExtract`, `snappyHexMesh`, `createPatch`, `checkMesh`, `foamRun`, and `foamPostProcess`. Complete stdout/stderr remains in the private workspace log; a bounded raw OpenFOAM diagnostic is surfaced to both the next relevant Agent turn and normal CLI progress. For example:
 
 ```text
-[ENGINEERING 31/120] FAIL snappyHexMesh returned status 1; native diagnostic captured.
+[ENGINEERING 10/12] FAIL snappyHexMesh returned status 1; native diagnostic captured.
   reason:
     - nativeCommand: snappyHexMesh
     - returnCode: 1

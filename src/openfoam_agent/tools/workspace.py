@@ -107,7 +107,15 @@ class CaseWorkspace:
             raise FileNotFoundError(f"Case file does not exist: {relative_text}")
         return path
 
-    def write_text(self, relative_text: str, content: str) -> str:
+    def validate_candidate_text(self, relative_text: str, content: str) -> str:
+        """Validate one prospective case input without mutating the workspace.
+
+        High-level execution plans use this before the first file write so a
+        deterministic content-policy failure cannot leave a half-authored case.
+        The returned digest is the digest the file would have after a successful
+        commit.
+        """
+
         if "\x00" in content:
             raise WorkspaceSafetyError("Case files must not contain NUL bytes.")
         encoded = content.encode("utf-8")
@@ -115,13 +123,59 @@ class CaseWorkspace:
             raise WorkspaceSafetyError(
                 f"Case file exceeds {self.max_file_bytes} byte limit: {relative_text}"
             )
+        # Path resolution performs the same sandbox/path checks as write_text, but
+        # does not create the target.
+        self.resolve_case_path(relative_text)
         self._validate_content(content, relative_text)
+        return hashlib.sha256(encoded).hexdigest()
+
+    def validate_candidate_bundle(self, files: dict[str, str]) -> list[str]:
+        """Preflight a complete LLM-authored case bundle without writing any file.
+
+        The check deliberately mirrors the deterministic write-time safety rules
+        and also verifies the aggregate authored-size budget as if all candidate
+        paths were committed together.  Callers can therefore reject the whole
+        bundle before the first mutation instead of creating partial case state.
+        """
+
+        failures: list[str] = []
+        normalized_candidates: dict[str, int] = {}
+        for relative_text, content in files.items():
+            try:
+                normalized = self._normalized(relative_text)
+                self.validate_candidate_text(normalized, content)
+            except (WorkspaceSafetyError, OSError, UnicodeError) as exc:
+                failures.append(str(exc))
+                continue
+            normalized_candidates[normalized] = len(content.encode("utf-8"))
+
+        if failures:
+            return failures
+
+        total = 0
+        candidate_paths = set(normalized_candidates)
+        for relative in self.list_authored():
+            if relative in candidate_paths:
+                continue
+            try:
+                total += self.resolve_case_path(relative, must_exist=True).stat().st_size
+            except (FileNotFoundError, OSError) as exc:
+                failures.append(f"Unable to inspect existing case file {relative}: {exc}")
+        total += sum(normalized_candidates.values())
+        if total > self.max_total_bytes:
+            failures.append(
+                f"Agent-authored case would exceed {self.max_total_bytes} byte limit after bundle commit."
+            )
+        return failures
+
+    def write_text(self, relative_text: str, content: str) -> str:
+        digest = self.validate_candidate_text(relative_text, content)
         path = self.resolve_case_path(relative_text)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write(path, content)
         self._authored_paths.add(self._normalized(relative_text))
         self._assert_total_size()
-        return hashlib.sha256(encoded).hexdigest()
+        return digest
 
     def patch_text_once(self, relative_text: str, old: str, new: str) -> str:
         """Apply one exact text replacement through the normal write safety path.

@@ -12,6 +12,7 @@ from openfoam_agent.llm.prompts.engineering import (
     ENGINEERING_SYSTEM_PROMPT,
     FINALIZATION_SYSTEM_PROMPT,
     PREPARE_SYSTEM_PROMPT,
+    CASE_PLAN_RETRY_SYSTEM_PROMPT,
     REPAIR_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
     RUNTIME_REPAIR_SYSTEM_PROMPT,
@@ -28,6 +29,7 @@ from openfoam_agent.schemas.engineering import (
     ExecuteCasePlanAction,
     FoamDictionaryEntry,
     PrepareTurn,
+    CasePlanRetryTurn,
     RepairCasePlanAction,
     RepairTurn,
     RuntimeRepairTurn,
@@ -383,6 +385,7 @@ def test_all_compact_engineering_prompts_preserve_semantic_invariants():
     assert len(ENGINEERING_INVARIANTS) < 1200
     for prompt in (
         PREPARE_SYSTEM_PROMPT,
+        CASE_PLAN_RETRY_SYSTEM_PROMPT,
         REPAIR_SYSTEM_PROMPT,
         REVISION_SYSTEM_PROMPT,
         RUNTIME_REPAIR_SYSTEM_PROMPT,
@@ -448,9 +451,182 @@ def test_typed_serializer_failure_becomes_next_prepare_turn_not_workflow_failure
     agent.prepare(state, native_execution=True)
 
     assert state.current_state == State.SOLVE_READY
-    assert llm.schemas[:2] == [PrepareTurn, PrepareTurn]
+    assert llm.schemas[:2] == [PrepareTurn, CasePlanRetryTurn]
     assert any(
         event.action_type == "typed_dictionary_serialize" and not event.success
         for event in state.engineering_events
     )
     assert "used both as a scalar and as a block" in llm.prompts[1]
+
+
+def test_plan_only_repair_can_fix_solver_metadata_after_successful_case_execution(tmp_path, graph_path):
+    state = make_state()
+    first = _compact_plan(state)
+    bad_plan = first.plan.model_copy(update={"solver": "foamRunNameHere"})
+    first = first.model_copy(update={"plan": bad_plan})
+
+    corrected_plan = bad_plan.model_copy(update={"solver": "incompressibleFluid"})
+    repair = RepairCasePlanAction(
+        type="repair_case_plan",
+        diagnosis="Case artifacts and mesh evidence are valid; correct only the solver metadata.",
+        patches=[],
+        replacement_files=[],
+        typed_dictionaries=[],
+        validate_dictionaries=[],
+        surface_checks=[],
+        mesh_commands=[],
+        validate_pre_solve=False,
+        retry_solver=False,
+        updated_plan=corrected_plan,
+    )
+    llm = FlexibleScriptedLLM([first, repair])
+    tools = FakeOpenFOAMTools(
+        mesh_results={
+            "blockMesh": [tool_result("blockMesh", success=True, stdout="ok\n")],
+            "checkMesh": [tool_result("checkMesh", success=True, stdout=mesh_ok_log())],
+        }
+    )
+    agent = CFDEngineeringAgent(
+        llm,
+        workspace=tmp_path,
+        capability_db=graph_path,
+        tools=tools,
+        policy=EngineeringPolicy(
+            max_agent_steps=4,
+            hard_max_agent_steps=4,
+            require_solve_ready_gate=True,
+            preload_capabilities=True,
+            compact_phase_schemas=True,
+            state_delta_context=True,
+        ),
+    )
+    agent.workspace.write_text("constant/polyMesh/boundary", _boundary_file())
+    agent.prepare(state, native_execution=True)
+
+    assert state.current_state == State.SOLVE_READY
+    assert state.engineering_plan is not None
+    assert state.engineering_plan.solver == "incompressibleFluid"
+    assert llm.schemas == [PrepareTurn, RepairTurn]
+
+
+def test_repair_case_plan_rejects_true_noop_but_allows_updated_plan_only():
+    state = make_state()
+    plan = make_plan(state.intake).model_copy(update={"required_case_files": ["0/U"]})
+    repair = RepairCasePlanAction(
+        type="repair_case_plan",
+        diagnosis="metadata-only repair",
+        validate_pre_solve=False,
+        updated_plan=plan,
+    )
+    assert repair.updated_plan == plan
+
+    from pydantic import ValidationError
+    try:
+        RepairCasePlanAction(
+            type="repair_case_plan",
+            diagnosis="no-op repair",
+            validate_pre_solve=False,
+        )
+    except ValidationError as exc:
+        assert "changed file/patch or an updated_plan" in str(exc)
+    else:
+        raise AssertionError("A true no-op repair must still be rejected.")
+
+
+def test_case_bundle_preflight_rejects_whole_plan_before_first_write_and_forces_complete_replan(tmp_path, graph_path):
+    state = make_state()
+    first = _compact_plan(state)
+    unsafe_control = first.typed_dictionaries[0].model_copy(
+        update={
+            "entries": [
+                *first.typed_dictionaries[0].entries,
+                FoamDictionaryEntry(path="libs", value='("libsampling.so")'),
+            ]
+        }
+    )
+    first = first.model_copy(
+        update={"typed_dictionaries": [unsafe_control, *first.typed_dictionaries[1:]]}
+    )
+    corrected = _compact_plan(state)
+    llm = FlexibleScriptedLLM([first, corrected])
+    tools = FakeOpenFOAMTools(
+        mesh_results={
+            "blockMesh": [tool_result("blockMesh", success=True, stdout="ok\n")],
+            "checkMesh": [tool_result("checkMesh", success=True, stdout=mesh_ok_log())],
+        }
+    )
+    agent = CFDEngineeringAgent(
+        llm,
+        workspace=tmp_path,
+        capability_db=graph_path,
+        tools=tools,
+        policy=EngineeringPolicy(
+            max_agent_steps=4,
+            hard_max_agent_steps=4,
+            require_solve_ready_gate=True,
+            preload_capabilities=True,
+            compact_phase_schemas=True,
+            state_delta_context=True,
+        ),
+    )
+    agent.workspace.write_text("constant/polyMesh/boundary", _boundary_file())
+    agent.prepare(state, native_execution=True)
+
+    assert state.current_state == State.SOLVE_READY
+    assert llm.schemas[:2] == [PrepareTurn, CasePlanRetryTurn]
+    preflight = [e for e in state.engineering_events if e.action_type == "case_bundle_preflight"]
+    assert len(preflight) == 1 and not preflight[0].success
+    assert "no candidate case files were written" in preflight[0].summary.lower()
+    # The rejected first bundle must not have emitted any write event.  All case
+    # writes belong to the corrected second complete plan.
+    first_step_writes = [
+        e for e in state.engineering_events
+        if e.step == 1 and e.action_type == "write_case_file"
+    ]
+    assert first_step_writes == []
+    assert "libsampling.so" in llm.prompts[1]
+    assert tools.mesh_calls == ["blockMesh", "checkMesh"]
+
+
+def test_case_plan_retry_schema_allows_only_complete_plan_or_block():
+    validate_structured_output_schema(CasePlanRetryTurn)
+    assert "SearchReferencesAction" not in str(CasePlanRetryTurn.model_json_schema())
+
+
+def test_repeated_case_bundle_authoring_failures_are_bounded_without_partial_case(tmp_path, graph_path):
+    state = make_state()
+    base = _compact_plan(state)
+
+    def unsafe_plan():
+        unsafe_control = base.typed_dictionaries[0].model_copy(
+            update={
+                "entries": [
+                    *base.typed_dictionaries[0].entries,
+                    FoamDictionaryEntry(path="libs", value='("libsampling.so")'),
+                ]
+            }
+        )
+        return base.model_copy(
+            update={"typed_dictionaries": [unsafe_control, *base.typed_dictionaries[1:]]}
+        )
+
+    llm = FlexibleScriptedLLM([unsafe_plan(), unsafe_plan(), unsafe_plan()])
+    agent = CFDEngineeringAgent(
+        llm,
+        workspace=tmp_path,
+        capability_db=graph_path,
+        tools=FakeOpenFOAMTools(),
+        policy=EngineeringPolicy(
+            max_agent_steps=12,
+            hard_max_agent_steps=12,
+            compact_phase_schemas=True,
+            state_delta_context=True,
+            max_case_plan_authoring_retries=3,
+        ),
+    )
+    agent.prepare(state, native_execution=True)
+
+    assert state.current_state == State.ENGINEERING_BLOCKED
+    assert llm.schemas == [PrepareTurn, CasePlanRetryTurn, CasePlanRetryTurn]
+    assert not any(e.action_type == "write_case_file" for e in state.engineering_events)
+    assert sum(e.action_type == "case_bundle_preflight" for e in state.engineering_events) == 3

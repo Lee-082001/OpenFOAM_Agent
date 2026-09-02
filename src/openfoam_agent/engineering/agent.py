@@ -16,6 +16,7 @@ from openfoam_agent.llm.context import (
 from openfoam_agent.llm.prompts import (
     ENGINEERING_SYSTEM_PROMPT,
     PREPARE_SYSTEM_PROMPT,
+    CASE_PLAN_RETRY_SYSTEM_PROMPT,
     REPAIR_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
     RUNTIME_REPAIR_SYSTEM_PROMPT,
@@ -40,6 +41,7 @@ from openfoam_agent.schemas.engineering import (
     ExecuteCasePlanAction,
     FinalizationTurn,
     PrepareTurn,
+    CasePlanRetryTurn,
     RepairCasePlanAction,
     RepairTurn,
     RevisionTurn,
@@ -100,6 +102,11 @@ class EngineeringPolicy:
     # LLM turn may authorize a full execution plan or a short bounded sequence.
     max_tool_actions: int = 160
     max_runtime_repair_tool_actions: int = 48
+
+    # Complete-plan authoring failures happen before any case mutation. Keep this
+    # retry class separately bounded so a model cannot burn the full Engineering
+    # budget repeatedly regenerating an unsafe/unserializable bundle.
+    max_case_plan_authoring_retries: int = 3
 
     observation_history: int = 12
     max_observation_chars: int = 12_000
@@ -501,15 +508,9 @@ class CFDEngineeringAgent:
         """
 
         actions: list[object] = []
-        for item in execution.files:
-            actions.append(
-                WriteCaseFileAction(
-                    type="write_case_file",
-                    path=item.path,
-                    content=item.content,
-                    rationale="",
-                )
-            )
+        rendered_files: list[tuple[str, str]] = [
+            (item.path, item.content) for item in execution.files
+        ]
         for item in execution.typed_dictionaries:
             try:
                 content = serialize_foam_dictionary(item)
@@ -520,7 +521,7 @@ class CFDEngineeringAgent:
                     False,
                     f"Typed dictionary serialization failed for {item.path}: {exc}",
                 )
-                state.engineering_events.append(event)
+                blocked = self._record_case_plan_authoring_failure(state, event)
                 self._emit_engineering_event(
                     f"{progress_phase}-execution-plan",
                     event,
@@ -528,22 +529,53 @@ class CFDEngineeringAgent:
                     limit=progress_limit,
                     state=state,
                 )
-                # No deterministic case action has executed yet. Ask for a fresh
-                # PrepareTurn with this diagnostic rather than crashing the workflow
-                # or entering delta-repair against a baseline that does not exist.
+                # Authoring failures are transactional: no candidate case file has
+                # been committed, so the next turn must resubmit one complete plan
+                # rather than delta-repair an intentionally empty/unchanged case.
                 self._pending_execution_plan = None
-                return False
+                return blocked
+            rendered_files.append((item.path, content))
+
+        # v2.11: all-or-nothing authoring preflight.  Validate path/content/library
+        # policy and aggregate authored size for the *entire* candidate bundle before
+        # the first workspace mutation.  This prevents an early rejected file from
+        # leaving only the preceding files behind and triggering a long missing-file
+        # repair cascade.
+        candidate_bundle = {path: content for path, content in rendered_files}
+        bundle_failures = self.workspace.validate_candidate_bundle(candidate_bundle)
+        if bundle_failures:
+            event = self._event(
+                llm_step,
+                "case_bundle_preflight",
+                False,
+                "Case bundle rejected before commit; no candidate case files were written.",
+                "\n".join(f"- {failure}" for failure in bundle_failures),
+            )
+            blocked = self._record_case_plan_authoring_failure(state, event)
+            self._emit_engineering_event(
+                f"{progress_phase}-execution-plan",
+                event,
+                step=progress_step,
+                limit=progress_limit,
+                state=state,
+            )
+            self._pending_execution_plan = None
+            return blocked
+
+        # Only after every candidate file passes deterministic authoring preflight do
+        # we start mutating the workspace. Since all file writes precede dictionary or
+        # native execution in the expanded plan, later OpenFOAM failures always see a
+        # complete authored bundle and can use true delta RepairTurn semantics.
+        for path, content in rendered_files:
             actions.append(
                 WriteCaseFileAction(
                     type="write_case_file",
-                    path=item.path,
+                    path=path,
                     content=content,
                     rationale="",
                 )
             )
-        # Serialization is a pre-execution authoring check. Only establish the
-        # pending baseline after every typed dictionary can be rendered. Native or
-        # validation failures after this point may then use delta RepairTurn.
+
         self._pending_execution_plan = execution.plan
         for path in execution.validate_dictionaries:
             actions.append(
@@ -2074,6 +2106,55 @@ class CFDEngineeringAgent:
             file_changes=changes,
         )
 
+    def _case_plan_authoring_failure_count(self, state: CFDState) -> int:
+        return sum(
+            1
+            for event in self._current_round_events(state)
+            if (
+                not event.success
+                and event.action_type in {"typed_dictionary_serialize", "case_bundle_preflight"}
+            )
+        )
+
+    def _record_case_plan_authoring_failure(
+        self,
+        state: CFDState,
+        event: EngineeringEvent,
+    ) -> bool:
+        """Append a pre-commit failure and stop after a small dedicated retry budget.
+
+        Returns True when the workflow was transitioned to ENGINEERING_BLOCKED.
+        """
+
+        state.engineering_events.append(event)
+        failures = self._case_plan_authoring_failure_count(state)
+        if failures >= self.policy.max_case_plan_authoring_retries:
+            state.transition(
+                State.ENGINEERING_BLOCKED,
+                "Complete case-plan authoring repeatedly failed deterministic pre-commit checks "
+                f"({failures}/{self.policy.max_case_plan_authoring_retries}).",
+            )
+            return True
+        return False
+
+    def _case_plan_retry_required(self, state: CFDState) -> bool:
+        """Return whether the previous complete-plan authoring attempt failed pre-commit.
+
+        These failures leave the workspace intentionally untouched.  A delta repair
+        would therefore target a case that does not exist yet, so the compact retry
+        contract accepts only a corrected complete execute_case_plan (or block).
+        """
+
+        events = self._current_round_events(state)
+        if not events:
+            return False
+        last = events[-1]
+        return (
+            not last.success
+            and last.action_type in {"typed_dictionary_serialize", "case_bundle_preflight"}
+            and self._pending_execution_plan is None
+        )
+
     def _phase_contract(self, state: CFDState, phase: str):
         if not self.policy.compact_phase_schemas:
             return EngineeringTurn, ENGINEERING_SYSTEM_PROMPT, "legacy"
@@ -2083,6 +2164,8 @@ class CFDEngineeringAgent:
             return RuntimeRepairTurn, RUNTIME_REPAIR_SYSTEM_PROMPT, "runtime_repair"
         if phase.startswith("human_revision"):
             return RevisionTurn, REVISION_SYSTEM_PROMPT, "revision"
+        if phase == "prepare" and self._case_plan_retry_required(state):
+            return CasePlanRetryTurn, CASE_PLAN_RETRY_SYSTEM_PROMPT, "replan"
         if phase == "prepare" and self._pending_execution_plan is not None:
             return RepairTurn, REPAIR_SYSTEM_PROMPT, "repair"
         return PrepareTurn, PREPARE_SYSTEM_PROMPT, "prepare"
@@ -2314,6 +2397,12 @@ class CFDEngineeringAgent:
                     "Choose the next engineering action. Prefer one execute_case_plan when the CFD "
                     "decision is ready; use typed_dictionaries for ordinary dictionaries when practical. "
                     "Search/read only when evidence for a new decision is missing:\n"
+                )
+            elif contract_phase == "replan":
+                instruction = (
+                    "The previous complete case bundle failed deterministic pre-commit authoring checks. "
+                    "Return one corrected complete execute_case_plan (or block). No partial case was "
+                    "committed, so do not issue delta repairs or searches:\n"
                 )
             elif contract_phase in {"repair", "revision", "runtime_repair"}:
                 instruction = (

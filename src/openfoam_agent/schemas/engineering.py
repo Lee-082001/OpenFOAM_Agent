@@ -451,8 +451,19 @@ class RepairCasePlanAction(_EngineeringModel):
 
     @model_validator(mode="after")
     def validate_repair(self) -> Self:
-        if not (self.patches or self.replacement_files or self.typed_dictionaries):
-            raise ValueError("repair_case_plan requires at least one changed file/patch.")
+        # A repair may be artifact-changing or metadata-only.  The latter is
+        # required when deterministic execution already succeeded but the
+        # EngineeringPlan itself is inconsistent with observed capability/case
+        # evidence (for example, a stale or placeholder solver name).
+        if not (
+            self.patches
+            or self.replacement_files
+            or self.typed_dictionaries
+            or self.updated_plan is not None
+        ):
+            raise ValueError(
+                "repair_case_plan requires at least one changed file/patch or an updated_plan."
+            )
         paths = [x.path for x in self.patches] + [x.path for x in self.replacement_files] + [x.path for x in self.typed_dictionaries]
         if len(paths) != len(set(paths)):
             raise ValueError("repair_case_plan may change each file at most once per turn.")
@@ -466,6 +477,15 @@ class RepairCasePlanAction(_EngineeringModel):
 PrepareAction = SearchCapabilitiesAction | SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | ExecuteCasePlanAction | BlockAction
 class PrepareTurn(_EngineeringModel):
     action: PrepareAction
+
+# A case-plan authoring failure happens before any candidate file is committed.
+# At that point reference/tool exploration is usually counterproductive: the model
+# already has the engineering decision and a deterministic serialization/safety
+# diagnostic. Force the next turn to either resubmit one complete corrected plan
+# or block, preventing long search/repair thrash against an intentionally empty case.
+CasePlanRetryAction = ExecuteCasePlanAction | BlockAction
+class CasePlanRetryTurn(_EngineeringModel):
+    action: CasePlanRetryAction
 
 RepairAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
 class RepairTurn(_EngineeringModel):

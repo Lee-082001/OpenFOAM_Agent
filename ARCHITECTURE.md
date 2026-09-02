@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.4 Architecture
+# OpenFOAM Agent v2.11 Architecture
 
 ## 1. Authority invariant
 
@@ -50,8 +50,12 @@ INIT -> INTAKE_ANALYSIS -> INTAKE_REVIEW_REQUIRED
 
 ## 4. CFDEngineeringAgent
 
-One production engineering agent owns solver, mesh, BC, normalization, numerics, motion, repair and case implementation. It uses capability/reference/file/native-tool actions. Preparation has a 120-LLM-turn soft budget, progress-aware +20-turn extensions, and 200-turn hard cap by default, plus separate deterministic-action, native-command, mesh-repair and runtime-repair budgets.
+One production engineering agent owns solver, mesh, BC, normalization, numerics, motion, repair and case implementation. It uses capability/reference/file/native-tool actions. Production CLI preparation uses a 12-LLM-turn soft budget, progress-aware +6-turn extensions, and a 24-turn hard cap, plus separate deterministic-action, native-command, mesh-repair and runtime-repair budgets. Complete-plan authoring failures have their own 3-attempt bound so serialization/content-policy mistakes cannot consume the full Engineering budget.
 
+
+### Transactional case authoring (v2.11.0)
+
+Before `execute_case_plan` mutates the workspace, Python renders every typed dictionary and preflights the complete candidate bundle against the same path, content, dynamic-library, per-file-size, and aggregate-size rules used by actual writes. A deterministic authoring failure therefore leaves **no partial candidate case**. The next LLM turn uses a dedicated `CasePlanRetryTurn` contract that can return only one corrected complete `execute_case_plan` or `block`; searches, reads, and delta repairs are unavailable because there is intentionally no partial case to inspect or repair. These pre-commit failures are separately bounded to three attempts. After preflight succeeds, all authored case files are written before dictionary validation or native mesh execution begins, so later OpenFOAM failures see a complete case and can safely use delta-only repair.
 
 ### High-level ExecuteCasePlan fast path (v2.9.0)
 
