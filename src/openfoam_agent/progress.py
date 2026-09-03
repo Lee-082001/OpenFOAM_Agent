@@ -128,6 +128,8 @@ def describe_action(action: object) -> str:
         "inspect_environment": "OpenFOAM environment 확인",
         "search_capabilities": "capability graph 조회",
         "search_references": "OpenFOAM reference 탐색",
+        "gather_evidence": "evidence gap batch 조회",
+        "repair_runtime_case": "runtime case delta repair",
         "read_reference": "OpenFOAM reference 읽기",
         "list_case_files": "case 파일 목록 확인",
         "read_case_file": "case 파일 읽기",
@@ -166,6 +168,11 @@ def _safe_action_target(action: object) -> str:
         return _compact(str(getattr(action, "goal", "")), 120)
     if action_type in {"search_capabilities", "search_references", "search_postprocess_references"}:
         return _compact(str(getattr(action, "query", "")), 100)
+    if action_type == "gather_evidence":
+        gaps = getattr(action, "gaps", [])
+        return ", ".join(str(getattr(item, "gap_id", "")) for item in gaps[:4])
+    if action_type == "repair_runtime_case":
+        return _compact(str(getattr(action, "diagnosis", "")), 100)
     if action_type in {"read_reference", "read_postprocess_reference"}:
         reference = str(getattr(action, "reference", ""))
         return reference.rsplit("/", 1)[-1] if reference else ""

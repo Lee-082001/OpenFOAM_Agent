@@ -12,6 +12,7 @@ from openfoam_agent.llm.prompts.engineering import (
     ENGINEERING_SYSTEM_PROMPT,
     FINALIZATION_SYSTEM_PROMPT,
     PREPARE_SYSTEM_PROMPT,
+    PREPARE_DECISION_ONLY_SYSTEM_PROMPT,
     CASE_PLAN_RETRY_SYSTEM_PROMPT,
     REPAIR_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
@@ -29,6 +30,7 @@ from openfoam_agent.schemas.engineering import (
     ExecuteCasePlanAction,
     FoamDictionaryEntry,
     PrepareTurn,
+    PrepareDecisionOnlyTurn,
     CasePlanRetryTurn,
     CandidateCasePlanRepairAction,
     RepairCasePlanAction,
@@ -315,7 +317,7 @@ def test_postprocessing_execution_plan_finishes_in_one_llm_turn(tmp_path):
 
 
 def test_compact_phase_schemas_are_strict_output_compatible_and_smaller():
-    for schema in (PrepareTurn, RepairTurn, RuntimeRepairTurn, RevisionTurn, FinalizationTurn, PostProcessingPlanTurn):
+    for schema in (PrepareTurn, PrepareDecisionOnlyTurn, RepairTurn, RuntimeRepairTurn, RevisionTurn, FinalizationTurn, PostProcessingPlanTurn):
         validate_structured_output_schema(schema)
 
     legacy = structured_request_metrics(EngineeringTurn, "{}", system_prompt=ENGINEERING_SYSTEM_PROMPT)["approxTokens"]
@@ -386,6 +388,7 @@ def test_all_compact_engineering_prompts_preserve_semantic_invariants():
     assert len(ENGINEERING_INVARIANTS) < 1200
     for prompt in (
         PREPARE_SYSTEM_PROMPT,
+        PREPARE_DECISION_ONLY_SYSTEM_PROMPT,
         CASE_PLAN_RETRY_SYSTEM_PROMPT,
         REPAIR_SYSTEM_PROMPT,
         REVISION_SYSTEM_PROMPT,

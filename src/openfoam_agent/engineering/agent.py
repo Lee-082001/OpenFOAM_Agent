@@ -16,6 +16,7 @@ from openfoam_agent.llm.context import (
 from openfoam_agent.llm.prompts import (
     ENGINEERING_SYSTEM_PROMPT,
     PREPARE_SYSTEM_PROMPT,
+    PREPARE_DECISION_ONLY_SYSTEM_PROMPT,
     CASE_PLAN_RETRY_SYSTEM_PROMPT,
     REPAIR_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
@@ -42,9 +43,12 @@ from openfoam_agent.schemas.engineering import (
     ExecuteCasePlanAction,
     FinalizationTurn,
     PrepareTurn,
+    PrepareDecisionOnlyTurn,
     CasePlanRetryTurn,
     CandidateCasePlanRepairAction,
+    GatherEvidenceAction,
     RepairCasePlanAction,
+    RuntimeCaseRepairAction,
     RepairTurn,
     RevisionTurn,
     RuntimeRepairTurn,
@@ -110,6 +114,12 @@ class EngineeringPolicy:
     # budget repeatedly regenerating an unsafe/unserializable bundle.
     max_case_plan_authoring_retries: int = 3
 
+    # v2.13: retrieval is driven by explicit evidence gaps rather than free-form
+    # repeated search turns. These are hard fuses, not the normal stopping rule;
+    # novelty/stagnation is tracked per gap.
+    max_prepare_retrieval_cycles: int = 3
+    max_runtime_retrieval_cycles: int = 2
+
     observation_history: int = 12
     max_observation_chars: int = 12_000
     model_event_excerpt_chars: int = 2_500
@@ -141,6 +151,9 @@ class EngineeringPolicy:
             "max_runtime_repair_steps": self.max_runtime_repair_steps,
             "max_tool_actions": self.max_tool_actions,
             "max_runtime_repair_tool_actions": self.max_runtime_repair_tool_actions,
+            "max_case_plan_authoring_retries": self.max_case_plan_authoring_retries,
+            "max_prepare_retrieval_cycles": self.max_prepare_retrieval_cycles,
+            "max_runtime_retrieval_cycles": self.max_runtime_retrieval_cycles,
             "observation_history": self.observation_history,
             "max_observation_chars": self.max_observation_chars,
             "model_event_excerpt_chars": self.model_event_excerpt_chars,
@@ -193,9 +206,13 @@ class CFDEngineeringAgent:
         self._pending_candidate_failed_paths: tuple[str, ...] = ()
         self._phase_prompt_counts: dict[str, int] = {}
         self._phase_context_snapshots: dict[str, dict[str, str | None]] = {}
+        self._evidence_gap_ledger: dict[str, dict[str, dict[str, object]]] = {}
+        self._retrieval_cycles: dict[str, int] = {}
 
     def prepare(self, state: CFDState, *, native_execution: bool = True) -> CFDState:
         state.assert_confirmed_intake()
+        self._evidence_gap_ledger["prepare"] = {}
+        self._retrieval_cycles["prepare"] = 0
         if native_execution and not self._checkmesh_preflight(state, phase="preflight"):
             return state
         state.engineering_round_start_index = len(state.engineering_events)
@@ -990,10 +1007,59 @@ class CFDEngineeringAgent:
                 return True
         return False
 
+    def _runtime_repair_actions(
+        self,
+        state: CFDState,
+        repair: RuntimeCaseRepairAction,
+    ) -> tuple[list[object], EngineeringPlan]:
+        """Expand grouped runtime edits into sequential deterministic primitives."""
+        plan = state.engineering_plan
+        if plan is None:
+            raise WorkspaceSafetyError("Runtime repair requires the approved EngineeringPlan.")
+        actions: list[object] = []
+        for group in repair.file_patches:
+            for edit in group.edits:
+                actions.append(
+                    PatchCaseFileAction(
+                        type="patch_case_file",
+                        patch={"path": group.path, "old": edit.old, "new": edit.new},
+                    )
+                )
+        for item in repair.replacement_files:
+            actions.append(
+                WriteCaseFileAction(type="write_case_file", path=item.path, content=item.content, rationale="")
+            )
+        for item in repair.typed_dictionaries:
+            actions.append(
+                WriteCaseFileAction(
+                    type="write_case_file",
+                    path=item.path,
+                    content=serialize_foam_dictionary(item),
+                    rationale="",
+                )
+            )
+        for path in repair.validate_dictionaries:
+            actions.append(ValidateDictionaryAction(type="validate_dictionary", path=path, rationale=""))
+        for path in repair.surface_checks:
+            actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale=""))
+        for command in repair.mesh_commands:
+            actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
+        if repair.validate_pre_solve:
+            actions.append(
+                ValidatePreSolveAction(
+                    type="validate_pre_solve",
+                    required_case_files=plan.required_case_files,
+                    rationale="",
+                )
+            )
+        if repair.retry_solver:
+            actions.append(RetrySolverAction(type="retry_solver", plan=plan, rationale=""))
+        return actions, plan
+
     def _execute_runtime_repair_plan(
         self,
         state: CFDState,
-        repair: RepairCasePlanAction,
+        repair: RuntimeCaseRepairAction | RepairCasePlanAction,
         *,
         approved_solver: str,
         llm_step: int,
@@ -1001,7 +1067,10 @@ class CFDEngineeringAgent:
         runtime_event_start: int,
     ) -> RepairOutcome | None:
         try:
-            actions, plan = self._repair_actions(state, repair, runtime=True)
+            if isinstance(repair, RuntimeCaseRepairAction):
+                actions, plan = self._runtime_repair_actions(state, repair)
+            else:
+                actions, plan = self._repair_actions(state, repair, runtime=True)
         except (WorkspaceSafetyError, FoamSerializationError) as exc:
             return RepairOutcome(False, reason=str(exc))
         if plan.solver != approved_solver:
@@ -1234,13 +1303,19 @@ class CFDEngineeringAgent:
             "search_capabilities",
             "search_references",
             "read_reference",
+            "gather_evidence",
             "write_case_file",
             "delete_case_file",
             "validate_dictionary",
             "surface_check",
             "run_mesh_command",
         }
-        recent_evidence = [event for event in recent if event.action_type in evidence_actions]
+        recent_evidence = [
+            event
+            for event in recent
+            if event.action_type in evidence_actions
+            and (event.action_type != "gather_evidence" or bool(event.observed_evidence))
+        ]
         novel = [
             event
             for event in recent_evidence
@@ -1412,6 +1487,8 @@ class CFDEngineeringAgent:
             # do not force redundant checkMesh runs.
             self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
         approved_solver = state.engineering_plan.solver
+        self._evidence_gap_ledger["runtime_repair"] = {}
+        self._retrieval_cycles["runtime_repair"] = 0
         state.last_runtime_log_excerpt = runtime_log[-12000:]
         state.transition(
             State.RUNTIME_REPAIR,
@@ -1441,7 +1518,7 @@ class CFDEngineeringAgent:
                 native_execution=native_execution,
             )
             action = turn.action
-            if isinstance(action, RepairCasePlanAction):
+            if isinstance(action, (RuntimeCaseRepairAction, RepairCasePlanAction)):
                 outcome = self._execute_runtime_repair_plan(
                     state,
                     action,
@@ -1872,6 +1949,222 @@ class CFDEngineeringAgent:
             False,
         )
 
+    def _evidence_gap_status(self, phase: str) -> list[dict[str, object]]:
+        ledger = self._evidence_gap_ledger.get(phase, {})
+        result: list[dict[str, object]] = []
+        for gap_id, item in sorted(ledger.items()):
+            seen = item.get("seen_ids", set())
+            result.append(
+                {
+                    "gap_id": gap_id,
+                    "missing_evidence": item.get("missing_evidence", ""),
+                    "why_required": item.get("why_required", ""),
+                    "retrievals": int(item.get("retrievals", 0)),
+                    "seen_evidence_count": len(seen) if isinstance(seen, set) else len(list(seen)),
+                    "last_new_evidence_count": int(item.get("last_new_count", 0)),
+                    "stagnant": bool(item.get("stagnant", False)),
+                }
+            )
+        return result
+
+    def _gather_evidence(
+        self,
+        action: GatherEvidenceAction,
+        *,
+        step: int,
+        phase: str,
+    ) -> EngineeringEvent:
+        """Resolve explicit evidence gaps with bounded deterministic batch retrieval."""
+
+        limit = (
+            self.policy.max_runtime_retrieval_cycles
+            if phase == "runtime_repair"
+            else self.policy.max_prepare_retrieval_cycles
+        )
+        cycles = self._retrieval_cycles.get(phase, 0)
+        if cycles >= limit:
+            return self._event(
+                step,
+                action.type,
+                False,
+                f"Evidence retrieval hard fuse reached for {phase} ({limit} cycle(s)); use existing evidence or block.",
+            )
+        self._retrieval_cycles[phase] = cycles + 1
+        ledger = self._evidence_gap_ledger.setdefault(phase, {})
+        observed_by_id: dict[str, ObservedEngineeringEvidence] = {}
+        new_observed_ids: set[str] = set()
+        gap_results: list[dict[str, object]] = []
+
+        for gap in action.gaps:
+            existing = ledger.get(gap.gap_id)
+            if existing is not None and (
+                existing.get("missing_evidence") != gap.missing_evidence
+                or existing.get("why_required") != gap.why_required
+            ):
+                gap_results.append(
+                    {
+                        "gap_id": gap.gap_id,
+                        "status": "definition_mismatch",
+                        "message": "Reuse the same gap_id only for the same evidence gap.",
+                    }
+                )
+                continue
+
+            entry = existing or {
+                "missing_evidence": gap.missing_evidence,
+                "why_required": gap.why_required,
+                "seen_ids": set(),
+                "retrievals": 0,
+                "last_new_count": 0,
+                "stagnant": False,
+            }
+            ledger[gap.gap_id] = entry
+            if bool(entry.get("stagnant", False)):
+                gap_results.append(
+                    {
+                        "gap_id": gap.gap_id,
+                        "status": "stagnant_blocked",
+                        "message": "Previous retrieval for this gap produced no new evidence; use existing evidence or block.",
+                    }
+                )
+                continue
+
+            found: dict[str, dict[str, object]] = {}
+            ref_records: dict[str, dict[str, object]] = {}
+            for query in gap.capability_queries:
+                for item in self.catalog.search(query, limit=8):
+                    provider_id = str(item.get("provider_id", ""))
+                    if not provider_id:
+                        continue
+                    evidence_id = canonical_engineering_evidence_id("capability", provider_id)
+                    found[evidence_id] = {
+                        "kind": "capability",
+                        "reference": provider_id,
+                        "query": query,
+                        "result": item,
+                    }
+                    observed_by_id[evidence_id] = ObservedEngineeringEvidence(
+                        evidence_id=evidence_id,
+                        kind="capability",
+                        reference=provider_id,
+                        summary=(
+                            f"Capability provider {provider_id}: {item.get('name', '')} "
+                            f"({item.get('provider_type', '')}, OpenFOAM {item.get('openfoam_version', '')})"
+                        )[:1200],
+                    )
+
+            for query in gap.reference_queries:
+                for item in self.references.search(query, scope=gap.reference_scope, limit=6):
+                    reference = str(item.get("reference", ""))
+                    if not reference:
+                        continue
+                    evidence_id = canonical_engineering_evidence_id("openfoam_reference", reference)
+                    record = {
+                        "kind": "openfoam_reference",
+                        "reference": reference,
+                        "query": query,
+                        "snippet": str(item.get("snippet", ""))[:700],
+                    }
+                    found[evidence_id] = record
+                    ref_records.setdefault(reference, record)
+
+            read_budget = gap.read_top_reference_matches
+            for reference, record in list(ref_records.items())[:read_budget]:
+                try:
+                    excerpt = self.references.read(reference, start_line=1, line_count=48)[:4000]
+                except (OSError, ValueError):
+                    excerpt = ""
+                if excerpt:
+                    record["content_excerpt"] = excerpt
+
+            for evidence_id, record in found.items():
+                if record["kind"] != "openfoam_reference":
+                    continue
+                reference = str(record["reference"] )
+                detail = str(record.get("content_excerpt") or record.get("snippet") or "")
+                observed_by_id[evidence_id] = ObservedEngineeringEvidence(
+                    evidence_id=evidence_id,
+                    kind="openfoam_reference",
+                    reference=reference,
+                    summary=(f"Installed OpenFOAM reference {reference}: {detail[:1000]}")[:1200],
+                )
+
+            seen_ids = entry.setdefault("seen_ids", set())
+            if not isinstance(seen_ids, set):
+                seen_ids = set(seen_ids)
+                entry["seen_ids"] = seen_ids
+            new_ids = sorted(set(found) - seen_ids)
+            seen_ids.update(found)
+            new_observed_ids.update(new_ids)
+            entry["retrievals"] = int(entry.get("retrievals", 0)) + 1
+            entry["last_new_count"] = len(new_ids)
+            entry["stagnant"] = len(new_ids) == 0
+            gap_results.append(
+                {
+                    "gap_id": gap.gap_id,
+                    "status": "new_evidence" if new_ids else "no_new_evidence",
+                    "new_evidence_ids": new_ids,
+                    "new_evidence": [found[eid] for eid in new_ids],
+                    "total_seen": len(seen_ids),
+                }
+            )
+
+        new_total = sum(len(item.get("new_evidence_ids", [])) for item in gap_results)
+        stagnant = [item["gap_id"] for item in gap_results if item.get("status") in {"no_new_evidence", "stagnant_blocked"}]
+        return self._event(
+            step,
+            action.type,
+            True,
+            f"Evidence-gap batch completed: {new_total} new evidence item(s); stagnant={len(stagnant)}.",
+            _json({
+                "cycle": self._retrieval_cycles[phase],
+                "cycle_limit": limit,
+                "gaps": gap_results,
+            }),
+            observed_evidence=[observed_by_id[eid] for eid in sorted(new_observed_ids) if eid in observed_by_id],
+        )
+
+    def _runtime_relevant_case_files(self, state: CFDState, runtime_log: str | None) -> list[dict[str, object]]:
+        """Return a bounded, failure-focused case slice for runtime repair."""
+        seals = {item.path: item for item in self.workspace.file_seals()}
+        candidates: list[str] = ["system/fvSchemes", "system/fvSolution", "system/controlDict"]
+        text = runtime_log or ""
+        for match in re.findall(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", text):
+            probe = match.rstrip("./")
+            parts = probe.split("/")
+            while parts:
+                candidate = "/".join(parts)
+                if candidate in seals:
+                    candidates.append(candidate)
+                    break
+                parts.pop()
+        required = state.engineering_plan.required_case_files if state.engineering_plan is not None else []
+        for path in required:
+            base = path.rsplit("/", 1)[-1]
+            if base and re.search(rf"(?<![A-Za-z0-9_]){re.escape(base)}(?![A-Za-z0-9_])", text):
+                candidates.append(path)
+        result: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for path in candidates:
+            if path in seen or path not in seals:
+                continue
+            seen.add(path)
+            try:
+                content = self.workspace.read_text(path)
+            except (OSError, WorkspaceSafetyError):
+                continue
+            result.append(
+                {
+                    "path": path,
+                    "sha256": seals[path].sha256,
+                    "content": content[:8000],
+                    "truncated": len(content) > 8000,
+                }
+            )
+            if len(result) >= 6:
+                break
+        return result
+
     def _dispatch_tool_action(
         self,
         action,
@@ -1902,6 +2195,9 @@ class CFDEngineeringAgent:
                     False,
                     f"Native OpenFOAM command budget exhausted ({self.policy.max_native_commands}); no command was executed.",
                 )
+
+            if isinstance(action, GatherEvidenceAction):
+                return self._gather_evidence(action, step=step, phase=phase)
 
             if isinstance(action, InspectEnvironmentAction):
                 payload = {
@@ -2352,6 +2648,8 @@ class CFDEngineeringAgent:
             return CasePlanRetryTurn, CASE_PLAN_RETRY_SYSTEM_PROMPT, "replan"
         if phase == "prepare" and self._pending_execution_plan is not None:
             return RepairTurn, REPAIR_SYSTEM_PROMPT, "repair"
+        if phase == "prepare" and self._retrieval_cycles.get("prepare", 0) >= self.policy.max_prepare_retrieval_cycles:
+            return PrepareDecisionOnlyTurn, PREPARE_DECISION_ONLY_SYSTEM_PROMPT, "prepare_decide"
         return PrepareTurn, PREPARE_SYSTEM_PROMPT, "prepare"
 
     def _engineering_conversation_key(self, state: CFDState, contract_phase: str) -> str:
@@ -2412,6 +2710,12 @@ class CFDEngineeringAgent:
             "tool_used": self._tool_action_count(state),
             "native_limit": self.policy.max_native_commands,
             "native_used": self._native_command_count(state),
+            "retrieval_cycles_used": self._retrieval_cycles.get(phase, 0),
+            "retrieval_cycle_limit": (
+                self.policy.max_runtime_retrieval_cycles
+                if phase == "runtime_repair"
+                else self.policy.max_prepare_retrieval_cycles
+            ),
         }
         bindings = {
             "intake_sha256": state.intake_digest,
@@ -2430,11 +2734,60 @@ class CFDEngineeringAgent:
             supports_stateful = "conversation_key" in inspect.signature(self.llm.generate).parameters
         except (TypeError, ValueError):
             supports_stateful = False
-        use_delta = bool(self.policy.state_delta_context and prompt_count > 0)
+        use_delta = bool(
+            self.policy.state_delta_context
+            and prompt_count > 0
+            and contract_phase != "runtime_repair"
+        )
         previous_snapshot = self._phase_context_snapshots.get(conversation_key, {})
 
-        if use_delta:
+        if contract_phase == "runtime_repair":
             payload: dict[str, object] = {
+                "state_mode": "runtime_failure_slice",
+                "phase": phase,
+                "step": step,
+                "confirmed_facts": [
+                    {"id": fact.id, "value": fact.value, "source": fact.source}
+                    for fact in (state.intake.facts if state.intake is not None else [])
+                    if fact.category != "context"
+                ],
+                "approved_plan": (
+                    {
+                        "solver": state.engineering_plan.solver,
+                        "solver_provider_id": state.engineering_plan.solver_provider_id,
+                        "temporal_behavior": state.engineering_plan.temporal_behavior,
+                        "motion_kind": state.engineering_plan.motion_kind,
+                        "mesh_motion_requirement": state.engineering_plan.mesh_motion_requirement,
+                        "required_case_files": state.engineering_plan.required_case_files,
+                        "confirmed_fact_bindings": [
+                            item.model_dump(mode="json")
+                            for item in state.engineering_plan.confirmed_fact_bindings
+                        ],
+                    }
+                    if state.engineering_plan is not None else None
+                ),
+                "native_failure": self._redact_local_paths(runtime_log[-6000:]) if runtime_log else None,
+                "relevant_case_files": self._runtime_relevant_case_files(state, runtime_log),
+                "mesh_evidence": {
+                    "passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
+                    "cell_count": state.mesh_evidence.cell_count if state.mesh_evidence else None,
+                    "manifest_current": bool(
+                        self._checkmesh_mesh_manifest
+                        and self._checkmesh_mesh_manifest == self.workspace.mesh_manifest_digest()
+                    ),
+                },
+                "available_evidence": evidence_records[-20:],
+                "evidence_gap_status": self._evidence_gap_status("runtime_repair"),
+                "bindings": bindings,
+                "budget": budget,
+            }
+            instruction = (
+                "Repair the actual runtime failure from this bounded diagnostic/file slice. "
+                "Prefer repair_runtime_case. Use gather_evidence only for an explicit missing "
+                "tool/version fact that the supplied files and native diagnostic cannot resolve:\n"
+            )
+        elif use_delta:
+            payload = {
                 "state_mode": "delta_from_previous_response",
                 "phase": phase,
                 "step": step,
@@ -2478,6 +2831,7 @@ class CFDEngineeringAgent:
                 "current_case_files": case_files,
                 "recent_observations": self._recent_observations_for_model(state),
                 "available_evidence": evidence_records,
+                "evidence_gap_status": self._evidence_gap_status(phase),
                 "budget": budget,
                 "ready_for_finalization": (
                     self._ready_for_finalization(state, native_execution=native_execution)
@@ -2541,6 +2895,7 @@ class CFDEngineeringAgent:
                 "recent_observations": self._recent_observations_for_model(state),
                 "cumulative_provenance": self._cumulative_provenance_summary(state),
                 "available_evidence": evidence_records,
+                "evidence_gap_status": self._evidence_gap_status(phase),
                 "bindings": bindings,
                 "deterministic_bindings": {
                     "confirmed_intake": {
@@ -2578,9 +2933,15 @@ class CFDEngineeringAgent:
             }
             if contract_phase == "prepare":
                 instruction = (
-                    "Choose the next engineering action. Prefer one execute_case_plan when the CFD "
-                    "decision is ready; use typed_dictionaries for ordinary dictionaries when practical. "
-                    "Search/read only when evidence for a new decision is missing:\n"
+                    "Choose the next engineering action. Prefer execute_case_plan when ready. If an "
+                    "external tool/version fact is genuinely missing, declare one or more explicit gaps "
+                    "in a single gather_evidence batch; engineering-choice unknowns are assumptions, not "
+                    "retrieval gaps:\n"
+                )
+            elif contract_phase == "prepare_decide":
+                instruction = (
+                    "The bounded retrieval window is closed. Use the accumulated evidence to return "
+                    "execute_case_plan, or block if faithful implementation is impossible:\n"
                 )
             elif contract_phase == "replan":
                 instruction = (
@@ -2589,7 +2950,7 @@ class CFDEngineeringAgent:
                     "with the minimum delta for the implicated candidate path(s), or block. No partial "
                     "workspace case was committed:\n"
                 )
-            elif contract_phase in {"repair", "revision", "runtime_repair"}:
+            elif contract_phase in {"repair", "revision"}:
                 instruction = (
                     "Return a delta-only repair. Prefer exact patches and do not repeat unchanged files "
                     "or plan content. Use observed failure/evidence only:\n"

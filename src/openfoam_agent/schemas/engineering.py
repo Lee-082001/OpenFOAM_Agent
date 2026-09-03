@@ -203,6 +203,46 @@ class SearchReferencesAction(_EngineeringModel):
     rationale: str = Field(default="", max_length=200)
 
 
+class EvidenceGapRequest(_EngineeringModel):
+    """One explicit tool/version evidence gap for deterministic batch retrieval."""
+
+    gap_id: str = Field(pattern=r"^G[0-9]{2,4}$")
+    missing_evidence: str = Field(min_length=1, max_length=400)
+    why_required: str = Field(min_length=1, max_length=400)
+    capability_queries: list[str] = Field(default_factory=list, max_length=2)
+    reference_queries: list[str] = Field(default_factory=list, max_length=3)
+    reference_scope: Literal["all", "tutorials", "source", "etc"] = "all"
+    read_top_reference_matches: int = Field(default=1, ge=0, le=2)
+
+    @model_validator(mode="after")
+    def validate_queries(self) -> Self:
+        if not self.capability_queries and not self.reference_queries:
+            raise ValueError("Evidence gap requires at least one capability or reference query.")
+        for query in [*self.capability_queries, *self.reference_queries]:
+            if not query.strip() or len(query) > 500:
+                raise ValueError("Evidence queries must be non-empty and at most 500 characters.")
+        return self
+
+
+class GatherEvidenceAction(_EngineeringModel):
+    """Batch retrieval for explicit unresolved evidence gaps.
+
+    This replaces free-form prepare search loops. Python performs bounded capability/
+    reference retrieval, records novelty per gap, and can refuse repeated stagnant gaps.
+    """
+
+    type: Literal["gather_evidence"]
+    gaps: list[EvidenceGapRequest] = Field(min_length=1, max_length=4)
+    rationale: str = Field(default="", max_length=200)
+
+    @model_validator(mode="after")
+    def validate_gap_ids(self) -> Self:
+        ids = [gap.gap_id for gap in self.gaps]
+        if len(ids) != len(set(ids)):
+            raise ValueError("gather_evidence contains duplicate gap IDs.")
+        return self
+
+
 class ReadReferenceAction(_EngineeringModel):
     type: Literal["read_reference"]
     reference: str = Field(min_length=1, max_length=1000)
@@ -432,6 +472,24 @@ class ExecuteCasePlanAction(_EngineeringModel):
         return self
 
 
+class ExactCaseFileEdit(_EngineeringModel):
+    old: str = Field(min_length=1, max_length=80_000)
+    new: str = Field(max_length=80_000)
+
+
+class CaseFilePatchGroup(_EngineeringModel):
+    """Ordered exact edits applied sequentially to one case file."""
+
+    path: str = Field(min_length=1, max_length=240)
+    edits: list[ExactCaseFileEdit] = Field(min_length=1, max_length=12)
+
+    @model_validator(mode="after")
+    def validate_path(self) -> Self:
+        if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", self.path) or ".." in self.path:
+            raise ValueError(f"Unsafe grouped patch path: {self.path}")
+        return self
+
+
 class RepairCasePlanAction(_EngineeringModel):
     """Delta-only repair plan. Existing plan and unchanged files remain Python state."""
 
@@ -464,11 +522,54 @@ class RepairCasePlanAction(_EngineeringModel):
             raise ValueError(
                 "repair_case_plan requires at least one changed file/patch or an updated_plan."
             )
-        paths = [x.path for x in self.patches] + [x.path for x in self.replacement_files] + [x.path for x in self.typed_dictionaries]
-        if len(paths) != len(set(paths)):
-            raise ValueError("repair_case_plan may change each file at most once per turn.")
+        patch_paths = [x.path for x in self.patches]
+        replacement_paths = [x.path for x in self.replacement_files]
+        typed_paths = [x.path for x in self.typed_dictionaries]
+        if len(replacement_paths) != len(set(replacement_paths)) or len(typed_paths) != len(set(typed_paths)):
+            raise ValueError("repair_case_plan contains duplicate replacement file paths.")
+        non_patch_paths = replacement_paths + typed_paths
+        if len(non_patch_paths) != len(set(non_patch_paths)):
+            raise ValueError("repair_case_plan may replace a file in only one representation per turn.")
+        if set(patch_paths) & set(non_patch_paths):
+            raise ValueError("repair_case_plan cannot patch and replace the same file in one turn.")
         if self.mesh_commands and self.mesh_commands.count("checkMesh") > 1:
             raise ValueError("repair_case_plan may run checkMesh at most once.")
+        return self
+
+
+class RuntimeCaseRepairAction(_EngineeringModel):
+    """Runtime-only delta repair with multiple ordered edits per file.
+
+    The user-approved solver/EngineeringPlan is not carried by this contract, which
+    keeps the runtime schema small and prevents metadata churn during automatic retry.
+    """
+
+    type: Literal["repair_runtime_case"]
+    diagnosis: str = Field(min_length=1, max_length=800)
+    file_patches: list[CaseFilePatchGroup] = Field(default_factory=list, max_length=8)
+    replacement_files: list[CaseBundleFile] = Field(default_factory=list, max_length=8)
+    typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=8)
+    validate_dictionaries: list[str] = Field(default_factory=list, max_length=16)
+    surface_checks: list[str] = Field(default_factory=list, max_length=8)
+    mesh_commands: list[Literal[
+        "blockMesh", "surfaceFeatureExtract", "snappyHexMesh", "createPatch", "checkMesh"
+    ]] = Field(default_factory=list, max_length=6)
+    validate_pre_solve: bool = True
+    retry_solver: bool = True
+
+    @model_validator(mode="after")
+    def validate_runtime_repair(self) -> Self:
+        if not (self.file_patches or self.replacement_files or self.typed_dictionaries):
+            raise ValueError("repair_runtime_case requires at least one changed file.")
+        paths = (
+            [item.path for item in self.file_patches]
+            + [item.path for item in self.replacement_files]
+            + [item.path for item in self.typed_dictionaries]
+        )
+        if len(paths) != len(set(paths)):
+            raise ValueError("repair_runtime_case may represent each file in only one repair mode per turn.")
+        if self.mesh_commands.count("checkMesh") > 1:
+            raise ValueError("repair_runtime_case may run checkMesh at most once.")
         return self
 
 
@@ -494,14 +595,17 @@ class CandidateCasePlanRepairAction(_EngineeringModel):
             raise ValueError(
                 "repair_candidate_case_plan requires at least one candidate file change."
             )
-        paths = (
-            [item.path for item in self.patches]
-            + [item.path for item in self.replacement_files]
-            + [item.path for item in self.typed_dictionaries]
-            + list(self.drop_paths)
-        )
-        if len(paths) != len(set(paths)):
-            raise ValueError("repair_candidate_case_plan may change each path at most once per turn.")
+        patch_paths = [item.path for item in self.patches]
+        replacement_paths = [item.path for item in self.replacement_files]
+        typed_paths = [item.path for item in self.typed_dictionaries]
+        drop_paths = list(self.drop_paths)
+        if len(replacement_paths) != len(set(replacement_paths)) or len(typed_paths) != len(set(typed_paths)) or len(drop_paths) != len(set(drop_paths)):
+            raise ValueError("repair_candidate_case_plan contains duplicate replacement/drop paths.")
+        exclusive_paths = replacement_paths + typed_paths + drop_paths
+        if len(exclusive_paths) != len(set(exclusive_paths)):
+            raise ValueError("repair_candidate_case_plan may replace/drop a path in only one mode per turn.")
+        if set(patch_paths) & set(exclusive_paths):
+            raise ValueError("repair_candidate_case_plan cannot patch and replace/drop the same path in one turn.")
         for path in self.drop_paths:
             if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
                 raise ValueError(f"Unsafe candidate drop path: {path}")
@@ -509,9 +613,13 @@ class CandidateCasePlanRepairAction(_EngineeringModel):
 
 # Phase-specific compact contracts. Agent identity remains one CFDEngineeringAgent; only
 # permissions/schema vary by phase so repeated calls do not carry the giant all-phase union.
-PrepareAction = SearchCapabilitiesAction | SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | ExecuteCasePlanAction | BlockAction
+PrepareAction = GatherEvidenceAction | ReadCaseFileAction | ExecuteCasePlanAction | BlockAction
 class PrepareTurn(_EngineeringModel):
     action: PrepareAction
+
+PrepareDecisionOnlyAction = ExecuteCasePlanAction | BlockAction
+class PrepareDecisionOnlyTurn(_EngineeringModel):
+    action: PrepareDecisionOnlyAction
 
 # A case-plan authoring failure happens before any candidate file is committed.
 # At that point reference/tool exploration is usually counterproductive: the model
@@ -534,7 +642,7 @@ FinalizationAction = FinishPreviewAction | BlockAction
 class FinalizationTurn(_EngineeringModel):
     action: FinalizationAction
 
-RuntimeRepairAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
+RuntimeRepairAction = GatherEvidenceAction | RuntimeCaseRepairAction | BlockAction
 class RuntimeRepairTurn(_EngineeringModel):
     action: RuntimeRepairAction
 

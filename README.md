@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.12.0
+# OpenFOAM Agent v2.13.0
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -8,6 +8,13 @@ The central design rule is:
 
 v2 is intentionally not a collection of hand-written CFD case templates. There is no production rule such as `if vortex shedding -> square obstacle template`, `if static -> snappyHexMesh`, or `if prescribed deformation -> displacementLaplacian`.
 
+
+
+## v2.13.0: evidence-gap retrieval + grouped runtime delta repair
+
+v2.13 replaces free-form prepare search loops with **evidence-gap-driven batch retrieval**. The Engineering Agent must distinguish user-required unknowns, Agent-owned engineering choices, and genuinely external tool/version evidence gaps. Only the last category may invoke `gather_evidence`. One LLM turn can request up to four independent gaps; deterministic Python searches the capability graph and trusted installed OpenFOAM references in a batch, optionally reads a bounded number of top reference matches, and records canonical evidence IDs per gap. Repeating a gap is useful only when it adds new evidence: a zero-novelty retrieval marks that gap `stagnant`, and subsequent retrieval for the same gap is refused. A small retrieval-cycle hard fuse remains only as an emergency bound; once reached, the prepare Structured Output contract itself shrinks to `execute_case_plan | block`.
+
+Runtime repair now has a separate `repair_runtime_case` contract. Exact edits are grouped per file (`file_patches[].edits[]`) and applied sequentially, so several legitimate fixes to one `fvSchemes`/`fvSolution` file no longer fail schema validation merely because the path appears more than once. Automatic runtime repair also receives a bounded native-error + relevant-case-file slice instead of the full engineering history/plan replay. The approved solver remains immutable and every resulting edit still passes the existing exact-match workspace safety, dictionary/pre-solve, mesh-freshness and resealing gates. Legacy `repair_case_plan` and retained-candidate patching also allow multiple sequential exact patches to the same file while still forbidding patch+replacement conflicts. See `V2_13_CHANGES.md`.
 
 
 ## v2.12.0: retained candidate plan + delta authoring repair
@@ -58,7 +65,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-v2.9 introduced the execution-plan fast path. Current v2.12.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v2.13.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -82,8 +89,8 @@ Natural-language request
   -> user /confirm
   -> CFDEngineeringAgent
        - inspect installed OpenFOAM environment
-       - query capability evidence
-       - search installed official tutorials/source
+       - declare explicit tool/version evidence gaps when needed
+       - batch-retrieve capability + trusted installed OpenFOAM evidence with novelty tracking
        - choose solver / mesh / BC / numerics / motion strategy
        - write and patch case files
        - run allowlisted OpenFOAM validation and mesh tools
@@ -625,7 +632,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2.12.0 release tree currently passes **179 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v2.13.0 release tree currently passes **183 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;

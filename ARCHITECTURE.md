@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.12 Architecture
+# OpenFOAM Agent v2.13 Architecture
 
 ## 1. Authority invariant
 
@@ -52,6 +52,13 @@ INIT -> INTAKE_ANALYSIS -> INTAKE_REVIEW_REQUIRED
 
 One production engineering agent owns solver, mesh, BC, normalization, numerics, motion, repair and case implementation. It uses capability/reference/file/native-tool actions. Production CLI preparation uses a 12-LLM-turn soft budget, progress-aware +6-turn extensions, and a 24-turn hard cap, plus separate deterministic-action, native-command, mesh-repair and runtime-repair budgets. Complete-plan authoring failures have their own 3-attempt bound so serialization/content-policy mistakes cannot consume the full Engineering budget.
 
+
+
+## 2.13 Evidence-gap retrieval and runtime repair contracts
+
+Prepare retrieval is no longer an unconstrained sequence of `search -> LLM -> search` turns. The Agent may declare a bounded batch of explicit evidence gaps with a stable gap ID, the missing external fact, why that fact is required, and capability/reference queries. Python performs retrieval only; it does not decide whether a CFD design choice is good. Per-gap canonical evidence IDs are compared with prior retrievals. A retrieval that contributes no new IDs marks the gap stagnant, so rephrasing the same search cannot manufacture progress or budget extensions. After the small retrieval hard fuse, the phase schema contains only `execute_case_plan | block`.
+
+Runtime failure repair uses a separate, smaller contract. The model receives the native diagnostic, confirmed invariants, an approved-plan capsule, and only bounded case files relevant to the failure (with core solver dictionaries included). `repair_runtime_case.file_patches` groups ordered exact edits by file, so multiple changes to one dictionary are valid and are applied sequentially against the newest buffer. The runtime contract does not carry a replacement EngineeringPlan; solver authority remains frozen to the user-approved plan. Retrieval during runtime repair is available only through the same explicit evidence-gap mechanism for genuinely missing release/tool facts.
 
 ### Retained candidate delta repair (v2.12.0)
 

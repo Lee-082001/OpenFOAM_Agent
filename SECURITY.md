@@ -34,6 +34,12 @@ Agent writes are sandboxed. Traversal, absolute paths, symlinked execution input
 
 Compact prompts retain a shared invariant that confirmed intake values must be implemented faithfully in the actual case, not merely preserved as fact IDs or metadata. `EngineeringPlan.confirmed_fact_bindings` gives every non-context confirmed fact an auditable implementation mapping. Python verifies binding coverage and referenced-file existence but deliberately does not decide CFD semantics (for example, it does not recompute Reynolds number or infer whether a BC is physically appropriate). If faithful implementation would require changing confirmed intake, the Agent is instructed to block and return to human review rather than silently changing the problem.
 
+## Evidence-retrieval anti-thrash boundary (v2.13)
+
+Prepare/runtime retrieval uses explicit evidence-gap IDs rather than arbitrary repeated search actions. Python records canonical evidence IDs seen for each gap and marks a gap stagnant when another retrieval adds no new evidence. Stagnant retrieval cannot count as deterministic progress, and a small phase-specific retrieval fuse eventually removes retrieval from the Structured Output contract entirely. This is a resource/integrity boundary only: Python does not decide CFD engineering choices or infer whether an external fact is scientifically sufficient.
+
+Runtime exact edits are grouped per file and applied in model-specified order. Each edit still requires its `old` fragment to occur exactly once in the current buffer at the moment it is applied; grouping does not permit fuzzy matching, shell execution, arbitrary paths, or solver changes.
+
 ## Runtime self-deception resistance
 
 Runtime success is not accepted from model prose. It requires a successful native return status, at least one parsed `Time = ...` record (including OF13 unit-suffixed forms), an `End` marker, and no fatal/non-finite/SIGFPE evidence. Failed logs are preserved and returned to the engineering agent as observations.
