@@ -90,17 +90,31 @@ def test_prepare_batch_retrieval_tracks_novelty_and_stagnation(tmp_path, graph_p
     event2 = agent._dispatch_tool_action(second, step=2, native_execution=False, phase="prepare", state=state)
     assert event2.success
     payload2 = json.loads(event2.output_excerpt)
-    assert payload2["gaps"][0]["status"] == "no_new_evidence"
-    assert agent._evidence_gap_status("prepare")[0]["stagnant"] is True
+    assert payload2["gaps"][0]["status"] == "already_retrieved_blocked"
+    # A blocked repeat does not consume the retrieval hard-fuse budget.
+    assert agent._retrieval_cycles["prepare"] == 1
 
-    third = GatherEvidenceAction(type="gather_evidence", gaps=[_gap(query="another query")])
-    event3 = agent._dispatch_tool_action(third, step=3, native_execution=False, phase="prepare", state=state)
+    refined = EvidenceGapRequest(
+        gap_id="G02",
+        refines_gap_id="G01",
+        missing_evidence="A more specific release example for the same scheme.",
+        why_required="The first evidence did not expose the exact desired variant.",
+        reference_queries=["another query"],
+        reference_scope="tutorials",
+        read_top_reference_matches=1,
+    )
+    event3 = agent._dispatch_tool_action(
+        GatherEvidenceAction(type="gather_evidence", gaps=[refined]),
+        step=3,
+        native_execution=False,
+        phase="prepare",
+        state=state,
+    )
     payload3 = json.loads(event3.output_excerpt)
-    assert payload3["gaps"][0]["status"] == "stagnant_blocked"
-
-    schema, _, contract_phase = agent._phase_contract(state, "prepare")
-    assert schema is PrepareDecisionOnlyTurn
-    assert contract_phase == "prepare_decide"
+    assert payload3["gaps"][0]["status"] in {"new_evidence", "no_new_evidence"}
+    status = {item["gap_id"]: item for item in agent._evidence_gap_status("prepare")}
+    assert status["G01"]["status"] == "superseded"
+    assert status["G01"]["superseded_by"] == "G02"
 
 
 def test_prepare_gather_evidence_batches_multiple_independent_gaps(tmp_path, graph_path):

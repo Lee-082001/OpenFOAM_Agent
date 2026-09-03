@@ -1,4 +1,11 @@
-# OpenFOAM Agent v2.13 Architecture
+# OpenFOAM Agent v2.14 Architecture
+
+## v2.14 protocol-resilience boundary
+
+The model-facing contract distinguishes **semantic/safety validation** from **protocol-shape validation**. Unsafe paths, ambiguous exact patches, confirmed-fact coverage, solver/provider mismatches and stale execution evidence remain hard deterministic failures. Retrieval-query prose, opaque evidence-gap IDs, duplicate gap requests and empty repair deltas are not allowed to crash the whole run merely because their JSON shape is awkward. Non-authoritative retrieval metadata is normalized before execution, and OpenAI Structured Output receives one bounded Pydantic protocol-repair attempt when parsing still fails.
+
+Evidence retrieval is revision-aware at the gap level: each gap ID can be retrieved once, then becomes `evidence_available` or `stagnant`. Choosing to proceed closes available gaps as `satisfied`; additional retrieval requires a new child gap with `refines_gap_id`, which supersedes its parent. Blocked repeat/refinement requests do not consume the retrieval hard-fuse budget. This keeps information gathering driven by explicit unresolved evidence rather than query rewriting or turn-count heuristics.
+
 
 ## 1. Authority invariant
 

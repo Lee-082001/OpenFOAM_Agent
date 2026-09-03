@@ -4,9 +4,12 @@ import hashlib
 import os
 from typing import Any, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 T = TypeVar("T", bound=BaseModel)
+
+
+DEFAULT_OPENAI_STRUCTURED_REPAIRS = 1
 
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -111,17 +114,21 @@ class OpenAILLM:
         default_system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         store: bool = False,
         max_output_tokens: int | None = None,
+        structured_repair_attempts: int = DEFAULT_OPENAI_STRUCTURED_REPAIRS,
     ) -> None:
         normalized_model = model.strip()
         if not normalized_model:
             raise LLMConfigurationError("An OpenAI model name is required.")
         if max_output_tokens is not None and max_output_tokens <= 0:
             raise LLMConfigurationError("max_output_tokens must be positive when set.")
+        if structured_repair_attempts < 0:
+            raise LLMConfigurationError("structured_repair_attempts must be non-negative.")
 
         self.model = normalized_model
         self.default_system_prompt = default_system_prompt.strip()
         self.store = store
         self.max_output_tokens = max_output_tokens
+        self.structured_repair_attempts = structured_repair_attempts
         self.last_usage: dict[str, int] | None = None
         self._previous_response_ids: dict[str, str] = {}
         self._client = client if client is not None else self._build_client()
@@ -175,45 +182,94 @@ class OpenAILLM:
             input_messages.append({"role": "system", "content": effective_system_prompt})
         input_messages.append({"role": "user", "content": normalized_prompt})
 
-        request: dict[str, Any] = {
-            "model": self.model,
-            "input": input_messages,
-            "text_format": schema,
-            "store": self.store,
-        }
         cache_key = prompt_cache_key or _stable_prompt_cache_key(
             self.model, schema.__name__, effective_system_prompt
         )
-        request["prompt_cache_key"] = cache_key
-        # GPT-5.6+ supports explicit prompt-cache options. Other models still
-        # benefit from normal automatic prefix caching and the stable cache key.
-        if self.model.casefold().startswith("gpt-5.6"):
-            request["prompt_cache_options"] = {"mode": "implicit", "ttl": "30m"}
-        if use_previous_response and conversation_key:
-            previous = self._previous_response_ids.get(conversation_key)
-            if previous:
-                request["previous_response_id"] = previous
-        if self.max_output_tokens is not None:
-            request["max_output_tokens"] = self.max_output_tokens
-
+        max_attempts = 1 + self.structured_repair_attempts
+        last_validation_error: ValidationError | None = None
         self.last_usage = None
-        response = self._client.responses.parse(**request)
-        self.last_usage = _response_usage(response)
-        response_id = getattr(response, "id", None)
-        if self.store and conversation_key and isinstance(response_id, str) and response_id:
-            self._previous_response_ids[conversation_key] = response_id
-        parsed = getattr(response, "output_parsed", None)
-        if parsed is None:
-            response_id = getattr(response, "id", None)
-            suffix = f" (response_id={response_id})" if response_id else ""
-            raise StructuredOutputError(
-                "The model response had no parsed structured output; it may have "
-                f"been refused or incomplete{suffix}."
-            )
 
-        if isinstance(parsed, schema):
-            return parsed
-        return schema.model_validate(parsed)
+        for attempt in range(max_attempts):
+            request: dict[str, Any] = {
+                "model": self.model,
+                "input": list(input_messages),
+                "text_format": schema,
+                "store": self.store,
+                "prompt_cache_key": cache_key,
+            }
+            # GPT-5.6+ supports explicit prompt-cache options. Other models still
+            # benefit from normal automatic prefix caching and the stable cache key.
+            if self.model.casefold().startswith("gpt-5.6"):
+                request["prompt_cache_options"] = {"mode": "implicit", "ttl": "30m"}
+            if attempt == 0 and use_previous_response and conversation_key:
+                previous = self._previous_response_ids.get(conversation_key)
+                if previous:
+                    request["previous_response_id"] = previous
+            if self.max_output_tokens is not None:
+                request["max_output_tokens"] = self.max_output_tokens
+
+            try:
+                response = self._client.responses.parse(**request)
+            except ValidationError as exc:
+                last_validation_error = exc
+                if attempt >= max_attempts - 1:
+                    raise
+                error_text = str(exc).strip()
+                if len(error_text) > 4000:
+                    error_text = error_text[:4000] + "...<truncated>"
+                input_messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous structured response failed deterministic Pydantic "
+                            "validation. Return the same task decision/output in the requested "
+                            "schema, correcting only the protocol/shape error. Do not weaken or "
+                            "change user-confirmed CFD facts merely to satisfy the schema.\n\n"
+                            f"VALIDATION ERROR:\n{error_text}"
+                        ),
+                    }
+                )
+                continue
+
+            self.last_usage = _response_usage(response)
+            response_id = getattr(response, "id", None)
+            if self.store and conversation_key and isinstance(response_id, str) and response_id:
+                self._previous_response_ids[conversation_key] = response_id
+            parsed = getattr(response, "output_parsed", None)
+            if parsed is None:
+                suffix = f" (response_id={response_id})" if response_id else ""
+                raise StructuredOutputError(
+                    "The model response had no parsed structured output; it may have "
+                    f"been refused or incomplete{suffix}."
+                )
+
+            if isinstance(parsed, schema):
+                return parsed
+            try:
+                return schema.model_validate(parsed)
+            except ValidationError as exc:
+                last_validation_error = exc
+                if attempt >= max_attempts - 1:
+                    raise
+                error_text = str(exc).strip()
+                if len(error_text) > 4000:
+                    error_text = error_text[:4000] + "...<truncated>"
+                input_messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous parsed response failed deterministic Pydantic validation. "
+                            "Return a corrected object only, preserving the intended task decision and "
+                            "all user-confirmed CFD facts.\n\n"
+                            f"VALIDATION ERROR:\n{error_text}"
+                        ),
+                    }
+                )
+
+        if last_validation_error is not None:
+            raise last_validation_error
+        raise StructuredOutputError("Structured output validation failed without a parsed response.")
+
 
 
 def _stable_prompt_cache_key(model: str, schema_name: str, system_prompt: str) -> str:

@@ -3,13 +3,58 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class _EngineeringModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+def _soft_text(value: object, *, limit: int) -> str:
+    """Normalize non-authoritative protocol text without changing CFD semantics."""
+
+    text = str(value or "").strip()
+    return text[:limit]
+
+
+def _soft_query_list(value: object, *, limit: int, max_items: int) -> list[str]:
+    """Normalize retrieval queries; malformed query prose must not kill a run."""
+
+    if value is None:
+        items: list[object] = []
+    elif isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        items = [value]
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = _soft_text(item, limit=limit)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+        if len(result) >= max_items:
+            break
+    return result
+
+
+def _normalize_gap_id(value: object, *, fallback_text: str = "") -> str:
+    """Normalize an opaque evidence-gap identifier; IDs carry no CFD meaning."""
+
+    text = str(value or "").strip().upper()
+    match = re.fullmatch(r"G([0-9]{1,4})", text)
+    if match:
+        return f"G{int(match.group(1)):02d}"
+    digits = "".join(ch for ch in text if ch.isdigit())[:4]
+    if digits:
+        return f"G{int(digits):02d}"
+    digest = int(hashlib.sha256(fallback_text.encode("utf-8")).hexdigest()[:6], 16) % 10000
+    return f"G{digest:04d}"
 
 
 class EngineeringDecision(_EngineeringModel):
@@ -204,9 +249,16 @@ class SearchReferencesAction(_EngineeringModel):
 
 
 class EvidenceGapRequest(_EngineeringModel):
-    """One explicit tool/version evidence gap for deterministic batch retrieval."""
+    """One explicit tool/version evidence gap for deterministic batch retrieval.
+
+    Query strings and opaque gap IDs are protocol metadata, not CFD decisions. They are
+    therefore normalized deterministically so harmless formatting mistakes cannot abort
+    the engineering workflow. A follow-up search must use a new gap ID and may identify
+    the previously retrieved gap via ``refines_gap_id``.
+    """
 
     gap_id: str = Field(pattern=r"^G[0-9]{2,4}$")
+    refines_gap_id: str | None = Field(default=None, pattern=r"^G[0-9]{2,4}$")
     missing_evidence: str = Field(min_length=1, max_length=400)
     why_required: str = Field(min_length=1, max_length=400)
     capability_queries: list[str] = Field(default_factory=list, max_length=2)
@@ -214,13 +266,51 @@ class EvidenceGapRequest(_EngineeringModel):
     reference_scope: Literal["all", "tutorials", "source", "etc"] = "all"
     read_top_reference_matches: int = Field(default=1, ge=0, le=2)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_protocol_fields(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        missing = _soft_text(normalized.get("missing_evidence"), limit=400)
+        why = _soft_text(normalized.get("why_required"), limit=400)
+        if not missing:
+            missing = "Exact tool/version evidence needed for the proposed engineering action."
+        if not why:
+            why = "The Agent declared this external evidence necessary before proceeding."
+        normalized["missing_evidence"] = missing
+        normalized["why_required"] = why
+        normalized["gap_id"] = _normalize_gap_id(
+            normalized.get("gap_id"), fallback_text=missing
+        )
+        parent = normalized.get("refines_gap_id")
+        if parent not in {None, ""}:
+            normalized["refines_gap_id"] = _normalize_gap_id(parent, fallback_text=str(parent))
+        else:
+            normalized["refines_gap_id"] = None
+        normalized["capability_queries"] = _soft_query_list(
+            normalized.get("capability_queries"), limit=500, max_items=2
+        )
+        normalized["reference_queries"] = _soft_query_list(
+            normalized.get("reference_queries"), limit=500, max_items=3
+        )
+        # Empty/overlong query prose is a retrieval-protocol issue, not a reason to
+        # fail the CFD run. Fall back to the Agent's own missing-evidence statement.
+        if not normalized["capability_queries"] and not normalized["reference_queries"]:
+            normalized["reference_queries"] = [missing[:500]]
+        if normalized.get("reference_scope") not in {"all", "tutorials", "source", "etc"}:
+            normalized["reference_scope"] = "all"
+        try:
+            read_top = int(normalized.get("read_top_reference_matches", 1))
+        except (TypeError, ValueError):
+            read_top = 1
+        normalized["read_top_reference_matches"] = max(0, min(2, read_top))
+        return normalized
+
     @model_validator(mode="after")
-    def validate_queries(self) -> Self:
-        if not self.capability_queries and not self.reference_queries:
-            raise ValueError("Evidence gap requires at least one capability or reference query.")
-        for query in [*self.capability_queries, *self.reference_queries]:
-            if not query.strip() or len(query) > 500:
-                raise ValueError("Evidence queries must be non-empty and at most 500 characters.")
+    def validate_refinement(self) -> Self:
+        if self.refines_gap_id == self.gap_id:
+            raise ValueError("An evidence gap cannot refine itself.")
         return self
 
 
@@ -236,10 +326,35 @@ class GatherEvidenceAction(_EngineeringModel):
     rationale: str = Field(default="", max_length=200)
 
     @model_validator(mode="after")
-    def validate_gap_ids(self) -> Self:
-        ids = [gap.gap_id for gap in self.gaps]
-        if len(ids) != len(set(ids)):
-            raise ValueError("gather_evidence contains duplicate gap IDs.")
+    def normalize_duplicate_gap_ids(self) -> Self:
+        # Duplicate opaque IDs are a protocol nuisance. Merge compatible requests
+        # instead of turning them into a workflow-fatal Pydantic error.
+        merged: dict[str, EvidenceGapRequest] = {}
+        for gap in self.gaps:
+            previous = merged.get(gap.gap_id)
+            if previous is None:
+                merged[gap.gap_id] = gap
+                continue
+            capability = _soft_query_list(
+                [*previous.capability_queries, *gap.capability_queries],
+                limit=500,
+                max_items=2,
+            )
+            references = _soft_query_list(
+                [*previous.reference_queries, *gap.reference_queries],
+                limit=500,
+                max_items=3,
+            )
+            merged[gap.gap_id] = previous.model_copy(
+                update={
+                    "capability_queries": capability,
+                    "reference_queries": references,
+                    "read_top_reference_matches": max(
+                        previous.read_top_reference_matches, gap.read_top_reference_matches
+                    ),
+                }
+            )
+        self.gaps = list(merged.values())
         return self
 
 
@@ -513,15 +628,9 @@ class RepairCasePlanAction(_EngineeringModel):
         # required when deterministic execution already succeeded but the
         # EngineeringPlan itself is inconsistent with observed capability/case
         # evidence (for example, a stale or placeholder solver name).
-        if not (
-            self.patches
-            or self.replacement_files
-            or self.typed_dictionaries
-            or self.updated_plan is not None
-        ):
-            raise ValueError(
-                "repair_case_plan requires at least one changed file/patch or an updated_plan."
-            )
+        # A true no-op is handled as a controlled unsuccessful engineering action by
+        # the executor. It is not a schema error: protocol-shape mistakes must not
+        # terminate the whole run before the Agent can correct them.
         patch_paths = [x.path for x in self.patches]
         replacement_paths = [x.path for x in self.replacement_files]
         typed_paths = [x.path for x in self.typed_dictionaries]
@@ -559,8 +668,8 @@ class RuntimeCaseRepairAction(_EngineeringModel):
 
     @model_validator(mode="after")
     def validate_runtime_repair(self) -> Self:
-        if not (self.file_patches or self.replacement_files or self.typed_dictionaries):
-            raise ValueError("repair_runtime_case requires at least one changed file.")
+        # Empty deltas are handled by the runtime executor as a controlled non-retry.
+        # Keep semantic/safety conflicts below as hard schema constraints.
         paths = (
             [item.path for item in self.file_patches]
             + [item.path for item in self.replacement_files]
@@ -586,15 +695,8 @@ class CandidateCasePlanRepairAction(_EngineeringModel):
 
     @model_validator(mode="after")
     def validate_candidate_repair(self) -> Self:
-        if not (
-            self.patches
-            or self.replacement_files
-            or self.typed_dictionaries
-            or self.drop_paths
-        ):
-            raise ValueError(
-                "repair_candidate_case_plan requires at least one candidate file change."
-            )
+        # Empty candidate deltas are handled as a controlled failed action so the
+        # next turn can correct the protocol without mutating the workspace.
         patch_paths = [item.path for item in self.patches]
         replacement_paths = [item.path for item in self.replacement_files]
         typed_paths = [item.path for item in self.typed_dictionaries]

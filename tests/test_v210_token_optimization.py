@@ -518,7 +518,7 @@ def test_plan_only_repair_can_fix_solver_metadata_after_successful_case_executio
     assert llm.schemas == [PrepareTurn, RepairTurn]
 
 
-def test_repair_case_plan_rejects_true_noop_but_allows_updated_plan_only():
+def test_repair_case_plan_allows_plan_only_and_protocol_noop_for_controlled_executor_handling():
     state = make_state()
     plan = make_plan(state.intake).model_copy(update={"required_case_files": ["0/U"]})
     repair = RepairCasePlanAction(
@@ -529,17 +529,13 @@ def test_repair_case_plan_rejects_true_noop_but_allows_updated_plan_only():
     )
     assert repair.updated_plan == plan
 
-    from pydantic import ValidationError
-    try:
-        RepairCasePlanAction(
-            type="repair_case_plan",
-            diagnosis="no-op repair",
-            validate_pre_solve=False,
-        )
-    except ValidationError as exc:
-        assert "changed file/patch or an updated_plan" in str(exc)
-    else:
-        raise AssertionError("A true no-op repair must still be rejected.")
+    noop = RepairCasePlanAction(
+        type="repair_case_plan",
+        diagnosis="no-op repair",
+        validate_pre_solve=False,
+    )
+    assert noop.updated_plan is None
+    assert not noop.patches and not noop.replacement_files and not noop.typed_dictionaries
 
 
 def test_case_bundle_preflight_retains_candidate_and_accepts_delta_repair_before_first_write(tmp_path, graph_path):
@@ -669,15 +665,10 @@ def test_case_plan_retry_schema_is_compact_candidate_delta_contract():
     assert "CandidateCasePlanRepairAction" in schema_text
 
 
-def test_candidate_repair_rejects_true_noop():
-    from pydantic import ValidationError
-
-    try:
-        CandidateCasePlanRepairAction(
-            type="repair_candidate_case_plan",
-            diagnosis="no candidate change",
-        )
-    except ValidationError as exc:
-        assert "candidate file change" in str(exc)
-    else:
-        raise AssertionError("A true candidate-repair no-op must be rejected.")
+def test_candidate_repair_schema_accepts_true_noop_for_controlled_executor_handling():
+    action = CandidateCasePlanRepairAction(
+        type="repair_candidate_case_plan",
+        diagnosis="no candidate change",
+    )
+    assert not action.patches and not action.replacement_files and not action.typed_dictionaries
+    assert not action.drop_paths

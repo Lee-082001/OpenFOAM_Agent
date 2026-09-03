@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.13.0
+# OpenFOAM Agent v2.14.0
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -9,6 +9,13 @@ The central design rule is:
 v2 is intentionally not a collection of hand-written CFD case templates. There is no production rule such as `if vortex shedding -> square obstacle template`, `if static -> snappyHexMesh`, or `if prescribed deformation -> displacementLaplacian`.
 
 
+
+
+## v2.14.0: evidence-gap lifecycle + protocol-resilience audit
+
+v2.14 hardens the LLM/Python protocol after production runs showed that harmless Structured Output shape mistakes could still terminate an otherwise valid CFD workflow. Evidence gaps now have an explicit lifecycle. A gap ID is single-use: after deterministic retrieval it becomes `evidence_available` or `stagnant`; proceeding to case execution marks available gaps `satisfied`. If more external evidence is genuinely needed, the Agent must declare a new, more-specific gap with `refines_gap_id`, which supersedes the earlier gap. Repeating an already retrieved gap is refused without consuming another retrieval-cycle budget. Query strings, opaque gap IDs, whitespace, overlong query prose, invalid retrieval scope and read-count formatting are normalized deterministically because they are retrieval protocol metadata rather than CFD engineering decisions.
+
+OpenAI Structured Output now has one bounded **protocol-repair attempt**, analogous to the existing local-model repair layer. If `responses.parse` raises a Pydantic validation error, the adapter asks the same model once to correct only the schema/protocol shape while explicitly preserving confirmed CFD facts. This protection applies to Intake, Engineering, Post-processing and Feedback/Review because they share the adapter; it does not bypass deterministic workspace safety, confirmed-fact coverage, solver/provider consistency, case sealing, pre-solve, native evidence or human approval gates. Repair schemas also accept syntactic no-op payloads so they can be rejected as normal deterministic unsuccessful actions rather than exploding into large union-validation traces. See `V2_14_CHANGES.md`.
 
 ## v2.13.0: evidence-gap retrieval + grouped runtime delta repair
 
@@ -65,7 +72,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-v2.9 introduced the execution-plan fast path. Current v2.13.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v2.14.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -632,7 +639,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2.13.0 release tree currently passes **183 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v2.14.0 release tree currently passes **190 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;

@@ -470,6 +470,7 @@ class CFDEngineeringAgent:
             )
 
         if isinstance(action, ExecuteCasePlanAction):
+            self._mark_evidence_gaps_satisfied("prepare")
             return self._execute_case_plan(
                 state,
                 action,
@@ -639,6 +640,22 @@ class CFDEngineeringAgent:
         native_execution: bool,
     ) -> bool:
         """Repair the retained candidate, then rerun transactional whole-plan preflight."""
+        if not (repair.patches or repair.replacement_files or repair.typed_dictionaries or repair.drop_paths):
+            event = self._event(
+                llm_step,
+                repair.type,
+                False,
+                "Candidate repair contained no file change; return a real delta or block.",
+            )
+            state.engineering_events.append(event)
+            self._emit_engineering_event(
+                f"{progress_phase}-candidate-repair",
+                event,
+                step=progress_step,
+                limit=progress_limit,
+                state=state,
+            )
+            return False
         try:
             candidate = self._apply_candidate_case_plan_repair(repair)
         except (WorkspaceSafetyError, FoamSerializationError, ValueError) as exc:
@@ -966,6 +983,15 @@ class CFDEngineeringAgent:
         progress_phase: str,
         native_execution: bool,
     ) -> bool:
+        if not (repair.patches or repair.replacement_files or repair.typed_dictionaries or repair.updated_plan is not None):
+            event = self._event(
+                llm_step,
+                repair.type,
+                False,
+                "Repair plan contained no artifact or EngineeringPlan change; return a real delta or block.",
+            )
+            state.engineering_events.append(event)
+            return False
         try:
             actions, _ = self._repair_actions(state, repair, runtime=False)
         except (WorkspaceSafetyError, FoamSerializationError) as exc:
@@ -1066,6 +1092,21 @@ class CFDEngineeringAgent:
         native_execution: bool,
         runtime_event_start: int,
     ) -> RepairOutcome | None:
+        if isinstance(repair, RuntimeCaseRepairAction) and not (
+            repair.file_patches or repair.replacement_files or repair.typed_dictionaries
+        ):
+            return RepairOutcome(
+                False,
+                reason=(
+                    "Runtime repair contained no case-file change; automatic solver retry without "
+                    "a concrete repair is not authorized."
+                ),
+            )
+        if isinstance(repair, RepairCasePlanAction) and not (
+            repair.patches or repair.replacement_files or repair.typed_dictionaries or repair.updated_plan is not None
+        ):
+            return RepairOutcome(False, reason="Runtime repair contained no executable delta.")
+        self._mark_evidence_gaps_satisfied("runtime_repair")
         try:
             if isinstance(repair, RuntimeCaseRepairAction):
                 actions, plan = self._runtime_repair_actions(state, repair)
@@ -1962,10 +2003,22 @@ class CFDEngineeringAgent:
                     "retrievals": int(item.get("retrievals", 0)),
                     "seen_evidence_count": len(seen) if isinstance(seen, set) else len(list(seen)),
                     "last_new_evidence_count": int(item.get("last_new_count", 0)),
-                    "stagnant": bool(item.get("stagnant", False)),
+                    "status": str(item.get("status", "open")),
+                    "refines_gap_id": item.get("refines_gap_id"),
+                    "superseded_by": item.get("superseded_by"),
+                    "stagnant": str(item.get("status", "")) == "stagnant",
+                    "satisfied": str(item.get("status", "")) == "satisfied",
                 }
             )
         return result
+
+    def _mark_evidence_gaps_satisfied(self, phase: str) -> None:
+        """Close retrieved gaps when the Agent elects to proceed without more retrieval."""
+
+        ledger = self._evidence_gap_ledger.get(phase, {})
+        for entry in ledger.values():
+            if str(entry.get("status", "")) == "evidence_available":
+                entry["status"] = "satisfied"
 
     def _gather_evidence(
         self,
@@ -1989,46 +2042,64 @@ class CFDEngineeringAgent:
                 False,
                 f"Evidence retrieval hard fuse reached for {phase} ({limit} cycle(s)); use existing evidence or block.",
             )
-        self._retrieval_cycles[phase] = cycles + 1
         ledger = self._evidence_gap_ledger.setdefault(phase, {})
+        performed_retrieval = False
         observed_by_id: dict[str, ObservedEngineeringEvidence] = {}
         new_observed_ids: set[str] = set()
         gap_results: list[dict[str, object]] = []
 
         for gap in action.gaps:
             existing = ledger.get(gap.gap_id)
-            if existing is not None and (
-                existing.get("missing_evidence") != gap.missing_evidence
-                or existing.get("why_required") != gap.why_required
-            ):
+            if existing is not None:
                 gap_results.append(
                     {
                         "gap_id": gap.gap_id,
-                        "status": "definition_mismatch",
-                        "message": "Reuse the same gap_id only for the same evidence gap.",
+                        "status": "already_retrieved_blocked",
+                        "message": (
+                            "Each evidence gap may be retrieved once. Use the accumulated evidence, "
+                            "proceed, or declare a new more-specific gap with refines_gap_id."
+                        ),
                     }
                 )
                 continue
 
-            entry = existing or {
+            parent = None
+            if gap.refines_gap_id is not None:
+                parent = ledger.get(gap.refines_gap_id)
+                if parent is None:
+                    gap_results.append(
+                        {
+                            "gap_id": gap.gap_id,
+                            "status": "unknown_refinement_parent",
+                            "message": f"refines_gap_id {gap.refines_gap_id} is not present in the evidence-gap ledger.",
+                        }
+                    )
+                    continue
+                if str(parent.get("status", "")) == "satisfied":
+                    gap_results.append(
+                        {
+                            "gap_id": gap.gap_id,
+                            "status": "satisfied_parent_blocked",
+                            "message": f"Evidence gap {gap.refines_gap_id} is already satisfied and cannot be refined.",
+                        }
+                    )
+                    continue
+
+            entry = {
                 "missing_evidence": gap.missing_evidence,
                 "why_required": gap.why_required,
+                "refines_gap_id": gap.refines_gap_id,
                 "seen_ids": set(),
                 "retrievals": 0,
                 "last_new_count": 0,
-                "stagnant": False,
+                "status": "open",
             }
             ledger[gap.gap_id] = entry
-            if bool(entry.get("stagnant", False)):
-                gap_results.append(
-                    {
-                        "gap_id": gap.gap_id,
-                        "status": "stagnant_blocked",
-                        "message": "Previous retrieval for this gap produced no new evidence; use existing evidence or block.",
-                    }
-                )
-                continue
+            if parent is not None:
+                parent["status"] = "superseded"
+                parent["superseded_by"] = gap.gap_id
 
+            performed_retrieval = True
             found: dict[str, dict[str, object]] = {}
             ref_records: dict[str, dict[str, object]] = {}
             for query in gap.capability_queries:
@@ -2098,7 +2169,7 @@ class CFDEngineeringAgent:
             new_observed_ids.update(new_ids)
             entry["retrievals"] = int(entry.get("retrievals", 0)) + 1
             entry["last_new_count"] = len(new_ids)
-            entry["stagnant"] = len(new_ids) == 0
+            entry["status"] = "evidence_available" if new_ids else "stagnant"
             gap_results.append(
                 {
                     "gap_id": gap.gap_id,
@@ -2109,15 +2180,26 @@ class CFDEngineeringAgent:
                 }
             )
 
+        if performed_retrieval:
+            self._retrieval_cycles[phase] = cycles + 1
         new_total = sum(len(item.get("new_evidence_ids", [])) for item in gap_results)
-        stagnant = [item["gap_id"] for item in gap_results if item.get("status") in {"no_new_evidence", "stagnant_blocked"}]
+        stagnant = [
+            item["gap_id"]
+            for item in gap_results
+            if item.get("status") in {
+                "no_new_evidence",
+                "already_retrieved_blocked",
+                "unknown_refinement_parent",
+                "satisfied_parent_blocked",
+            }
+        ]
         return self._event(
             step,
             action.type,
             True,
             f"Evidence-gap batch completed: {new_total} new evidence item(s); stagnant={len(stagnant)}.",
             _json({
-                "cycle": self._retrieval_cycles[phase],
+                "cycle": self._retrieval_cycles.get(phase, cycles),
                 "cycle_limit": limit,
                 "gaps": gap_results,
             }),
