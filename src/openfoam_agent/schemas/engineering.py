@@ -472,6 +472,41 @@ class RepairCasePlanAction(_EngineeringModel):
         return self
 
 
+
+class CandidateCasePlanRepairAction(_EngineeringModel):
+    """Delta repair for an in-memory, not-yet-committed execute_case_plan candidate."""
+
+    type: Literal["repair_candidate_case_plan"]
+    diagnosis: str = Field(min_length=1, max_length=800)
+    patches: list[CaseFilePatch] = Field(default_factory=list, max_length=12)
+    replacement_files: list[CaseBundleFile] = Field(default_factory=list, max_length=12)
+    typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=12)
+    drop_paths: list[str] = Field(default_factory=list, max_length=12)
+
+    @model_validator(mode="after")
+    def validate_candidate_repair(self) -> Self:
+        if not (
+            self.patches
+            or self.replacement_files
+            or self.typed_dictionaries
+            or self.drop_paths
+        ):
+            raise ValueError(
+                "repair_candidate_case_plan requires at least one candidate file change."
+            )
+        paths = (
+            [item.path for item in self.patches]
+            + [item.path for item in self.replacement_files]
+            + [item.path for item in self.typed_dictionaries]
+            + list(self.drop_paths)
+        )
+        if len(paths) != len(set(paths)):
+            raise ValueError("repair_candidate_case_plan may change each path at most once per turn.")
+        for path in self.drop_paths:
+            if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
+                raise ValueError(f"Unsafe candidate drop path: {path}")
+        return self
+
 # Phase-specific compact contracts. Agent identity remains one CFDEngineeringAgent; only
 # permissions/schema vary by phase so repeated calls do not carry the giant all-phase union.
 PrepareAction = SearchCapabilitiesAction | SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | ExecuteCasePlanAction | BlockAction
@@ -483,7 +518,7 @@ class PrepareTurn(_EngineeringModel):
 # already has the engineering decision and a deterministic serialization/safety
 # diagnostic. Force the next turn to either resubmit one complete corrected plan
 # or block, preventing long search/repair thrash against an intentionally empty case.
-CasePlanRetryAction = ExecuteCasePlanAction | BlockAction
+CasePlanRetryAction = CandidateCasePlanRepairAction | BlockAction
 class CasePlanRetryTurn(_EngineeringModel):
     action: CasePlanRetryAction
 

@@ -33,6 +33,7 @@ from openfoam_agent.progress import (
 from openfoam_agent.schemas.feedback import RevisionFileChange, RevisionRecord
 from openfoam_agent.schemas.engineering import (
     BlockAction,
+    CaseBundleFile,
     DeleteCaseFileAction,
     EngineeringBudgetExtension,
     EngineeringEvent,
@@ -42,6 +43,7 @@ from openfoam_agent.schemas.engineering import (
     FinalizationTurn,
     PrepareTurn,
     CasePlanRetryTurn,
+    CandidateCasePlanRepairAction,
     RepairCasePlanAction,
     RepairTurn,
     RevisionTurn,
@@ -187,6 +189,8 @@ class CFDEngineeringAgent:
         self._presolve_case_manifest: str | None = None
         self._presolve_required_case_files: tuple[str, ...] | None = None
         self._pending_execution_plan: EngineeringPlan | None = None
+        self._pending_candidate_execution: ExecuteCasePlanAction | None = None
+        self._pending_candidate_failed_paths: tuple[str, ...] = ()
         self._phase_prompt_counts: dict[str, int] = {}
         self._phase_context_snapshots: dict[str, dict[str, str | None]] = {}
 
@@ -428,6 +432,17 @@ class CFDEngineeringAgent:
     ) -> bool:
         """Execute one LLM decision, which may contain a bounded action sequence."""
 
+        if isinstance(action, CandidateCasePlanRepairAction):
+            return self._execute_candidate_case_plan_repair(
+                state,
+                action,
+                llm_step=llm_step,
+                progress_phase=progress_phase,
+                progress_step=progress_step,
+                progress_limit=progress_limit,
+                native_execution=native_execution,
+            )
+
         if isinstance(action, RepairCasePlanAction):
             return self._execute_prepare_repair_plan(
                 state,
@@ -488,6 +503,164 @@ class CFDEngineeringAgent:
         )
         return terminal
 
+    @staticmethod
+    def _candidate_failure_paths(
+        failures: list[str],
+        candidate_bundle: dict[str, str],
+    ) -> list[str]:
+        """Extract implicated authored paths from deterministic preflight diagnostics."""
+        matched: list[str] = []
+        for path in candidate_bundle:
+            if any(path in failure for failure in failures):
+                matched.append(path)
+        return matched[:12]
+
+    def _candidate_repair_context(self) -> dict[str, object] | None:
+        """Return a bounded capsule for repairing the retained in-memory candidate."""
+        candidate = self._pending_candidate_execution
+        if candidate is None:
+            return None
+        failed = set(self._pending_candidate_failed_paths)
+        manifest: list[dict[str, object]] = []
+        artifacts: list[dict[str, object]] = []
+        for item in candidate.files:
+            manifest.append({"path": item.path, "kind": "raw", "chars": len(item.content)})
+            if item.path in failed:
+                artifacts.append(
+                    {"path": item.path, "kind": "raw", "content": item.content[:40_000]}
+                )
+        for item in candidate.typed_dictionaries:
+            manifest.append(
+                {
+                    "path": item.path,
+                    "kind": "typed_dictionary",
+                    "entries": len(item.entries),
+                }
+            )
+            if item.path in failed:
+                artifacts.append(
+                    {
+                        "path": item.path,
+                        "kind": "typed_dictionary",
+                        "entries": [entry.model_dump(mode="json") for entry in item.entries],
+                    }
+                )
+        return {
+            "goal": candidate.goal,
+            "failed_paths": list(self._pending_candidate_failed_paths),
+            "manifest": manifest,
+            "failed_artifacts": artifacts,
+            "pipeline": {
+                "validate_dictionaries": candidate.validate_dictionaries,
+                "surface_checks": candidate.surface_checks,
+                "mesh_commands": candidate.mesh_commands,
+                "required_case_files": candidate.required_case_files,
+            },
+            "plan_capsule": {
+                "solver": candidate.plan.solver,
+                "solver_provider_id": candidate.plan.solver_provider_id,
+                "required_case_files": candidate.plan.required_case_files,
+                "confirmed_intake_sha256": candidate.plan.confirmed_intake_sha256,
+            },
+        }
+
+    def _apply_candidate_case_plan_repair(
+        self,
+        repair: CandidateCasePlanRepairAction,
+    ) -> ExecuteCasePlanAction:
+        """Apply a model-authored delta to the retained candidate without touching workspace."""
+        candidate = self._pending_candidate_execution
+        if candidate is None:
+            raise WorkspaceSafetyError("No retained candidate case plan exists to repair.")
+
+        raw = {item.path: item for item in candidate.files}
+        typed = {item.path: item for item in candidate.typed_dictionaries}
+
+        for path in repair.drop_paths:
+            raw.pop(path, None)
+            typed.pop(path, None)
+
+        for patch in repair.patches:
+            if patch.path in raw:
+                current = raw[patch.path].content
+            elif patch.path in typed:
+                current = serialize_foam_dictionary(typed[patch.path])
+            else:
+                raise WorkspaceSafetyError(
+                    f"Candidate patch target does not exist: {patch.path}"
+                )
+            if current.count(patch.old) != 1:
+                raise WorkspaceSafetyError(
+                    f"Candidate patch old fragment must occur exactly once in {patch.path}."
+                )
+            content = current.replace(patch.old, patch.new, 1)
+            raw[patch.path] = CaseBundleFile(path=patch.path, content=content)
+            typed.pop(patch.path, None)
+
+        for item in repair.replacement_files:
+            raw[item.path] = item
+            typed.pop(item.path, None)
+
+        for item in repair.typed_dictionaries:
+            typed[item.path] = item
+            raw.pop(item.path, None)
+
+        data = candidate.model_dump(mode="python")
+        data["files"] = [item.model_dump(mode="python") for item in raw.values()]
+        data["typed_dictionaries"] = [item.model_dump(mode="python") for item in typed.values()]
+        return ExecuteCasePlanAction.model_validate(data)
+
+    def _execute_candidate_case_plan_repair(
+        self,
+        state: CFDState,
+        repair: CandidateCasePlanRepairAction,
+        *,
+        llm_step: int,
+        progress_phase: str,
+        progress_step: int,
+        progress_limit: int,
+        native_execution: bool,
+    ) -> bool:
+        """Repair the retained candidate, then rerun transactional whole-plan preflight."""
+        try:
+            candidate = self._apply_candidate_case_plan_repair(repair)
+        except (WorkspaceSafetyError, FoamSerializationError, ValueError) as exc:
+            event = self._event(llm_step, repair.type, False, str(exc))
+            state.engineering_events.append(event)
+            self._emit_engineering_event(
+                f"{progress_phase}-candidate-repair",
+                event,
+                step=progress_step,
+                limit=progress_limit,
+                state=state,
+            )
+            return False
+
+        self._pending_candidate_execution = candidate
+        event = self._event(
+            llm_step,
+            repair.type,
+            True,
+            "Applied delta to retained candidate; re-running whole-bundle authoring preflight.",
+        )
+        state.engineering_events.append(event)
+        self._emit_engineering_event(
+            f"{progress_phase}-candidate-repair",
+            event,
+            step=progress_step,
+            limit=progress_limit,
+            state=state,
+        )
+        return self._execute_case_plan(
+            state,
+            candidate,
+            llm_step=llm_step,
+            progress_phase=progress_phase,
+            progress_step=progress_step,
+            progress_limit=progress_limit,
+            native_execution=native_execution,
+        )
+
     def _execute_case_plan(
         self,
         state: CFDState,
@@ -530,8 +703,11 @@ class CFDEngineeringAgent:
                     state=state,
                 )
                 # Authoring failures are transactional: no candidate case file has
-                # been committed, so the next turn must resubmit one complete plan
-                # rather than delta-repair an intentionally empty/unchanged case.
+                # been committed. Retain the complete candidate in memory so the next
+                # turn can repair only the implicated candidate entry instead of
+                # regenerating the whole case as a large Structured Output object.
+                self._pending_candidate_execution = execution
+                self._pending_candidate_failed_paths = (item.path,)
                 self._pending_execution_plan = None
                 return blocked
             rendered_files.append((item.path, content))
@@ -559,11 +735,18 @@ class CFDEngineeringAgent:
                 limit=progress_limit,
                 state=state,
             )
+            self._pending_candidate_execution = execution
+            self._pending_candidate_failed_paths = tuple(
+                self._candidate_failure_paths(bundle_failures, candidate_bundle)
+            )
             self._pending_execution_plan = None
             return blocked
 
         # Only after every candidate file passes deterministic authoring preflight do
-        # we start mutating the workspace. Since all file writes precede dictionary or
+        # we start mutating the workspace.
+        self._pending_candidate_execution = None
+        self._pending_candidate_failed_paths = ()
+        # Since all file writes precede dictionary or
         # native execution in the expanded plan, later OpenFOAM failures always see a
         # complete authored bundle and can use true delta RepairTurn semantics.
         for path, content in rendered_files:
@@ -2140,9 +2323,9 @@ class CFDEngineeringAgent:
     def _case_plan_retry_required(self, state: CFDState) -> bool:
         """Return whether the previous complete-plan authoring attempt failed pre-commit.
 
-        These failures leave the workspace intentionally untouched.  A delta repair
-        would therefore target a case that does not exist yet, so the compact retry
-        contract accepts only a corrected complete execute_case_plan (or block).
+        These failures leave the workspace intentionally untouched, but the rejected
+        complete candidate remains in Python memory. The compact retry contract therefore
+        accepts only a delta against that retained candidate (or block).
         """
 
         events = self._current_round_events(state)
@@ -2153,6 +2336,7 @@ class CFDEngineeringAgent:
             not last.success
             and last.action_type in {"typed_dictionary_serialize", "case_bundle_preflight"}
             and self._pending_execution_plan is None
+            and self._pending_candidate_execution is not None
         )
 
     def _phase_contract(self, state: CFDState, phase: str):
@@ -2401,8 +2585,9 @@ class CFDEngineeringAgent:
             elif contract_phase == "replan":
                 instruction = (
                     "The previous complete case bundle failed deterministic pre-commit authoring checks. "
-                    "Return one corrected complete execute_case_plan (or block). No partial case was "
-                    "committed, so do not issue delta repairs or searches:\n"
+                    "The full candidate is retained in Python memory. Return only repair_candidate_case_plan "
+                    "with the minimum delta for the implicated candidate path(s), or block. No partial "
+                    "workspace case was committed:\n"
                 )
             elif contract_phase in {"repair", "revision", "runtime_repair"}:
                 instruction = (
@@ -2411,6 +2596,9 @@ class CFDEngineeringAgent:
                 )
             else:
                 instruction = "Finalize or block from the validated state:\n"
+
+        if contract_phase == "replan":
+            payload["retained_candidate"] = self._candidate_repair_context()
 
         prompt_result = build_bounded_json_prompt(
             instruction,

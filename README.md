@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.11.0
+# OpenFOAM Agent v2.12.0
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -9,6 +9,10 @@ The central design rule is:
 v2 is intentionally not a collection of hand-written CFD case templates. There is no production rule such as `if vortex shedding -> square obstacle template`, `if static -> snappyHexMesh`, or `if prescribed deformation -> displacementLaplacian`.
 
 
+
+## v2.12.0: retained candidate plan + delta authoring repair
+
+v2.12.0 keeps v2.11 transactional workspace authoring but no longer asks the LLM to regenerate the entire `execute_case_plan` after a pre-commit serialization or workspace-safety rejection. The complete rejected candidate remains only in Python memory; the retry contract accepts a small `repair_candidate_case_plan` delta (exact patch, replacement raw file, replacement typed dictionary, or dropped optional path) or `block`. Python applies that delta to the retained candidate, re-runs serialization and whole-bundle authoring preflight, and commits the full bundle only after it passes. This preserves all-or-nothing workspace semantics while avoiding large repeated Structured Output objects and the JSON truncation/token failure mode seen with complete-plan retries. Plan metadata repair remains a post-commit `RepairTurn` responsibility.
 
 ## v2.11.0: transactional case authoring and bounded complete-plan retry
 
@@ -54,7 +58,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-v2.9 introduced the execution-plan fast path. Current v2.11.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v2.12.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -621,7 +625,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2.11.0 release tree currently passes **177 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v2.12.0 release tree currently passes **179 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;

@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.11 Architecture
+# OpenFOAM Agent v2.12 Architecture
 
 ## 1. Authority invariant
 
@@ -52,6 +52,10 @@ INIT -> INTAKE_ANALYSIS -> INTAKE_REVIEW_REQUIRED
 
 One production engineering agent owns solver, mesh, BC, normalization, numerics, motion, repair and case implementation. It uses capability/reference/file/native-tool actions. Production CLI preparation uses a 12-LLM-turn soft budget, progress-aware +6-turn extensions, and a 24-turn hard cap, plus separate deterministic-action, native-command, mesh-repair and runtime-repair budgets. Complete-plan authoring failures have their own 3-attempt bound so serialization/content-policy mistakes cannot consume the full Engineering budget.
 
+
+### Retained candidate delta repair (v2.12.0)
+
+A pre-commit authoring rejection does not mutate the workspace and no longer discards the model-authored candidate. Python retains the complete candidate only in memory, exposes a bounded capsule for the implicated path(s), and accepts only a `repair_candidate_case_plan` delta or `block`. The delta is applied to the in-memory candidate and the entire candidate is re-serialized and re-preflighted. Only a fully passing candidate is committed. This separates **workspace transactionality** from **candidate continuity** and prevents large complete-plan regeneration loops.
 
 ### Transactional case authoring (v2.11.0)
 

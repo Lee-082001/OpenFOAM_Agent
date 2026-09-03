@@ -30,6 +30,7 @@ from openfoam_agent.schemas.engineering import (
     FoamDictionaryEntry,
     PrepareTurn,
     CasePlanRetryTurn,
+    CandidateCasePlanRepairAction,
     RepairCasePlanAction,
     RepairTurn,
     RuntimeRepairTurn,
@@ -426,7 +427,12 @@ def test_typed_serializer_failure_becomes_next_prepare_turn_not_workflow_failure
     )
     bad = bad.model_copy(update={"typed_dictionaries": [*bad.typed_dictionaries[:-1], bad_u]})
     good = _compact_plan(state)
-    llm = FlexibleScriptedLLM([bad, good])
+    candidate_repair = CandidateCasePlanRepairAction(
+        type="repair_candidate_case_plan",
+        diagnosis="Replace only the invalid 0/U candidate dictionary.",
+        typed_dictionaries=[good.typed_dictionaries[-1]],
+    )
+    llm = FlexibleScriptedLLM([bad, candidate_repair])
     tools = FakeOpenFOAMTools(
         mesh_results={
             "blockMesh": [tool_result("blockMesh", success=True, stdout="ok\n")],
@@ -533,7 +539,7 @@ def test_repair_case_plan_rejects_true_noop_but_allows_updated_plan_only():
         raise AssertionError("A true no-op repair must still be rejected.")
 
 
-def test_case_bundle_preflight_rejects_whole_plan_before_first_write_and_forces_complete_replan(tmp_path, graph_path):
+def test_case_bundle_preflight_retains_candidate_and_accepts_delta_repair_before_first_write(tmp_path, graph_path):
     state = make_state()
     first = _compact_plan(state)
     unsafe_control = first.typed_dictionaries[0].model_copy(
@@ -548,7 +554,12 @@ def test_case_bundle_preflight_rejects_whole_plan_before_first_write_and_forces_
         update={"typed_dictionaries": [unsafe_control, *first.typed_dictionaries[1:]]}
     )
     corrected = _compact_plan(state)
-    llm = FlexibleScriptedLLM([first, corrected])
+    candidate_repair = CandidateCasePlanRepairAction(
+        type="repair_candidate_case_plan",
+        diagnosis="Remove the non-allowlisted library from the retained controlDict candidate.",
+        typed_dictionaries=[corrected.typed_dictionaries[0]],
+    )
+    llm = FlexibleScriptedLLM([first, candidate_repair])
     tools = FakeOpenFOAMTools(
         mesh_results={
             "blockMesh": [tool_result("blockMesh", success=True, stdout="ok\n")],
@@ -588,9 +599,12 @@ def test_case_bundle_preflight_rejects_whole_plan_before_first_write_and_forces_
     assert tools.mesh_calls == ["blockMesh", "checkMesh"]
 
 
-def test_case_plan_retry_schema_allows_only_complete_plan_or_block():
+def test_case_plan_retry_schema_allows_only_candidate_delta_or_block():
     validate_structured_output_schema(CasePlanRetryTurn)
-    assert "SearchReferencesAction" not in str(CasePlanRetryTurn.model_json_schema())
+    schema_text = str(CasePlanRetryTurn.model_json_schema())
+    assert "SearchReferencesAction" not in schema_text
+    assert "ExecuteCasePlanAction" not in schema_text
+    assert "CandidateCasePlanRepairAction" in schema_text
 
 
 def test_repeated_case_bundle_authoring_failures_are_bounded_without_partial_case(tmp_path, graph_path):
@@ -610,7 +624,14 @@ def test_repeated_case_bundle_authoring_failures_are_bounded_without_partial_cas
             update={"typed_dictionaries": [unsafe_control, *base.typed_dictionaries[1:]]}
         )
 
-    llm = FlexibleScriptedLLM([unsafe_plan(), unsafe_plan(), unsafe_plan()])
+    unsafe = unsafe_plan()
+    unsafe_control = unsafe.typed_dictionaries[0]
+    repeated_bad_repair = CandidateCasePlanRepairAction(
+        type="repair_candidate_case_plan",
+        diagnosis="Retry candidate controlDict without changing the rejected library.",
+        typed_dictionaries=[unsafe_control],
+    )
+    llm = FlexibleScriptedLLM([unsafe, repeated_bad_repair, repeated_bad_repair])
     agent = CFDEngineeringAgent(
         llm,
         workspace=tmp_path,
@@ -630,3 +651,30 @@ def test_repeated_case_bundle_authoring_failures_are_bounded_without_partial_cas
     assert llm.schemas == [PrepareTurn, CasePlanRetryTurn, CasePlanRetryTurn]
     assert not any(e.action_type == "write_case_file" for e in state.engineering_events)
     assert sum(e.action_type == "case_bundle_preflight" for e in state.engineering_events) == 3
+
+
+def test_case_plan_retry_schema_is_compact_candidate_delta_contract():
+    metrics = structured_request_metrics(
+        CasePlanRetryTurn,
+        "{}",
+        system_prompt=CASE_PLAN_RETRY_SYSTEM_PROMPT,
+    )
+    assert metrics["schemaChars"] < 5000
+    schema_text = str(CasePlanRetryTurn.model_json_schema())
+    assert "ExecuteCasePlanAction" not in schema_text
+    assert "EngineeringPlan" not in schema_text
+    assert "CandidateCasePlanRepairAction" in schema_text
+
+
+def test_candidate_repair_rejects_true_noop():
+    from pydantic import ValidationError
+
+    try:
+        CandidateCasePlanRepairAction(
+            type="repair_candidate_case_plan",
+            diagnosis="no candidate change",
+        )
+    except ValidationError as exc:
+        assert "candidate file change" in str(exc)
+    else:
+        raise AssertionError("A true candidate-repair no-op must be rejected.")
