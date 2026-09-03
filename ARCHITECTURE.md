@@ -1,4 +1,21 @@
-# OpenFOAM Agent v2.19 Architecture
+# OpenFOAM Agent v3.0 Architecture
+
+
+## v3.0 semantic interpretation boundary
+
+PreSolve no longer parses each validation rule directly from raw OpenFOAM text. The `verification/foam_semantics/` package separates four responsibilities:
+
+```text
+raw OpenFOAM dictionaries
+        -> syntax-preserving entries
+        -> MeshIR / boundary selectors
+        -> OpenFOAM semantic resolution
+        -> deterministic validation / execution gate
+```
+
+Parsing preserves raw key/token form and dictionary order instead of collapsing immediately to `set[str]`/`dict[str, str]`. Boundary selection is interpreted per mesh patch with OpenFOAM v13 precedence: explicit patch, patchGroup, automatic `empty`, then wildcard/regex; later matches win within overlapping group/regex tiers. `BoundaryResolution` records status, match kind, effective type, certainty, and a trace. Unsupported expansion/directive semantics are `INDETERMINATE`: inability of Python to prove coverage is not treated as proof that OpenFOAM coverage is missing.
+
+Coverage validation and mesh/field constraint validation consume the same effective resolution. This prevents validator-induced semantic drift while preserving the authority invariant: the Agent chooses CFD design, the semantic layer describes what the authored OpenFOAM case means, validators test deterministic consistency, and gates decide execution permission.
 
 
 ## v2.19 model-transport and v2.18 runtime/boundary invariants

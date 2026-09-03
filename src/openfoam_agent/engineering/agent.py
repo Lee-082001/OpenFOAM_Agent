@@ -2060,7 +2060,12 @@ class CFDEngineeringAgent:
                                 phase="pre-solve",
                                 message="solve-ready completeness 검증 통과",
                                 status="success",
-                                metrics={"checkedFiles": len(presolve.checked_files), "meshPatches": len(presolve.mesh_patches)},
+                                details=tuple(item[:800] for item in presolve.warnings[:12]),
+                                metrics={
+                                    "checkedFiles": len(presolve.checked_files),
+                                    "meshPatches": len(presolve.mesh_patches),
+                                    "semanticWarnings": len(presolve.warnings),
+                                },
                             )
                         )
             if validation.valid:

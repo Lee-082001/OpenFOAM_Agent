@@ -9,8 +9,8 @@ from openfoam_agent.tools.safe_runner import SafeRunner
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_version_is_v2():
-    assert __version__ == "2.19.0"
+def test_release_version():
+    assert __version__ == "3.0.0"
 
 
 def test_legacy_engineering_modules_are_deleted():

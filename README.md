@@ -1,4 +1,11 @@
-# OpenFOAM Agent v2.19.0
+# OpenFOAM Agent v3.0.0
+
+
+## v3.0.0: OpenFOAM semantic PreSolve layer
+
+v3.0 replaces literal-name boundary validation with an explicit OpenFOAM semantic interpretation layer. `FoamDictionary` entries preserve key token form and ordering, `MeshIR` preserves patch type/group metadata, and `BoundaryFieldInterpreter` resolves effective patch fields using the OpenFOAM v13 order **exact patch -> patchGroup -> automatic empty -> regex/wildcard**. Overlapping groups/patterns retain dictionary ordering, quoted literals are not blindly classified as regex, and unsupported dynamic selectors become `INDETERMINATE` warnings rather than false missing-patch failures.
+
+The same effective boundary resolution now drives both boundary coverage and constraint-patch validation, so PreSolve validates what OpenFOAM will effectively apply instead of comparing two sets of literal names. Resolution objects retain match kind, certainty and trace evidence for deterministic diagnosis. This is the first consumer of the new `verification/foam_semantics/` layer; future OpenFOAM semantics can extend that layer without adding ad-hoc parsers to `presolve.py`. See `V3_CHANGES.md`.
 
 
 ## v2.19.0: Claude Code subscription backend
@@ -106,7 +113,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-v2.9 introduced the execution-plan fast path. Current v2.19.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v3.0.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -704,7 +711,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2.19.0 release tree currently passes **225 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v3.0.0 release tree currently passes **239 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;

@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from openfoam_agent.schemas.engineering import EngineeringPlan
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.workspace import CaseWorkspace
+from openfoam_agent.verification.foam_semantics import (
+    BoundaryFieldInterpreter,
+    ResolutionStatus,
+    parse_boundary_selectors,
+    parse_mesh_boundary,
+)
 
 
 _CORE_SYSTEM_FILES = ("system/controlDict", "system/fvSchemes", "system/fvSolution")
 _FIELD_DIR = "0/"
-_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]*$")
-# Narrow executable constraint types whose field patch type must match the mesh
-# patch type. Ordinary mesh types such as patch/wall intentionally are not here:
-# their field BCs may legitimately be fixedValue, zeroGradient, etc.
+# Narrow executable constraint types whose effective field patch type must match
+# the mesh patch type. Ordinary patch/wall boundaries intentionally are excluded.
 _CONSTRAINT_PATCH_TYPES = frozenset({"empty", "wedge", "symmetry", "symmetryPlane", "cyclic", "cyclicAMI"})
 
 
@@ -25,6 +28,8 @@ class PreSolveValidationResult:
     checked_files: list[str] = field(default_factory=list)
     mesh_patches: list[str] = field(default_factory=list)
     mesh_patch_types: dict[str, str] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    boundary_resolutions: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 class PreSolveCompletenessGate:
@@ -53,6 +58,8 @@ class PreSolveCompletenessGate:
         """
 
         failures: list[str] = []
+        warnings: list[str] = []
+        boundary_resolutions: dict[str, dict[str, str]] = {}
         required = list(dict.fromkeys([*_CORE_SYSTEM_FILES, *required_case_files]))
         field_files = [item for item in required_case_files if item.startswith(_FIELD_DIR)]
         if not field_files:
@@ -72,40 +79,71 @@ class PreSolveCompletenessGate:
                     failures.append(f"foamDictionary rejected required solve input {relative}: {excerpt}")
 
         boundary_path = self.workspace.resolve_case_path("constant/polyMesh/boundary")
+        mesh = None
         mesh_patches: list[str] = []
         mesh_patch_types: dict[str, str] = {}
         if not boundary_path.is_file():
             failures.append("constant/polyMesh/boundary is missing; mesh patch coverage cannot be verified.")
         else:
             boundary_text = boundary_path.read_text(encoding="utf-8", errors="replace")
-            mesh_patch_types = _parse_boundary_patch_types(boundary_text)
-            mesh_patches = list(mesh_patch_types) or _parse_boundary_patch_names(boundary_text)
+            mesh = parse_mesh_boundary(boundary_text)
+            mesh_patches = mesh.names
+            mesh_patch_types = mesh.patch_types
             if not mesh_patches:
                 failures.append("No mesh boundary patches could be parsed from constant/polyMesh/boundary.")
 
-        if mesh_patches:
+        if mesh is not None and mesh.patches:
+            interpreter = BoundaryFieldInterpreter()
             for relative in field_files:
                 path = self.workspace.resolve_case_path(relative)
                 if not path.is_file():
                     continue
                 text = path.read_text(encoding="utf-8", errors="replace")
-                field_patch_types = _parse_boundary_field_types(text)
-                field_patches = list(field_patch_types) or _parse_boundary_field_names(text)
-                missing = sorted(set(mesh_patches) - set(field_patches))
+                selectors = parse_boundary_selectors(text)
+                resolutions = interpreter.resolve_all(mesh, selectors)
+                boundary_resolutions[relative] = {
+                    patch_name: resolution.match_kind.value
+                    for patch_name, resolution in resolutions.items()
+                }
+
+                missing = sorted(
+                    patch_name
+                    for patch_name, resolution in resolutions.items()
+                    if resolution.status == ResolutionStatus.MISSING
+                )
                 if missing:
                     failures.append(
-                        f"Boundary coverage mismatch in {relative}; missing patchField entries: {missing}"
+                        f"Boundary coverage mismatch in {relative}; missing patchField entries: {missing} (no effective OpenFOAM selector matched)"
                     )
-                for patch_name in sorted(set(mesh_patch_types) & set(field_patch_types)):
-                    mesh_type = mesh_patch_types[patch_name]
-                    field_type = field_patch_types[patch_name]
+
+                indeterminate = [
+                    resolution
+                    for resolution in resolutions.values()
+                    if resolution.status == ResolutionStatus.INDETERMINATE
+                ]
+                for resolution in indeterminate:
+                    warnings.append(
+                        f"Boundary coverage is indeterminate in {relative} for patch {resolution.patch.name}: "
+                        f"{resolution.reason}. Python did not prove this patch missing."
+                    )
+
+                for patch_name, resolution in sorted(resolutions.items()):
+                    if resolution.status != ResolutionStatus.RESOLVED:
+                        continue
+                    mesh_type = resolution.patch.patch_type
+                    field_type = resolution.effective_field_type
+                    if not field_type:
+                        continue
                     if (
                         mesh_type in _CONSTRAINT_PATCH_TYPES
                         or field_type in _CONSTRAINT_PATCH_TYPES
                     ) and mesh_type != field_type:
+                        via = resolution.match_kind.value
+                        selector = resolution.selector.key.raw if resolution.selector is not None else "<OpenFOAM auto rule>"
                         failures.append(
                             "Boundary constraint-type mismatch in "
-                            f"{relative} for patch {patch_name}: mesh={mesh_type}, field={field_type}. "
+                            f"{relative} for patch {patch_name}: mesh={mesh_type}, field={field_type} "
+                            f"(resolved via {via} {selector}). "
                             "Constraint patches such as empty/wedge/symmetry/cyclic must match before foamRun."
                         )
                 if "internalField" not in text:
@@ -119,156 +157,10 @@ class PreSolveCompletenessGate:
             checked_files=required,
             mesh_patches=mesh_patches,
             mesh_patch_types=mesh_patch_types,
+            warnings=warnings,
+            boundary_resolutions=boundary_resolutions,
         )
 
     @staticmethod
     def _should_dictionary_validate(path: Path) -> bool:
         return path.suffix.lower() not in {".stl", ".obj", ".off", ".vtk", ".csv", ".dat", ".emesh"}
-
-
-def _parse_boundary_patch_names(text: str) -> list[str]:
-    start = _find_list_start_after_count(text)
-    if start is None:
-        return []
-    return _top_level_dictionary_names(text, start, closing=")")
-
-
-def _parse_boundary_field_names(text: str) -> list[str]:
-    match = re.search(r"\bboundaryField\b", text)
-    if match is None:
-        return []
-    brace = text.find("{", match.end())
-    if brace < 0:
-        return []
-    return _top_level_dictionary_names(text, brace, closing="}")
-
-
-def _parse_boundary_patch_types(text: str) -> dict[str, str]:
-    clean = _strip_comments(text)
-    start = _find_list_start_after_count(clean)
-    if start is None:
-        return {}
-    return _named_block_types(clean, start, list_closing=")")
-
-
-def _parse_boundary_field_types(text: str) -> dict[str, str]:
-    clean = _strip_comments(text)
-    match = re.search(r"\bboundaryField\b", clean)
-    if match is None:
-        return {}
-    brace = clean.find("{", match.end())
-    if brace < 0:
-        return {}
-    return _named_block_types(clean, brace, list_closing="}")
-
-
-def _named_block_types(text: str, open_index: int, *, list_closing: str) -> dict[str, str]:
-    """Return top-level block name -> declared `type` from an OpenFOAM section."""
-
-    clean = _strip_comments(text)
-    opener = "(" if list_closing == ")" else "{"
-    if open_index >= len(clean) or clean[open_index] != opener:
-        open_index = clean.find(opener, max(0, open_index - 32))
-        if open_index < 0:
-            return {}
-
-    result: dict[str, str] = {}
-    i = open_index + 1
-    depth = 0
-    while i < len(clean):
-        while i < len(clean) and clean[i].isspace():
-            i += 1
-        if i >= len(clean):
-            break
-        if clean[i] == list_closing and depth == 0:
-            break
-        name_match = re.match(r"[A-Za-z_][A-Za-z0-9_.:-]*", clean[i:])
-        if name_match is None:
-            i += 1
-            continue
-        name = name_match.group(0)
-        j = i + len(name)
-        while j < len(clean) and clean[j].isspace():
-            j += 1
-        if j >= len(clean) or clean[j] != "{":
-            i = j + 1
-            continue
-        end = _matching_brace(clean, j)
-        if end is None:
-            break
-        block = clean[j + 1 : end]
-        type_match = re.search(r"\btype\s+([^;{}]+);", block)
-        if type_match is not None:
-            declared = re.sub(r"\s+", " ", type_match.group(1)).strip()
-            if declared:
-                result[name] = declared.split()[0]
-        else:
-            result[name] = ""
-        i = end + 1
-    return result
-
-
-def _matching_brace(text: str, open_index: int) -> int | None:
-    depth = 0
-    for index in range(open_index, len(text)):
-        if text[index] == "{":
-            depth += 1
-        elif text[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return index
-    return None
-
-
-def _find_list_start_after_count(text: str) -> int | None:
-    clean = _strip_comments(text)
-    match = re.search(r"\n\s*\d+\s*\n\s*\(", clean)
-    if match is None:
-        match = re.search(r"\b\d+\s*\(", clean)
-    if match is None:
-        return None
-    return clean.find("(", match.start())
-
-
-def _top_level_dictionary_names(text: str, open_index: int, *, closing: str) -> list[str]:
-    clean = _strip_comments(text)
-    if open_index >= len(clean):
-        return []
-    opener = clean[open_index]
-    expected_open = "(" if closing == ")" else "{"
-    if opener != expected_open:
-        # Callers may have computed an index against the unstripped string. Re-find
-        # the corresponding section conservatively.
-        open_index = clean.find(expected_open, max(0, open_index - 32))
-        if open_index < 0:
-            return []
-    names: list[str] = []
-    depth = 0
-    token = ""
-    i = open_index + 1
-    while i < len(clean):
-        ch = clean[i]
-        if ch == expected_open:
-            depth += 1
-        elif ch == closing:
-            if depth == 0:
-                break
-            depth -= 1
-        if depth == 0:
-            if ch.isalnum() or ch in "_.:-":
-                token += ch
-            else:
-                if token and _WORD.match(token):
-                    j = i
-                    while j < len(clean) and clean[j].isspace():
-                        j += 1
-                    if j < len(clean) and clean[j] == "{":
-                        names.append(token)
-                token = ""
-        i += 1
-    return list(dict.fromkeys(names))
-
-
-def _strip_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-    return re.sub(r"//.*?$", "", text, flags=re.MULTILINE)
