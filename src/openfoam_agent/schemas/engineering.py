@@ -109,6 +109,73 @@ _BINDABLE_PLAN_FIELDS = Literal[
 ]
 
 
+class CaseContentAssertion(_EngineeringModel):
+    """Agent-chosen exact case evidence for one confirmed fact."""
+
+    path: str = Field(min_length=1, max_length=240)
+    contains: list[str] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_snippets(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        raw = normalized.get("contains")
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple)):
+            raw = []
+        snippets: list[str] = []
+        for item in raw:
+            text = str(item or "").strip()[:500]
+            if text and text not in snippets:
+                snippets.append(text)
+            if len(snippets) >= 8:
+                break
+        normalized["contains"] = snippets
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_assertion(self) -> Self:
+        if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", self.path) or ".." in self.path:
+            raise ValueError(f"Unsafe semantic assertion path: {self.path}")
+        return self
+
+
+class NumericEvidenceTerm(_EngineeringModel):
+    """One scalar token with exact evidence from a case artifact."""
+
+    path: str = Field(min_length=1, max_length=240)
+    excerpt: str = Field(default="", max_length=500)
+    value_token: str = Field(default="", max_length=80)
+    multiplier: float = 1.0
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_protocol_text(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        normalized["excerpt"] = str(normalized.get("excerpt") or "").strip()[:500]
+        normalized["value_token"] = str(normalized.get("value_token") or "").strip()[:80]
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_term(self) -> Self:
+        if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", self.path) or ".." in self.path:
+            raise ValueError(f"Unsafe numeric semantic evidence path: {self.path}")
+        return self
+
+
+class NumericRelationAssertion(_EngineeringModel):
+    """Generic numerator-product / denominator-product semantic relation."""
+
+    numerator: list[NumericEvidenceTerm] = Field(default_factory=list, max_length=8)
+    denominator: list[NumericEvidenceTerm] = Field(default_factory=list, max_length=8)
+    relative_tolerance: float = 1e-6
+
+
 class ConfirmedFactBinding(_EngineeringModel):
     """Audit mapping from a confirmed fact to its claimed implementation.
 
@@ -121,6 +188,8 @@ class ConfirmedFactBinding(_EngineeringModel):
     fact_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]*$")
     case_files: list[str] = Field(default_factory=list, max_length=12)
     plan_fields: list[_BINDABLE_PLAN_FIELDS] = Field(default_factory=list, max_length=12)
+    case_assertions: list[CaseContentAssertion] = Field(default_factory=list, max_length=12)
+    numeric_relation: NumericRelationAssertion | None = None
     explanation: str = Field(min_length=1, max_length=300)
 
     @model_validator(mode="before")
@@ -154,6 +223,21 @@ class ConfirmedFactBinding(_EngineeringModel):
         for path in self.case_files:
             if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
                 raise ValueError(f"Unsafe case implementation ref: {path}")
+        assertion_paths = [item.path for item in self.case_assertions]
+        if len(assertion_paths) != len(set(assertion_paths)):
+            raise ValueError("Confirmed fact binding contains duplicate case assertion paths.")
+        if not set(assertion_paths).issubset(set(self.case_files)):
+            raise ValueError("Case semantic assertions must reference paths declared in case_files.")
+        relation_paths = {
+            item.path
+            for item in (
+                [*self.numeric_relation.numerator, *self.numeric_relation.denominator]
+                if self.numeric_relation is not None
+                else []
+            )
+        }
+        if not relation_paths.issubset(set(self.case_files)):
+            raise ValueError("Numeric semantic relation terms must reference paths declared in case_files.")
         return self
 
     @property
@@ -221,8 +305,17 @@ class EngineeringPlan(_EngineeringModel):
         return self
 
     def digest(self) -> str:
+        data = self.model_dump(mode="json")
+        # Empty v2.15 semantic assertion fields must not invalidate case seals
+        # created by older releases.  Non-empty assertions remain part of the
+        # digest and are therefore revision-bound like every other plan field.
+        for binding in data.get("confirmed_fact_bindings", []):
+            if not binding.get("case_assertions"):
+                binding.pop("case_assertions", None)
+            if binding.get("numeric_relation") is None:
+                binding.pop("numeric_relation", None)
         payload = json.dumps(
-            self.model_dump(mode="json"),
+            data,
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,

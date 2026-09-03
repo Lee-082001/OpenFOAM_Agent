@@ -67,6 +67,7 @@ class CFDIntakeSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    semantic_contract_version: Literal["1", "2"] = "1"
     title: str = Field(min_length=1)
     facts: list[IntakeFact] = Field(default_factory=list)
     blocking_unknowns: list[BlockingUnknown] = Field(default_factory=list, max_length=3)
@@ -97,8 +98,14 @@ class CFDIntakeSpec(BaseModel):
         return next((fact for fact in self.facts if fact.id == fact_id), None)
 
     def digest(self) -> str:
+        data = self.model_dump(mode="json")
+        # v2.15 adds an explicit semantic-contract version.  Preserve the exact
+        # pre-v2.15 digest for legacy/default v1 intakes so existing confirmed
+        # states remain rehydratable after upgrade.
+        if self.semantic_contract_version == "1":
+            data.pop("semantic_contract_version", None)
         payload = json.dumps(
-            self.model_dump(mode="json"),
+            data,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

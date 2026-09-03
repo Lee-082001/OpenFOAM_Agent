@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,11 @@ _NEGATIVE = (
 )
 _MESH_OK = re.compile(r"^\s*Mesh OK\.\s*$", re.MULTILINE)
 _DATA_EXTENSIONS = {".stl", ".obj", ".off", ".vtk", ".csv", ".dat", ".eMesh"}
+_NUMBER_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?(?![A-Za-z0-9_.])"
+)
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LINE_COMMENT = re.compile(r"//[^\n\r]*")
 
 
 @dataclass
@@ -68,6 +74,7 @@ class DeterministicSafetyGate:
                 f"Engineering plan fact implementation binding mismatch; missing={missing}, extra={extra}."
             )
         for binding in plan.confirmed_fact_bindings:
+            fact = intake.fact(binding.fact_id)
             for relative in binding.case_files:
                 try:
                     bound_path = self.workspace.resolve_case_path(relative)
@@ -78,6 +85,57 @@ class DeterministicSafetyGate:
                     failures.append(
                         f"Confirmed fact binding {binding.fact_id} references missing case file {relative}."
                     )
+            for assertion in binding.case_assertions:
+                try:
+                    path = self.workspace.resolve_case_path(assertion.path, must_exist=True)
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                except (WorkspaceSafetyError, FileNotFoundError) as exc:
+                    failures.append(
+                        f"Semantic assertion for {binding.fact_id} cannot read {assertion.path}: {exc}"
+                    )
+                    continue
+                if not assertion.contains:
+                    failures.append(
+                        f"Semantic assertion for {binding.fact_id} has no case snippets to verify."
+                    )
+                    continue
+                for snippet in assertion.contains:
+                    if not _contains_semantic_snippet(content, snippet):
+                        failures.append(
+                            f"Semantic assertion for {binding.fact_id} is not present in {assertion.path}: {snippet!r}."
+                        )
+
+            if binding.numeric_relation is not None:
+                if fact is None:
+                    failures.append(
+                        f"Numeric semantic assertion references unknown confirmed fact {binding.fact_id}."
+                    )
+                else:
+                    failures.extend(
+                        self._validate_numeric_relation(binding.fact_id, fact.value, binding.numeric_relation)
+                    )
+
+        # Selected high-impact invariants must carry machine-checkable implementation
+        # evidence.  Python does not decide the CFD implementation; the Agent chooses
+        # the snippets/relation and Python verifies them against the current case.
+        if intake.semantic_contract_version == "2":
+            binding_by_id = {item.fact_id: item for item in plan.confirmed_fact_bindings}
+            for fact in intake.facts:
+                if fact.category == "context":
+                    continue
+                binding = binding_by_id.get(fact.id)
+                if binding is None:
+                    continue
+                if fact.category in {"classification", "temporal"} and not binding.case_assertions:
+                    failures.append(
+                        f"Confirmed {fact.category} fact {fact.id} requires at least one case semantic assertion."
+                    )
+                if fact.source == "user" and fact.category in {"physics", "scale", "property"}:
+                    numeric_targets = _finite_numbers(fact.value)
+                    if len(numeric_targets) == 1 and binding.numeric_relation is None:
+                        failures.append(
+                            f"Numeric confirmed fact {fact.id} requires a machine-checkable numeric relation assertion."
+                        )
 
         detected = self.tools.detected_foundation_version()
         if detected and plan.openfoam_version != detected:
@@ -103,6 +161,92 @@ class DeterministicSafetyGate:
                 )
 
         return SafetyCheckResult(valid=not failures, failures=failures)
+
+    def _validate_numeric_relation(self, fact_id: str, fact_value: str, relation) -> list[str]:
+        failures: list[str] = []
+        if not relation.numerator:
+            failures.append(
+                f"Numeric semantic assertion for {fact_id} requires at least one numerator term."
+            )
+            return failures
+        if not math.isfinite(relation.relative_tolerance) or not (
+            0.0 < relation.relative_tolerance <= 0.05
+        ):
+            failures.append(
+                f"Numeric semantic assertion for {fact_id} has an invalid relative tolerance."
+            )
+            return failures
+        targets = _finite_numbers(fact_value)
+        if len(targets) != 1:
+            failures.append(
+                f"Numeric semantic assertion for {fact_id} requires exactly one numeric target in the confirmed fact value."
+            )
+            return failures
+        target = targets[0]
+        numerator = 1.0
+        denominator = 1.0
+        for side, terms in (("numerator", relation.numerator), ("denominator", relation.denominator)):
+            for term in terms:
+                try:
+                    path = self.workspace.resolve_case_path(term.path, must_exist=True)
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                except (WorkspaceSafetyError, FileNotFoundError) as exc:
+                    failures.append(
+                        f"Numeric semantic evidence for {fact_id} cannot read {term.path}: {exc}"
+                    )
+                    continue
+                if not _contains_semantic_snippet(content, term.excerpt):
+                    failures.append(
+                        f"Numeric semantic evidence for {fact_id} is not present in {term.path}."
+                    )
+                    continue
+                excerpt_numbers = _numeric_tokens(term.excerpt)
+                try:
+                    token_value = float(term.value_token)
+                except ValueError:
+                    failures.append(
+                        f"Numeric semantic evidence for {fact_id} has an invalid value token."
+                    )
+                    continue
+                if not math.isfinite(token_value):
+                    failures.append(
+                        f"Numeric semantic evidence for {fact_id} has a non-finite value token."
+                    )
+                    continue
+                if not any(
+                    token == term.value_token
+                    or math.isclose(value, token_value, rel_tol=1e-12, abs_tol=1e-12)
+                    for token, value in excerpt_numbers
+                ):
+                    failures.append(
+                        f"Numeric semantic value token for {fact_id} is not evidenced by its submitted excerpt."
+                    )
+                    continue
+                if not math.isfinite(term.multiplier) or abs(term.multiplier) > 1e9:
+                    failures.append(
+                        f"Numeric semantic evidence for {fact_id} has an invalid multiplier."
+                    )
+                    continue
+                effective_value = token_value * term.multiplier
+                if side == "numerator":
+                    numerator *= effective_value
+                else:
+                    denominator *= effective_value
+        if denominator == 0.0:
+            failures.append(f"Numeric semantic assertion for {fact_id} divides by zero.")
+            return failures
+        computed = numerator / denominator
+        if not math.isclose(
+            computed,
+            target,
+            rel_tol=relation.relative_tolerance,
+            abs_tol=max(1e-12, abs(target) * relation.relative_tolerance),
+        ):
+            failures.append(
+                f"Numeric semantic assertion for {fact_id} recomputes to {computed}, "
+                f"not the confirmed target {target}."
+            )
+        return failures
 
     def validate_native_inputs(self) -> SafetyCheckResult:
         failures = list(self.workspace.validate_all_content())
@@ -157,6 +301,34 @@ def parse_check_mesh_evidence(result: ToolResult) -> MeshEvidence:
 
 def _combined_output(result: ToolResult) -> str:
     return "\n".join(part for part in (result.stdout, result.stderr) if part)
+
+
+def _numeric_tokens(text: str) -> list[tuple[str, float]]:
+    result: list[tuple[str, float]] = []
+    for match in _NUMBER_TOKEN.finditer(text):
+        token = match.group(0)
+        value = float(token)
+        if math.isfinite(value):
+            result.append((token, value))
+    return result
+
+
+def _finite_numbers(text: str) -> list[float]:
+    return [value for _, value in _numeric_tokens(text)]
+
+
+def _contains_semantic_snippet(content: str, snippet: str) -> bool:
+    """Whitespace-insensitive containment for Agent-carried case evidence.
+
+    OpenFOAM dictionary serialization may change indentation/newlines without
+    changing a value.  Treat whitespace as formatting so semantic assertions do
+    not fail merely because Python rendered the same dictionary differently.
+    """
+
+    active_content = _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", content))
+    normalized_content = " ".join(active_content.split())
+    normalized_snippet = " ".join(snippet.split())
+    return bool(normalized_snippet) and normalized_snippet in normalized_content
 
 
 def _int_match(pattern: re.Pattern[str], text: str) -> int | None:

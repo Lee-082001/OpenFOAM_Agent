@@ -46,6 +46,7 @@ def _user_evidence(request: UserRequest) -> list[str]:
 
 
 def validate_intake_provenance(spec: CFDIntakeSpec, request: UserRequest) -> None:
+    _normalize_review_critical_source_attribution(spec)
     user_evidence = _user_evidence(request)
     for fact in spec.facts:
         if fact.source == "user":
@@ -100,6 +101,94 @@ def validate_intake_provenance(spec: CFDIntakeSpec, request: UserRequest) -> Non
             raise ValueError("classification.problem_type has an unsupported value.")
 
 
+_CLASSIFICATION_DIRECT_CUES: dict[str, tuple[str, ...]] = {
+    "internal_flow": (
+        "internal_flow",
+        "internal flow",
+        "internal-flow",
+        "내부유동",
+        "내부 유동",
+        "channel flow",
+        "pipe flow",
+        "duct flow",
+    ),
+    "external_flow": (
+        "external_flow",
+        "external flow",
+        "external-flow",
+        "외부유동",
+        "외부 유동",
+        "freestream",
+        "free stream",
+    ),
+    "heat_transfer": ("heat_transfer", "heat transfer", "열전달", "열 전달"),
+    "multiphase": ("multiphase", "multi-phase", "다상", "다상유동", "다상 유동"),
+    "species_transport": (
+        "species_transport",
+        "species transport",
+        "species",
+        "종수송",
+        "종 수송",
+    ),
+    "custom": ("custom", "사용자 정의"),
+}
+
+_TEMPORAL_DIRECT_CUES = (
+    "steady",
+    "transient",
+    "unsteady",
+    "time-dependent",
+    "time dependent",
+    "정상상태",
+    "정상 상태",
+    "비정상",
+    "시간의존",
+    "시간 의존",
+)
+
+
+def _normalize_review_critical_source_attribution(spec: CFDIntakeSpec) -> None:
+    """Demote unsupported ``source=user`` claims for high-impact interpretations.
+
+    This is provenance enforcement, not CFD decision-making.  In particular a user
+    saying that a cylinder is *inside a rectangular computational domain* is not
+    deterministic evidence that the physical problem is an internal/channel flow.
+    Likewise, requesting vortex shedding does not mean the user literally supplied
+    the word "transient".  Such interpretations may still be correct, but they must
+    be presented to the human as ``derived`` before /confirm freezes them.
+    """
+
+    to_demote: list[IntakeFact] = []
+    for fact in spec.facts:
+        if fact.source != "user" or not fact.evidence:
+            continue
+        evidence = fact.evidence.casefold()
+        supported = True
+        if fact.id == "classification.problem_type" or fact.category == "classification":
+            cues = _CLASSIFICATION_DIRECT_CUES.get(fact.value.casefold(), ())
+            supported = bool(cues) and any(cue.casefold() in evidence for cue in cues)
+        elif fact.id == "temporal.behavior" or fact.category == "temporal":
+            supported = any(cue.casefold() in evidence for cue in _TEMPORAL_DIRECT_CUES)
+        if not supported:
+            to_demote.append(fact)
+
+    remaining_direct_ids = [
+        fact.id
+        for fact in spec.facts
+        if fact.source == "user"
+        and fact.category != "context"
+        and fact not in to_demote
+    ]
+    for fact in to_demote:
+        fact.source = "derived"
+        fact.evidence = None
+        fact.reason = (
+            "The value is a routing/physics interpretation inferred from the request; "
+            "the user did not explicitly state this normalized classification."
+        )
+        fact.depends_on = [item for item in remaining_direct_ids if item != fact.id][:20]
+
+
 def _finite_numbers(text: str) -> list[tuple[str, float]]:
     matches = re.findall(
         r"(?<![A-Za-z0-9_.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -123,6 +212,7 @@ def confirmed_intake_definition(state: CFDState) -> dict[str, object]:
             continue
         facts.append(fact.model_dump(mode="json", exclude={"evidence"}))
     return {
+        "semantic_contract_version": state.intake.semantic_contract_version,
         "title": state.intake.title,
         "facts": facts,
         "status": state.intake.status,
@@ -203,9 +293,12 @@ def _build_intake_validation_repair_prompt(
         "3. If a fact synthesizes or summarizes information from multiple user turns, "
         "use source=derived, provide a reason, and set depends_on to the direct fact IDs "
         "that support it. request.summary commonly needs source=derived after follow-up turns.\n"
-        "4. Do not delete explicit user numbers or other supported facts merely to pass "
+        "4. classification.problem_type and temporal.behavior are review-critical. Mark them "
+        "source=user only when the exact user evidence explicitly states the normalized class/time behavior; "
+        "otherwise use source=derived. A rectangular computational domain around an obstacle does not by itself mean internal_flow.\n"
+        "5. Do not delete explicit user numbers or other supported facts merely to pass "
         "validation. Preserve later-turn overrides.\n"
-        "5. Regenerate the COMPLETE CFDIntakeSpec, not only the offending fact."
+        "6. Regenerate the COMPLETE CFDIntakeSpec, not only the offending fact."
     )
     return (
         base_prompt
@@ -250,6 +343,12 @@ class IntakeAgent:
             )
             try:
                 validate_intake_provenance(result, state.user_request)
+                # IntakeAgent-issued definitions opt into the v2 semantic-fidelity
+                # contract. Persisted/directly constructed v1 specs remain loadable
+                # for backward compatibility, but new interactive/cloud runs get
+                # assertion-backed downstream verification after /confirm.
+                if result.semantic_contract_version != "2":
+                    result = result.model_copy(update={"semantic_contract_version": "2"})
                 validation_error = None
                 break
             except ValueError as exc:

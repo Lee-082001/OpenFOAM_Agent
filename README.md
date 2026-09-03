@@ -1,4 +1,4 @@
-# OpenFOAM Agent v2.14.0
+# OpenFOAM Agent v2.15.0
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -10,6 +10,14 @@ v2 is intentionally not a collection of hand-written CFD case templates. There i
 
 
 
+
+## v2.15.0: semantic fidelity contract (L2 foundation)
+
+v2.15 adds the first production **L2 Semantic Fidelity** contract on top of the existing execution-integrity gates. New IntakeAgent-issued definitions use `semantic_contract_version=2`. Review-critical routing interpretations such as `classification.problem_type` and `temporal.behavior` may be marked `source=user` only when the user's exact evidence explicitly states that normalized interpretation; otherwise deterministic provenance handling demotes the attribution to `derived` without changing the Agent's chosen value. The CLI highlights these as `derived/review-critical` before `/confirm`, because confirmation makes the interpretation immutable downstream. In particular, a cylinder being geometrically inside a rectangular computational domain is not treated as direct user evidence of `internal_flow`.
+
+Confirmed-fact bindings can now carry **case semantic assertions** (Agent-selected snippets that must actually be present in the current `0/`, `constant/`, or `system/` artifacts) and a CFD-agnostic **numeric relation assertion**. For a direct user numeric physics/scale/property target such as `Re=1000`, the Agent supplies the actual case scalar tokens and the generic numerator-product/denominator-product relation; individual terms may carry an Agent-selected numeric multiplier so an actual geometry token such as radius `0.5` can participate as `2×0.5`. Python only re-reads those artifacts and recomputes the submitted arithmetic against the confirmed target. Comment-only prose is stripped before evidence matching, so an Agent cannot satisfy the contract merely by writing `// Re=1000` or another self-claim into a case file. Python does not choose the formula, reference velocity, length scale, viscosity, solver, BCs, or mesh. New semantic-contract-v2 cases require case assertions for confirmed classification/temporal facts and a numeric relation for direct single-number physics/scale/property facts. These checks run again after repair, so a stale semantic assertion cannot silently authorize a modified case.
+
+The new contract is backward compatible: legacy v1 intakes remain loadable, and empty v2.15 assertion fields are excluded from legacy canonical digests so existing confirmed-intake hashes and CaseSeals do not become stale merely because the software was upgraded. Assertion prose is whitespace-normalized during verification, and incomplete non-safety assertion payloads become normal deterministic failures rather than large Structured Output/Pydantic crashes. Regression suite: **200 passed**. See `V2_15_CHANGES.md`.
 
 ## v2.14.0: evidence-gap lifecycle + protocol-resilience audit
 
@@ -72,7 +80,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-v2.9 introduced the execution-plan fast path. Current v2.14.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v2.15.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -639,7 +647,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2.14.0 release tree currently passes **190 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v2.15.0 release tree currently passes **200 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;

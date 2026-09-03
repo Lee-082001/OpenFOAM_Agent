@@ -1,4 +1,19 @@
-# OpenFOAM Agent v2.14 Architecture
+# OpenFOAM Agent v2.15 Architecture
+
+## v2.15 semantic-fidelity boundary
+
+The workflow now separates two kinds of trust that were previously easy to conflate:
+
+```text
+L1 Execution Integrity  -> did this exact sealed case really pass the required tools and run?
+L2 Semantic Fidelity    -> does the executable case carry machine-checkable evidence for the confirmed CFD facts?
+```
+
+Intake provenance is part of L2. A direct user fact must remain distinguishable from an Agent interpretation. High-impact routing/time interpretations (`classification`, `temporal`) are conservatively downgraded to `derived` when the exact user evidence does not explicitly state that normalized interpretation. This does not let Python choose the correct CFD class; the Agent still owns that judgment and the human sees the derived interpretation before `/confirm` freezes it.
+
+After confirmation, the Engineering Agent carries evidence with the implementation rather than merely naming files. `ConfirmedFactBinding.case_assertions` selects exact snippets from current case artifacts, while `numeric_relation` carries a generic product/division arithmetic relation whose scalar tokens are themselves evidenced by case excerpts. Python verifies path safety, current-file presence, the submitted scalar tokens and arithmetic result. It never maps Reynolds/Mach/etc. names to formulas. In semantic-contract v2, classification/temporal facts require case assertions, while direct single-number physics/scale/property facts require a numeric relation.
+
+Semantic evidence participates in the EngineeringPlan digest when present, so CaseSeal revision binding covers it. Empty new fields are omitted from legacy digest canonicalization, preserving v2.14 and earlier seals across upgrade. Runtime repair reuses the approved plan and therefore must continue to satisfy the same assertions; a repair that changes asserted physical implementation cannot silently retry the solver with stale semantic evidence.
 
 ## v2.14 protocol-resilience boundary
 

@@ -670,10 +670,25 @@ def _print_human_report(report: dict[str, Any]) -> None:
     intake = report["intake"]
     if intake:
         print(f"intake: {intake['title']} [{intake['status']}]")
+        review_critical: list[str] = []
         for fact in intake["facts"]:
             if fact["category"] != "context":
                 unit = f" {fact['unit']}" if fact["unit"] else ""
-                print(f"- {fact['id']}: {fact['value']}{unit} [{fact['source']}]")
+                source_label = fact["source"]
+                if fact["source"] == "derived" and fact["category"] in {
+                    "classification",
+                    "temporal",
+                    "motion",
+                    "boundary",
+                }:
+                    source_label = "derived/review-critical"
+                    reason = (fact.get("reason") or "derived interpretation").strip()
+                    review_critical.append(f"{fact['id']}={fact['value']}{unit} — {reason}")
+                print(f"- {fact['id']}: {fact['value']}{unit} [{source_label}]")
+        if review_critical and report["final_state"] == State.INTAKE_REVIEW_REQUIRED.value:
+            print("review-critical derived interpretations (these become immutable on /confirm):")
+            for item in review_critical:
+                print(f"- {item}")
         if intake["blocking_unknowns"]:
             print("blocking questions:")
             for item in intake["blocking_unknowns"]:
@@ -690,6 +705,21 @@ def _print_human_report(report: dict[str, Any]) -> None:
             print("engineering assumptions:")
             for assumption in plan["assumptions"]:
                 print(f"- {assumption}")
+        if intake and intake.get("semantic_contract_version") == "2":
+            bindings = plan.get("confirmed_fact_bindings") or []
+            machine_asserted = sum(
+                1
+                for item in bindings
+                if item.get("case_assertions") or item.get("numeric_relation") is not None
+            )
+            numeric_relations = sum(
+                1 for item in bindings if item.get("numeric_relation") is not None
+            )
+            print(
+                "semantic fidelity: contract=v2, "
+                f"machineAssertedFacts={machine_asserted}/{len(bindings)}, "
+                f"numericRelations={numeric_relations}"
+            )
     budget = report.get("budget")
     if budget:
         extensions = budget["engineering_extensions"]

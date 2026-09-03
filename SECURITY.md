@@ -1,5 +1,9 @@
 # v2.4 Security and Trust Boundary
 
+## Semantic-fidelity assertions (v2.15)
+
+Semantic assertions do not expand execution authority. Agent-selected assertion paths are restricted to the same `0/`, `constant/`, and `system/` sandbox as confirmed-fact bindings. Python only checks current artifact content and bounded arithmetic supplied by the Agent; it does not execute assertion text, evaluate arbitrary expressions, load code, choose a CFD formula, or relax any workspace/native-command gate. `//` and `/* ... */` comments are removed before semantic-evidence matching so model-authored comments cannot self-certify a fact. Unsafe paths and conflicting binding representations remain hard failures. Incomplete assertion content is treated as a deterministic failed claim rather than executable input.
+
 ## Local Ollama transport boundary (v2.7)
 
 The Ollama backend accepts only loopback base URLs (`localhost`, `127.0.0.1`, `::1`). The Agent never opens, binds, or exposes TCP port 11434 and never connects directly to `mlfm4.knu.ac.kr:11434`. The user establishes SSH local forwarding separately. `--base-url` exists for local tunnel/port customization, not for bypassing the loopback boundary.
