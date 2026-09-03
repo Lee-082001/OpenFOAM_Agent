@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: openfoam-agent
-Version: 2.11.0
+Version: 2.16.0
 Summary: Agent-owned OpenFOAM CFD engineering behind deterministic safety gates
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
@@ -9,7 +9,12 @@ Requires-Dist: pydantic<3,>=2.8
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8; extra == "dev"
 
-# OpenFOAM Agent v2.11.0
+# OpenFOAM Agent v2.16.0
+
+## v2.16.0: compact artifact-pointer semantic evidence
+
+v2.16 keeps the v2.15 provenance and semantic-fidelity contract but stops asking the model to duplicate long case excerpts inside `EngineeringPlan`. Structural assertions now prefer `path + entry_path + expected_value`, while numeric relations point to actual case values with `entry_path` or a short raw-file anchor. Python extracts values from the current case before checking the Agent-submitted relation. Legacy v2.15 excerpt assertions remain readable. The CLI output ceiling is 24000 tokens as a safety margin for complete-case Structured Output; normal token use is still governed by compact schemas and model output.
+
 
 OpenFOAM Agent v2 is an **agent-owned CFD engineering system with deterministic safety gates**.
 
@@ -20,6 +25,32 @@ The central design rule is:
 v2 is intentionally not a collection of hand-written CFD case templates. There is no production rule such as `if vortex shedding -> square obstacle template`, `if static -> snappyHexMesh`, or `if prescribed deformation -> displacementLaplacian`.
 
 
+
+
+## v2.15.0: semantic fidelity contract (L2 foundation)
+
+v2.15 adds the first production **L2 Semantic Fidelity** contract on top of the existing execution-integrity gates. New IntakeAgent-issued definitions use `semantic_contract_version=2`. Review-critical routing interpretations such as `classification.problem_type` and `temporal.behavior` may be marked `source=user` only when the user's exact evidence explicitly states that normalized interpretation; otherwise deterministic provenance handling demotes the attribution to `derived` without changing the Agent's chosen value. The CLI highlights these as `derived/review-critical` before `/confirm`, because confirmation makes the interpretation immutable downstream. In particular, a cylinder being geometrically inside a rectangular computational domain is not treated as direct user evidence of `internal_flow`.
+
+Confirmed-fact bindings can now carry **case semantic assertions** (Agent-selected snippets that must actually be present in the current `0/`, `constant/`, or `system/` artifacts) and a CFD-agnostic **numeric relation assertion**. For a direct user numeric physics/scale/property target such as `Re=1000`, the Agent supplies the actual case scalar tokens and the generic numerator-product/denominator-product relation; individual terms may carry an Agent-selected numeric multiplier so an actual geometry token such as radius `0.5` can participate as `2×0.5`. Python only re-reads those artifacts and recomputes the submitted arithmetic against the confirmed target. Comment-only prose is stripped before evidence matching, so an Agent cannot satisfy the contract merely by writing `// Re=1000` or another self-claim into a case file. Python does not choose the formula, reference velocity, length scale, viscosity, solver, BCs, or mesh. New semantic-contract-v2 cases require case assertions for confirmed classification/temporal facts and a numeric relation for direct single-number physics/scale/property facts. These checks run again after repair, so a stale semantic assertion cannot silently authorize a modified case.
+
+The new contract is backward compatible: legacy v1 intakes remain loadable, and empty v2.15 assertion fields are excluded from legacy canonical digests so existing confirmed-intake hashes and CaseSeals do not become stale merely because the software was upgraded. Assertion prose is whitespace-normalized during verification, and incomplete non-safety assertion payloads become normal deterministic failures rather than large Structured Output/Pydantic crashes. Regression suite at v2.15: **200 passed**. See `V2_15_CHANGES.md`.
+
+## v2.14.0: evidence-gap lifecycle + protocol-resilience audit
+
+v2.14 hardens the LLM/Python protocol after production runs showed that harmless Structured Output shape mistakes could still terminate an otherwise valid CFD workflow. Evidence gaps now have an explicit lifecycle. A gap ID is single-use: after deterministic retrieval it becomes `evidence_available` or `stagnant`; proceeding to case execution marks available gaps `satisfied`. If more external evidence is genuinely needed, the Agent must declare a new, more-specific gap with `refines_gap_id`, which supersedes the earlier gap. Repeating an already retrieved gap is refused without consuming another retrieval-cycle budget. Query strings, opaque gap IDs, whitespace, overlong query prose, invalid retrieval scope and read-count formatting are normalized deterministically because they are retrieval protocol metadata rather than CFD engineering decisions.
+
+OpenAI Structured Output now has one bounded **protocol-repair attempt**, analogous to the existing local-model repair layer. If `responses.parse` raises a Pydantic validation error, the adapter asks the same model once to correct only the schema/protocol shape while explicitly preserving confirmed CFD facts. This protection applies to Intake, Engineering, Post-processing and Feedback/Review because they share the adapter; it does not bypass deterministic workspace safety, confirmed-fact coverage, solver/provider consistency, case sealing, pre-solve, native evidence or human approval gates. Repair schemas also accept syntactic no-op payloads so they can be rejected as normal deterministic unsuccessful actions rather than exploding into large union-validation traces. See `V2_14_CHANGES.md`.
+
+## v2.13.0: evidence-gap retrieval + grouped runtime delta repair
+
+v2.13 replaces free-form prepare search loops with **evidence-gap-driven batch retrieval**. The Engineering Agent must distinguish user-required unknowns, Agent-owned engineering choices, and genuinely external tool/version evidence gaps. Only the last category may invoke `gather_evidence`. One LLM turn can request up to four independent gaps; deterministic Python searches the capability graph and trusted installed OpenFOAM references in a batch, optionally reads a bounded number of top reference matches, and records canonical evidence IDs per gap. Repeating a gap is useful only when it adds new evidence: a zero-novelty retrieval marks that gap `stagnant`, and subsequent retrieval for the same gap is refused. A small retrieval-cycle hard fuse remains only as an emergency bound; once reached, the prepare Structured Output contract itself shrinks to `execute_case_plan | block`.
+
+Runtime repair now has a separate `repair_runtime_case` contract. Exact edits are grouped per file (`file_patches[].edits[]`) and applied sequentially, so several legitimate fixes to one `fvSchemes`/`fvSolution` file no longer fail schema validation merely because the path appears more than once. Automatic runtime repair also receives a bounded native-error + relevant-case-file slice instead of the full engineering history/plan replay. The approved solver remains immutable and every resulting edit still passes the existing exact-match workspace safety, dictionary/pre-solve, mesh-freshness and resealing gates. Legacy `repair_case_plan` and retained-candidate patching also allow multiple sequential exact patches to the same file while still forbidding patch+replacement conflicts. See `V2_13_CHANGES.md`.
+
+
+## v2.12.0: retained candidate plan + delta authoring repair
+
+v2.12.0 keeps v2.11 transactional workspace authoring but no longer asks the LLM to regenerate the entire `execute_case_plan` after a pre-commit serialization or workspace-safety rejection. The complete rejected candidate remains only in Python memory; the retry contract accepts a small `repair_candidate_case_plan` delta (exact patch, replacement raw file, replacement typed dictionary, or dropped optional path) or `block`. Python applies that delta to the retained candidate, re-runs serialization and whole-bundle authoring preflight, and commits the full bundle only after it passes. This preserves all-or-nothing workspace semantics while avoiding large repeated Structured Output objects and the JSON truncation/token failure mode seen with complete-plan retries. Plan metadata repair remains a post-commit `RepairTurn` responsibility.
 
 ## v2.11.0: transactional case authoring and bounded complete-plan retry
 
@@ -65,7 +96,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-v2.9 introduced the execution-plan fast path. Current v2.11.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v2.16.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -89,8 +120,8 @@ Natural-language request
   -> user /confirm
   -> CFDEngineeringAgent
        - inspect installed OpenFOAM environment
-       - query capability evidence
-       - search installed official tutorials/source
+       - declare explicit tool/version evidence gaps when needed
+       - batch-retrieve capability + trusted installed OpenFOAM evidence with novelty tracking
        - choose solver / mesh / BC / numerics / motion strategy
        - write and patch case files
        - run allowlisted OpenFOAM validation and mesh tools
@@ -454,7 +485,7 @@ Default model-facing hard caps are:
 - engineering recent observations: 12 bounded excerpts;
 - post-processing recent observations: 8 bounded excerpts;
 - post-processing result inventory: 80 representative file entries;
-- OpenAI response cap: `--llm-max-output-tokens 16000`.
+- OpenAI response cap: `--llm-max-output-tokens 24000`.
 
 Runtime residual evidence is projected as total sample count, latest residuals by recent field, and a short recent tail instead of every parsed residual sample. The original `RuntimeReport` remains unchanged locally. Deterministic plan/evidence validation also continues to use the full local event history rather than trusting the compact model projection.
 
@@ -470,7 +501,7 @@ Before each structured model call the progress stream reports approximate reques
 ```bash
 # default
 openfoam-agent --interactive --backend openai --confirm-api-calls \
-  --llm-max-output-tokens 16000
+  --llm-max-output-tokens 24000
 
 # increase only if a legitimately large single case-file action needs it
 openfoam-agent --interactive --backend openai --confirm-api-calls \
@@ -632,7 +663,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2.11.0 release tree currently passes **177 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v2.16.0 release tree currently passes **207 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;

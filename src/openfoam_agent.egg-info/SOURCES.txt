@@ -64,6 +64,10 @@ src/openfoam_agent/workflow/state.py
 src/openfoam_agent/workflow/states.py
 tests/test_v210_semantic_bindings.py
 tests/test_v210_token_optimization.py
+tests/test_v213_evidence_gap_and_runtime_delta.py
+tests/test_v214_protocol_resilience.py
+tests/test_v215_semantic_fidelity.py
+tests/test_v216_compact_semantic_evidence.py
 tests/test_v21_postprocessing.py
 tests/test_v22_human_feedback.py
 tests/test_v231_checkmesh_preflight.py

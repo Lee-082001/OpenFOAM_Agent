@@ -134,9 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm-max-output-tokens",
         type=int,
-        default=16_000,
+        default=24_000,
         help=(
-            "Per-response LLM output-token cap (default: 16000). "
+            "Per-response LLM output-token cap (default: 24000). "
             "This bounds rate-limit reservation and prevents one structured action "
             "from reserving the model's full output window."
         ),

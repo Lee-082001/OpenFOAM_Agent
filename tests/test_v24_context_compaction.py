@@ -223,4 +223,4 @@ def test_cli_defaults_to_bounded_llm_output_tokens():
     from openfoam_agent.cli import build_parser
 
     args = build_parser().parse_args(["--interactive", "--backend", "openai", "--confirm-api-calls"])
-    assert args.llm_max_output_tokens == 16_000
+    assert args.llm_max_output_tokens == 24_000

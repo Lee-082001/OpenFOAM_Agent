@@ -1,6 +1,6 @@
-# OpenFOAM Agent v2.15 Architecture
+# OpenFOAM Agent v2.16 Architecture
 
-## v2.15 semantic-fidelity boundary
+## v2.16 compact semantic-evidence boundary
 
 The workflow now separates two kinds of trust that were previously easy to conflate:
 
@@ -208,7 +208,7 @@ The durable local audit state and the remote model working context are intention
 
 This compaction never authorizes an engineering claim. Final plan/evidence validation continues to inspect the original local EngineeringEvents, case hashes, native evidence, and confirmed intake rather than trusting compact summaries. v2.8.0 additionally collapses raw member events from one EngineeringSequence into a single model-facing summary while retaining every raw event locally.
 
-The CLI progress stream exposes request-size telemetry (`promptChars`, structured-schema characters, and a conservative tokenizer-free `approxTokens` estimate). The estimate is diagnostic only. When the provider returns usage metadata, a separate `LLM-USAGE` event exposes exact input/output/total token counts. The OpenAI adapter also receives an explicit CLI-default `max_output_tokens=16000`, preventing a small structured action from leaving the model's full output window uncapped.
+The CLI progress stream exposes request-size telemetry (`promptChars`, structured-schema characters, and a conservative tokenizer-free `approxTokens` estimate). The estimate is diagnostic only. When the provider returns usage metadata, a separate `LLM-USAGE` event exposes exact input/output/total token counts. The OpenAI adapter also receives an explicit CLI-default `max_output_tokens=24000`, preventing a small structured action from leaving the model's full output window uncapped.
 
 ## Role-based model routing (v2.6.0)
 

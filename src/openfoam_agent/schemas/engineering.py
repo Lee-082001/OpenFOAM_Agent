@@ -6,6 +6,7 @@ import re
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 
 class _EngineeringModel(BaseModel):
@@ -110,17 +111,23 @@ _BINDABLE_PLAN_FIELDS = Literal[
 
 
 class CaseContentAssertion(_EngineeringModel):
-    """Agent-chosen exact case evidence for one confirmed fact."""
+    """Compact structural evidence pointer; ``contains`` is legacy v2.15 input."""
 
     path: str = Field(min_length=1, max_length=240)
-    contains: list[str] = Field(default_factory=list, max_length=8)
+    entry_path: str | None = Field(default=None, max_length=300)
+    expected_value: str = Field(default="", max_length=160)
+    anchor: str = Field(default="", max_length=160)
+    contains: SkipJsonSchema[list[str]] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_snippets(cls, value: Any):
+    def normalize_pointer(cls, value: Any):
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
+        normalized["entry_path"] = _soft_text(normalized.get("entry_path"), limit=300) or None
+        normalized["expected_value"] = _soft_text(normalized.get("expected_value"), limit=160)
+        normalized["anchor"] = _soft_text(normalized.get("anchor"), limit=160)
         raw = normalized.get("contains")
         if isinstance(raw, str):
             raw = [raw]
@@ -144,12 +151,16 @@ class CaseContentAssertion(_EngineeringModel):
 
 
 class NumericEvidenceTerm(_EngineeringModel):
-    """One scalar token with exact evidence from a case artifact."""
+    """Compact numeric artifact locator; excerpt/value_token are legacy v2.15 input."""
 
     path: str = Field(min_length=1, max_length=240)
-    excerpt: str = Field(default="", max_length=500)
-    value_token: str = Field(default="", max_length=80)
+    entry_path: str | None = Field(default=None, max_length=300)
+    anchor: str = Field(default="", max_length=160)
+    number_index: int = Field(default=0, ge=0, le=31)
+    occurrence: int = Field(default=0, ge=0, le=31)
     multiplier: float = 1.0
+    excerpt: SkipJsonSchema[str] = Field(default="", max_length=500)
+    value_token: SkipJsonSchema[str] = Field(default="", max_length=80)
 
     @model_validator(mode="before")
     @classmethod
@@ -157,6 +168,8 @@ class NumericEvidenceTerm(_EngineeringModel):
         if not isinstance(value, dict):
             return value
         normalized = dict(value)
+        normalized["entry_path"] = _soft_text(normalized.get("entry_path"), limit=300) or None
+        normalized["anchor"] = _soft_text(normalized.get("anchor"), limit=160)
         normalized["excerpt"] = str(normalized.get("excerpt") or "").strip()[:500]
         normalized["value_token"] = str(normalized.get("value_token") or "").strip()[:80]
         return normalized
@@ -186,11 +199,11 @@ class ConfirmedFactBinding(_EngineeringModel):
     """
 
     fact_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]*$")
-    case_files: list[str] = Field(default_factory=list, max_length=12)
+    case_files: SkipJsonSchema[list[str]] = Field(default_factory=list, max_length=12)
     plan_fields: list[_BINDABLE_PLAN_FIELDS] = Field(default_factory=list, max_length=12)
     case_assertions: list[CaseContentAssertion] = Field(default_factory=list, max_length=12)
     numeric_relation: NumericRelationAssertion | None = None
-    explanation: str = Field(min_length=1, max_length=300)
+    explanation: SkipJsonSchema[str] = Field(default="", max_length=160)
 
     @model_validator(mode="before")
     @classmethod
@@ -214,8 +227,13 @@ class ConfirmedFactBinding(_EngineeringModel):
 
     @model_validator(mode="after")
     def validate_refs(self) -> Self:
-        if not self.case_files and not self.plan_fields:
-            raise ValueError("Confirmed fact binding requires at least one case_files or plan_fields entry.")
+        evidence_paths = {item.path for item in self.case_assertions}
+        if self.numeric_relation is not None:
+            evidence_paths.update(
+                item.path for item in [*self.numeric_relation.numerator, *self.numeric_relation.denominator]
+            )
+        if not self.case_files and not self.plan_fields and not evidence_paths:
+            raise ValueError("Confirmed fact binding requires a plan field, case file, or semantic evidence pointer.")
         if len(self.case_files) != len(set(self.case_files)):
             raise ValueError("Confirmed fact binding contains duplicate case file refs.")
         if len(self.plan_fields) != len(set(self.plan_fields)):
@@ -223,11 +241,18 @@ class ConfirmedFactBinding(_EngineeringModel):
         for path in self.case_files:
             if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
                 raise ValueError(f"Unsafe case implementation ref: {path}")
-        assertion_paths = [item.path for item in self.case_assertions]
-        if len(assertion_paths) != len(set(assertion_paths)):
-            raise ValueError("Confirmed fact binding contains duplicate case assertion paths.")
-        if not set(assertion_paths).issubset(set(self.case_files)):
-            raise ValueError("Case semantic assertions must reference paths declared in case_files.")
+        assertion_keys = [
+            (
+                item.path,
+                item.entry_path,
+                item.expected_value,
+                item.anchor,
+                tuple(item.contains),
+            )
+            for item in self.case_assertions
+        ]
+        if len(assertion_keys) != len(set(assertion_keys)):
+            raise ValueError("Confirmed fact binding contains duplicate semantic assertions.")
         relation_paths = {
             item.path
             for item in (
@@ -236,8 +261,6 @@ class ConfirmedFactBinding(_EngineeringModel):
                 else []
             )
         }
-        if not relation_paths.issubset(set(self.case_files)):
-            raise ValueError("Numeric semantic relation terms must reference paths declared in case_files.")
         return self
 
     @property
@@ -312,8 +335,21 @@ class EngineeringPlan(_EngineeringModel):
         for binding in data.get("confirmed_fact_bindings", []):
             if not binding.get("case_assertions"):
                 binding.pop("case_assertions", None)
-            if binding.get("numeric_relation") is None:
+            else:
+                for assertion in binding["case_assertions"]:
+                    for key in ("entry_path", "expected_value", "anchor"):
+                        if assertion.get(key) in {None, ""}:
+                            assertion.pop(key, None)
+            relation = binding.get("numeric_relation")
+            if relation is None:
                 binding.pop("numeric_relation", None)
+            else:
+                for term in [*relation.get("numerator", []), *relation.get("denominator", [])]:
+                    for key, default in (("entry_path", None), ("anchor", ""), ("number_index", 0), ("occurrence", 0)):
+                        if term.get(key) == default:
+                            term.pop(key, None)
+            if binding.get("explanation") == "":
+                binding.pop("explanation", None)
         payload = json.dumps(
             data,
             ensure_ascii=True,

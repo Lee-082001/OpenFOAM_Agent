@@ -94,9 +94,33 @@ class DeterministicSafetyGate:
                         f"Semantic assertion for {binding.fact_id} cannot read {assertion.path}: {exc}"
                     )
                     continue
+                if assertion.entry_path:
+                    observed = _foam_dictionary_entry_value(content, assertion.entry_path)
+                    if observed is None:
+                        failures.append(
+                            f"Semantic assertion for {binding.fact_id} cannot resolve entry {assertion.entry_path!r} in {assertion.path}."
+                        )
+                        continue
+                    if not assertion.expected_value:
+                        failures.append(
+                            f"Semantic assertion for {binding.fact_id} has no expected value for entry {assertion.entry_path!r}."
+                        )
+                        continue
+                    if _normalize_foam_value(observed) != _normalize_foam_value(assertion.expected_value):
+                        failures.append(
+                            f"Semantic assertion for {binding.fact_id} expected {assertion.entry_path}={assertion.expected_value!r} "
+                            f"in {assertion.path}, observed {observed!r}."
+                        )
+                    continue
+                if assertion.anchor:
+                    if not _contains_semantic_snippet(content, assertion.anchor):
+                        failures.append(
+                            f"Semantic assertion for {binding.fact_id} anchor is not present in {assertion.path}: {assertion.anchor!r}."
+                        )
+                    continue
                 if not assertion.contains:
                     failures.append(
-                        f"Semantic assertion for {binding.fact_id} has no case snippets to verify."
+                        f"Semantic assertion for {binding.fact_id} has no artifact locator to verify."
                     )
                     continue
                 for snippet in assertion.contains:
@@ -195,31 +219,10 @@ class DeterministicSafetyGate:
                         f"Numeric semantic evidence for {fact_id} cannot read {term.path}: {exc}"
                     )
                     continue
-                if not _contains_semantic_snippet(content, term.excerpt):
+                token_value = _numeric_value_from_term(content, term)
+                if token_value is None:
                     failures.append(
-                        f"Numeric semantic evidence for {fact_id} is not present in {term.path}."
-                    )
-                    continue
-                excerpt_numbers = _numeric_tokens(term.excerpt)
-                try:
-                    token_value = float(term.value_token)
-                except ValueError:
-                    failures.append(
-                        f"Numeric semantic evidence for {fact_id} has an invalid value token."
-                    )
-                    continue
-                if not math.isfinite(token_value):
-                    failures.append(
-                        f"Numeric semantic evidence for {fact_id} has a non-finite value token."
-                    )
-                    continue
-                if not any(
-                    token == term.value_token
-                    or math.isclose(value, token_value, rel_tol=1e-12, abs_tol=1e-12)
-                    for token, value in excerpt_numbers
-                ):
-                    failures.append(
-                        f"Numeric semantic value token for {fact_id} is not evidenced by its submitted excerpt."
+                        f"Numeric semantic evidence for {fact_id} cannot resolve a scalar from {term.path}."
                     )
                     continue
                 if not math.isfinite(term.multiplier) or abs(term.multiplier) > 1e9:
@@ -317,6 +320,132 @@ def _finite_numbers(text: str) -> list[float]:
     return [value for _, value in _numeric_tokens(text)]
 
 
+def _active_foam_content(content: str) -> str:
+    return _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", content))
+
+
+def _normalize_foam_value(value: str) -> str:
+    text = " ".join(str(value or "").strip().rstrip(";").split())
+    return text
+
+
+def _foam_dictionary_entries(content: str) -> dict[str, str]:
+    """Extract simple leaf entry paths from ordinary OpenFOAM dictionaries.
+
+    This is intentionally a small structural reader, not a CFD interpreter. It is
+    sufficient for deterministic serializer output and common 0/constant/system
+    dictionaries. List-heavy raw geometry can use compact anchors instead.
+    """
+
+    active = _active_foam_content(content)
+    entries: dict[str, str] = {}
+    stack: list[str] = []
+    pending: str | None = None
+    statement = ""
+    for raw_line in active.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line == "{":
+            if pending:
+                stack.append(pending)
+                pending = None
+            continue
+        if line.startswith("}"):
+            if stack:
+                stack.pop()
+            pending = None
+            statement = ""
+            continue
+        if line.endswith("{"):
+            key = line[:-1].strip()
+            if key:
+                stack.append(key)
+            pending = None
+            continue
+        if ";" not in line:
+            # A bare word followed by ``{`` on the next line is a dictionary block.
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_:+-]*", line):
+                pending = line
+                statement = ""
+                continue
+            statement = (statement + " " + line).strip()
+            continue
+        statement = (statement + " " + line).strip()
+        while ";" in statement:
+            chunk, statement = statement.split(";", 1)
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            parts = chunk.split(None, 1)
+            if len(parts) != 2:
+                continue
+            key, value = parts
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_:+-]*", key):
+                continue
+            path = ".".join([*stack, key])
+            entries[path] = value.strip()
+        pending = None
+    return entries
+
+
+def _foam_dictionary_entry_value(content: str, entry_path: str) -> str | None:
+    return _foam_dictionary_entries(content).get(entry_path)
+
+
+def _anchor_window(content: str, anchor: str, occurrence: int) -> str | None:
+    active = _active_foam_content(content)
+    normalized_anchor = " ".join(anchor.split())
+    if not normalized_anchor:
+        return None
+    matches: list[str] = []
+    for line in active.splitlines():
+        normalized_line = " ".join(line.split())
+        if normalized_anchor in normalized_line:
+            matches.append(normalized_line)
+    if occurrence < len(matches):
+        return matches[occurrence]
+    # Fallback for anchors spanning line breaks. Keep only a compact normalized window.
+    normalized = " ".join(active.split())
+    starts: list[int] = []
+    start = 0
+    while True:
+        idx = normalized.find(normalized_anchor, start)
+        if idx < 0:
+            break
+        starts.append(idx)
+        start = idx + max(1, len(normalized_anchor))
+    if occurrence >= len(starts):
+        return None
+    idx = starts[occurrence]
+    return normalized[max(0, idx - 80): idx + len(normalized_anchor) + 80]
+
+
+def _numeric_value_from_term(content: str, term) -> float | None:
+    source: str | None = None
+    if term.entry_path:
+        source = _foam_dictionary_entry_value(content, term.entry_path)
+    elif term.anchor:
+        source = _anchor_window(content, term.anchor, term.occurrence)
+    elif term.excerpt:
+        # v2.15 compatibility path.
+        if not _contains_semantic_snippet(content, term.excerpt):
+            return None
+        if term.value_token:
+            try:
+                value = float(term.value_token)
+            except ValueError:
+                return None
+            return value if math.isfinite(value) else None
+        source = term.excerpt
+    if source is None:
+        return None
+    numbers = _numeric_tokens(source)
+    if term.number_index >= len(numbers):
+        return None
+    return numbers[term.number_index][1]
+
+
 def _contains_semantic_snippet(content: str, snippet: str) -> bool:
     """Whitespace-insensitive containment for Agent-carried case evidence.
 
@@ -325,7 +454,7 @@ def _contains_semantic_snippet(content: str, snippet: str) -> bool:
     not fail merely because Python rendered the same dictionary differently.
     """
 
-    active_content = _LINE_COMMENT.sub("", _BLOCK_COMMENT.sub("", content))
+    active_content = _active_foam_content(content)
     normalized_content = " ".join(active_content.split())
     normalized_snippet = " ".join(snippet.split())
     return bool(normalized_snippet) and normalized_snippet in normalized_content
