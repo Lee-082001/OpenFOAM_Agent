@@ -1,5 +1,8 @@
-# OpenFOAM Agent v3.0.0
+# OpenFOAM Agent v3.0.1
 
+
+
+> **v3.0.1 backend compatibility:** Claude and Codex structured-output schemas are now compiled per backend. Claude fixed tuples no longer emit unsupported `prefixItems`; Codex strict schemas explicitly require every property and remove transport-only defaults while retaining final Pydantic validation.
 
 ## v3.0.0: OpenFOAM semantic PreSolve layer
 

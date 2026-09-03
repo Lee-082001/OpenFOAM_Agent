@@ -28,6 +28,7 @@ from .ollama_client import (
     check_ollama_health,
     normalize_ollama_base_url,
 )
+from .structured_schema import compile_transport_schema
 from .protocol import StructuredLLM
 from .routing import WorkflowLLMs
 from .rule_based import RuleBasedLLM
@@ -58,4 +59,5 @@ __all__ = [
     "StructuredOutputError",
     "StructuredOutputSchemaError",
     "validate_structured_output_schema",
+    "compile_transport_schema",
 ]

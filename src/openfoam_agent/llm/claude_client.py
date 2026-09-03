@@ -18,6 +18,7 @@ from .openai_client import (
     StructuredOutputError,
     validate_structured_output_schema,
 )
+from .structured_schema import compile_transport_schema
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -284,7 +285,11 @@ class ClaudeLLM:
         system_prompt: str,
     ) -> tuple[dict[str, Any], dict[str, int] | None]:
         env = _claude_environment()
-        schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=True, sort_keys=True)
+        schema_json = json.dumps(
+            compile_transport_schema(schema, backend="claude"),
+            ensure_ascii=True,
+            sort_keys=True,
+        )
         with tempfile.TemporaryDirectory(prefix="openfoam-agent-claude-") as temp_name:
             temp = Path(temp_name)
             command = [

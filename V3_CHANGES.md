@@ -36,3 +36,7 @@ Added v3 regression tests for:
 - PreSolve integration for coverage and constraint validation.
 
 Full suite: **239 passed**.
+
+## v3.0.1 — structured-output backend compatibility
+
+v3.0.1 adds a backend-specific Structured Schema Compiler between canonical Pydantic contracts and CLI transports. Claude receives tuple schemas without `prefixItems`; Codex receives OpenAI-strict object schemas with all properties required, `additionalProperties: false`, and transport-inapplicable defaults removed. Final output remains validated by the original Pydantic model. See `V3_0_1_CHANGES.md`.

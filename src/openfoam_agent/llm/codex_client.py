@@ -17,6 +17,7 @@ from .openai_client import (
     StructuredOutputError,
     validate_structured_output_schema,
 )
+from .structured_schema import compile_transport_schema
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -238,7 +239,11 @@ class CodexLLM:
             schema_path = temp / "output.schema.json"
             output_path = temp / "final.json"
             schema_path.write_text(
-                json.dumps(schema.model_json_schema(), ensure_ascii=True, sort_keys=True),
+                json.dumps(
+                    compile_transport_schema(schema, backend="codex"),
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
                 encoding="utf-8",
             )
             command = [

@@ -30,6 +30,8 @@ Mesh-topology mutators (`blockMesh`, `snappyHexMesh`, `createPatch`) invalidate 
 
 `--backend claude` is also a model-transport boundary. It uses Claude Code print mode only after a startup auth check confirms the Claude subscription/OAuth path. API/provider routing environment variables are stripped, each call uses an empty temporary working directory, session persistence is disabled, `--safe-mode` is mandatory, built-in model tools are removed with `--tools ""`, and MCP discovery is disabled with `--strict-mcp-config`. Claude Code structured output is independently revalidated by Pydantic before any Agent action can run. Unlike Codex, Claude Code does not expose the same OS-level read-only sandbox flag; managed enterprise hooks are therefore part of the trusted local Claude Code installation/policy boundary, not an execution authority granted by OpenFOAM Agent.
 
+Starting in v3.0.1, CLI structured-output transports compile the canonical Pydantic schema through a backend compatibility layer before invocation. Codex receives the OpenAI-strict object form (every property required, `additionalProperties: false`, no transport `default` annotations), while Claude receives a tuple-compatible form without Pydantic's `prefixItems`. These are transport schemas only: the canonical Pydantic model remains unchanged and is the authoritative post-response validator. This prevents provider JSON-Schema dialect drift from changing CFD domain contracts.
+
 
 ## v2.17 mesh compatibility and repair-scope escalation
 

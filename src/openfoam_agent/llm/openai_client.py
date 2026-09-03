@@ -6,6 +6,12 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from .structured_schema import (
+    StructuredOutputSchemaError,
+    validate_structured_output_schema,
+)
+
+
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -25,77 +31,6 @@ class LLMConfigurationError(RuntimeError):
 
 class StructuredOutputError(RuntimeError):
     """Raised when a response does not contain the requested parsed object."""
-
-
-class StructuredOutputSchemaError(ValueError):
-    """Raised when a Pydantic schema cannot be represented in strict JSON Schema."""
-
-
-def _dynamic_object_paths(value: object, path: str = "$") -> list[str]:
-    """Find arbitrary-key mappings unsupported by strict Structured Outputs."""
-
-    if isinstance(value, dict):
-        violations: list[str] = []
-        additional = value.get("additionalProperties")
-        if additional is True or isinstance(additional, dict):
-            violations.append(path)
-        for key, child in value.items():
-            violations.extend(_dynamic_object_paths(child, f"{path}.{key}"))
-        return violations
-    if isinstance(value, list):
-        violations = []
-        for index, child in enumerate(value):
-            violations.extend(_dynamic_object_paths(child, f"{path}[{index}]"))
-        return violations
-    return []
-
-
-def _keyword_paths(value: object, keyword: str, path: str = "$") -> list[str]:
-    """Return JSON-schema paths containing a specific keyword."""
-
-    if isinstance(value, dict):
-        violations: list[str] = []
-        if keyword in value:
-            violations.append(path)
-        for key, child in value.items():
-            violations.extend(_keyword_paths(child, keyword, f"{path}.{key}"))
-        return violations
-    if isinstance(value, list):
-        violations = []
-        for index, child in enumerate(value):
-            violations.extend(_keyword_paths(child, keyword, f"{path}[{index}]"))
-        return violations
-    return []
-
-
-def validate_structured_output_schema(schema: type[BaseModel]) -> None:
-    """Fail locally for schema constructs rejected by strict Structured Outputs."""
-
-    json_schema = schema.model_json_schema()
-    dynamic_paths = _dynamic_object_paths(json_schema)
-    if dynamic_paths:
-        joined = ", ".join(dynamic_paths)
-        raise StructuredOutputSchemaError(
-            f"{schema.__name__} contains arbitrary-key object fields at {joined}. "
-            "Strict Structured Outputs requires fixed object keys; model these "
-            "fields as lists of key/value objects instead."
-        )
-
-    one_of_paths = _keyword_paths(json_schema, "oneOf")
-    if one_of_paths:
-        joined = ", ".join(one_of_paths)
-        raise StructuredOutputSchemaError(
-            f"{schema.__name__} contains unsupported `oneOf` at {joined}. "
-            "Use a plain Union that emits nested `anyOf` instead of a "
-            "discriminated union."
-        )
-
-    # Structured Outputs requires the root schema to be an object. Nested anyOf
-    # is supported, but a root anyOf is not.
-    if "anyOf" in json_schema or json_schema.get("type") != "object":
-        raise StructuredOutputSchemaError(
-            f"{schema.__name__} must have an object root without root-level `anyOf`."
-        )
 
 
 class OpenAILLM:

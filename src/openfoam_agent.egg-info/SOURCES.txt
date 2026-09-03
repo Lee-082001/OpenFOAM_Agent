@@ -27,6 +27,7 @@ src/openfoam_agent/llm/openai_client.py
 src/openfoam_agent/llm/protocol.py
 src/openfoam_agent/llm/routing.py
 src/openfoam_agent/llm/rule_based.py
+src/openfoam_agent/llm/structured_schema.py
 src/openfoam_agent/llm/prompts/__init__.py
 src/openfoam_agent/llm/prompts/engineering.py
 src/openfoam_agent/llm/prompts/intake.py
@@ -60,6 +61,11 @@ src/openfoam_agent/tools/workspace.py
 src/openfoam_agent/verification/__init__.py
 src/openfoam_agent/verification/presolve.py
 src/openfoam_agent/verification/safety.py
+src/openfoam_agent/verification/foam_semantics/__init__.py
+src/openfoam_agent/verification/foam_semantics/boundary.py
+src/openfoam_agent/verification/foam_semantics/mesh.py
+src/openfoam_agent/verification/foam_semantics/model.py
+src/openfoam_agent/verification/foam_semantics/parser.py
 src/openfoam_agent/workflow/__init__.py
 src/openfoam_agent/workflow/engine.py
 src/openfoam_agent/workflow/state.py
@@ -99,3 +105,5 @@ tests/test_v2_runtime.py
 tests/test_v2_safety.py
 tests/test_v2_security_hardening.py
 tests/test_v2_workspace.py
+tests/test_v300_foam_semantics.py
+tests/test_v301_structured_schema_compiler.py
