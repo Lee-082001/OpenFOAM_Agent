@@ -130,6 +130,7 @@ def describe_action(action: object) -> str:
         "search_references": "OpenFOAM reference 탐색",
         "gather_evidence": "evidence gap batch 조회",
         "repair_runtime_case": "runtime case delta repair",
+        "revise_mesh_strategy": "meshing strategy revision",
         "read_reference": "OpenFOAM reference 읽기",
         "list_case_files": "case 파일 목록 확인",
         "read_case_file": "case 파일 읽기",
@@ -171,7 +172,7 @@ def _safe_action_target(action: object) -> str:
     if action_type == "gather_evidence":
         gaps = getattr(action, "gaps", [])
         return ", ".join(str(getattr(item, "gap_id", "")) for item in gaps[:4])
-    if action_type == "repair_runtime_case":
+    if action_type in {"repair_runtime_case", "revise_mesh_strategy"}:
         return _compact(str(getattr(action, "diagnosis", "")), 100)
     if action_type in {"read_reference", "read_postprocess_reference"}:
         reference = str(getattr(action, "reference", ""))

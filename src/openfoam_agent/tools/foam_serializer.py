@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Iterable
 
-from openfoam_agent.schemas.engineering import FoamDictionaryEntry, TypedFoamDictionaryFile
+from openfoam_agent.schemas.engineering import (
+    FoamDictionaryEntry,
+    TypedBlockMeshFile,
+    TypedFoamDictionaryFile,
+)
 
 
 class FoamSerializationError(ValueError):
@@ -109,3 +113,85 @@ def _render_mapping(mapping: OrderedDict[str, object], lines: list[str], *, inde
             if rendered.endswith(";"):
                 rendered = rendered[:-1].rstrip()
             lines.append(f"{pad}{key} {rendered};")
+
+
+def serialize_block_mesh(spec: TypedBlockMeshFile) -> str:
+    """Render the blockMesh-specific list/dictionary DSL deterministically.
+
+    Geometry/topology values are Agent-owned; Python only owns the structural syntax
+    that generic dotted dictionary serialization cannot faithfully represent.
+    """
+
+    def num(value: float) -> str:
+        return format(float(value), ".16g")
+
+    lines = [
+        "FoamFile",
+        "{",
+        "    format ascii;",
+        "    class dictionary;",
+        "    object blockMeshDict;",
+        "}",
+        "",
+        f"{spec.scale_keyword} {num(spec.scale)};",
+        "",
+        "vertices",
+        "(",
+    ]
+    for vertex in spec.vertices:
+        x, y, z = vertex.coordinates
+        lines.append(f"    ({num(x)} {num(y)} {num(z)})")
+    lines.extend([
+        ");",
+        "",
+        "blocks",
+        "(",
+    ])
+    for block in spec.blocks:
+        verts = " ".join(str(index) for index in block.vertices)
+        cells = " ".join(str(count) for count in block.cells)
+        grading = block.grading.strip().rstrip(";")
+        lines.append(f"    hex ({verts}) ({cells}) {grading}")
+    lines.extend([
+        ");",
+        "",
+        "edges",
+        "(",
+    ])
+    for edge in spec.edges:
+        definition = edge.definition.strip().rstrip(";")
+        suffix = f" {definition}" if definition else ""
+        lines.append(f"    {edge.kind} {edge.start} {edge.end}{suffix}")
+    lines.extend([
+        ");",
+        "",
+        "boundary",
+        "(",
+    ])
+    for patch in spec.boundary:
+        lines.extend([
+            f"    {patch.name}",
+            "    {",
+            f"        type {patch.type.strip().rstrip(';')};",
+            "        faces",
+            "        (",
+        ])
+        for face in patch.faces:
+            lines.append("            (" + " ".join(str(index) for index in face) + ")")
+        lines.extend([
+            "        );",
+            "    }",
+        ])
+    lines.extend([
+        ");",
+        "",
+        "mergePatchPairs",
+        "(",
+    ])
+    for first, second in spec.merge_patch_pairs:
+        lines.append(f"    ({first} {second})")
+    lines.extend([
+        ");",
+        "",
+    ])
+    return "\n".join(lines)

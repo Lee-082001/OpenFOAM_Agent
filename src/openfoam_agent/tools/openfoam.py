@@ -52,6 +52,42 @@ class OpenFOAMTools:
             },
         }
 
+
+    @staticmethod
+    def mesh_tool_contracts() -> list[dict[str, object]]:
+        """Deterministic execution contracts, not CFD strategy choices."""
+        return [
+            {
+                "command": "snappyHexMesh",
+                "precondition": "base mesh must be fully 3D during snapping/mesh relaxation",
+                "deterministic_observation": "an existing polyMesh boundary with type empty proves this precondition is not met",
+            }
+        ]
+
+    @staticmethod
+    def mesh_command_precondition(command: str, case_dir: str | Path) -> tuple[bool, str]:
+        """Check narrow executable prerequisites before consuming a native command.
+
+        This does not select a meshing strategy. It only enforces a tool contract that
+        the executable itself requires.
+        """
+        if command != "snappyHexMesh":
+            return True, ""
+        case = Path(case_dir).resolve()
+        boundary = case / "constant" / "polyMesh" / "boundary"
+        if not boundary.exists():
+            return False, "snappyHexMesh requires an existing base polyMesh before snapping."
+        try:
+            text = boundary.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return False, f"Could not inspect snappyHexMesh base-mesh boundary file: {exc}"
+        if re.search(r"\btype\s+empty\s*;", text):
+            return False, (
+                "snappyHexMesh requires a fully 3D base mesh during snapping/mesh relaxation, "
+                "but constant/polyMesh/boundary contains an empty patch."
+            )
+        return True, ""
+
     def block_mesh(self, case_dir: str | Path):
         return self.runner.run(["blockMesh", "-case", str(Path(case_dir).resolve())], cwd=case_dir)
 

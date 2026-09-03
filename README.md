@@ -1,4 +1,9 @@
-# OpenFOAM Agent v2.16.0
+# OpenFOAM Agent v2.17.0
+
+
+## v2.17.0: mesh tool contracts and strategy escalation
+
+v2.17 separates local dictionary repair from meshing-strategy revision. `system/blockMeshDict` now has a dedicated `block_mesh` typed DSL for vertices, blocks, edges and boundary patch lists, so generic dotted dictionary serialization no longer has to approximate blockMesh-specific list syntax. Deterministic Python also exposes narrow executable contracts such as `snappyHexMesh` requiring a fully 3D base mesh during snapping. If an observed `empty` patch proves that prerequisite is not met, the native command is not consumed and the next Engineering contract is a dedicated strategy revision. Repeated identical normalized native mesh failures also escalate instead of permitting endless local patch loops. Python never selects the replacement CFD/meshing strategy; the Engineering Agent does.
 
 ## v2.16.0: compact artifact-pointer semantic evidence
 
@@ -85,7 +90,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-v2.9 introduced the execution-plan fast path. Current v2.16.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v2.17.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -652,7 +657,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2.16.0 release tree currently passes **207 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v2.17.0 release tree currently passes **212 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;

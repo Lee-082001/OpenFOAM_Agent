@@ -557,6 +557,73 @@ class TypedFoamDictionaryFile(_EngineeringModel):
         return self
 
 
+class BlockMeshVertex(_EngineeringModel):
+    coordinates: tuple[float, float, float]
+
+
+class BlockMeshBlock(_EngineeringModel):
+    vertices: tuple[int, int, int, int, int, int, int, int]
+    cells: tuple[int, int, int] = Field()
+    grading: str = Field(default="simpleGrading (1 1 1)", min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_block(self) -> Self:
+        if any(index < 0 for index in self.vertices):
+            raise ValueError("blockMesh vertex indices must be non-negative.")
+        if any(count < 1 for count in self.cells):
+            raise ValueError("blockMesh cell counts must be positive.")
+        return self
+
+
+class BlockMeshEdge(_EngineeringModel):
+    kind: Literal["arc", "line", "spline", "polyLine"]
+    start: int = Field(ge=0)
+    end: int = Field(ge=0)
+    definition: str = Field(default="", max_length=4000)
+
+
+class BlockMeshBoundaryPatch(_EngineeringModel):
+    name: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_.:+-]*$", max_length=120)
+    type: str = Field(min_length=1, max_length=120)
+    faces: list[tuple[int, int, int, int]] = Field(min_length=1, max_length=400)
+
+    @model_validator(mode="after")
+    def validate_faces(self) -> Self:
+        if any(index < 0 for face in self.faces for index in face):
+            raise ValueError("blockMesh face vertex indices must be non-negative.")
+        return self
+
+
+class TypedBlockMeshFile(_EngineeringModel):
+    """Structured blockMeshDict DSL rendered by deterministic Python.
+
+    Python owns OpenFOAM list/dictionary punctuation for vertices/blocks/edges/boundary.
+    The Agent still owns the geometry, topology, resolution, grading and patch types.
+    """
+
+    path: Literal["system/blockMeshDict"] = "system/blockMeshDict"
+    scale: float = Field(default=1.0, gt=0)
+    scale_keyword: Literal["scale", "convertToMeters"] = "scale"
+    vertices: list[BlockMeshVertex] = Field(min_length=8, max_length=2000)
+    blocks: list[BlockMeshBlock] = Field(min_length=1, max_length=500)
+    edges: list[BlockMeshEdge] = Field(default_factory=list, max_length=1000)
+    boundary: list[BlockMeshBoundaryPatch] = Field(min_length=1, max_length=200)
+    merge_patch_pairs: list[tuple[str, str]] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_topology_refs(self) -> Self:
+        vertex_count = len(self.vertices)
+        refs = [index for block in self.blocks for index in block.vertices]
+        refs.extend(index for edge in self.edges for index in (edge.start, edge.end))
+        refs.extend(index for patch in self.boundary for face in patch.faces for index in face)
+        if refs and max(refs) >= vertex_count:
+            raise ValueError("blockMesh topology references a vertex index outside vertices[].")
+        names = [patch.name for patch in self.boundary]
+        if len(names) != len(set(names)):
+            raise ValueError("blockMesh boundary contains duplicate patch names.")
+        return self
+
+
 class CaseFilePatch(_EngineeringModel):
     """Exact deterministic patch for one already-observed case file."""
 
@@ -673,6 +740,7 @@ class ExecuteCasePlanAction(_EngineeringModel):
     goal: str = Field(min_length=1, max_length=1000)
     files: list[CaseBundleFile] = Field(default_factory=list, max_length=40)
     typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=40)
+    block_mesh: TypedBlockMeshFile | None = None
     validate_dictionaries: list[str] = Field(default_factory=list, max_length=40)
     surface_checks: list[str] = Field(default_factory=list, max_length=16)
     mesh_commands: list[Literal[
@@ -688,9 +756,11 @@ class ExecuteCasePlanAction(_EngineeringModel):
 
     @model_validator(mode="after")
     def validate_execution_plan(self) -> Self:
-        if not self.files and not self.typed_dictionaries:
-            raise ValueError("execute_case_plan requires at least one raw or typed case file.")
+        if not self.files and not self.typed_dictionaries and self.block_mesh is None:
+            raise ValueError("execute_case_plan requires at least one raw, typed, or blockMesh case file.")
         paths = [item.path for item in self.files] + [item.path for item in self.typed_dictionaries]
+        if self.block_mesh is not None:
+            paths.append(self.block_mesh.path)
         if len(paths) != len(set(paths)):
             raise ValueError("execute_case_plan contains duplicate file paths.")
 
@@ -705,6 +775,8 @@ class ExecuteCasePlanAction(_EngineeringModel):
                 if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
                     raise ValueError(f"Unsafe {collection_name} path: {path}")
 
+        if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
+            raise ValueError("Use block_mesh for system/blockMeshDict; generic typed dictionaries cannot represent blockMesh list syntax safely.")
         if self.mesh_commands[-1] != "checkMesh":
             raise ValueError("execute_case_plan mesh_commands must end with checkMesh.")
         if self.mesh_commands.count("checkMesh") != 1:
@@ -842,6 +914,46 @@ class CandidateCasePlanRepairAction(_EngineeringModel):
                 raise ValueError(f"Unsafe candidate drop path: {path}")
         return self
 
+class StrategyRevisionAction(_EngineeringModel):
+    """Delta strategy replacement after a meshing/tool contract is invalidated.
+
+    This is intentionally separate from local repair: the Agent may replace/drop the
+    failed meshing artifacts and choose a different mesh command pipeline while the
+    confirmed intake remains immutable.
+    """
+
+    type: Literal["revise_mesh_strategy"]
+    diagnosis: str = Field(min_length=1, max_length=1200)
+    patches: list[CaseFilePatch] = Field(default_factory=list, max_length=20)
+    replacement_files: list[CaseBundleFile] = Field(default_factory=list, max_length=16)
+    typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=16)
+    block_mesh: TypedBlockMeshFile | None = None
+    drop_paths: list[str] = Field(default_factory=list, max_length=16)
+    validate_dictionaries: list[str] = Field(default_factory=list, max_length=24)
+    surface_checks: list[str] = Field(default_factory=list, max_length=12)
+    mesh_commands: list[Literal["blockMesh", "surfaceFeatureExtract", "snappyHexMesh", "createPatch", "checkMesh"]] = Field(min_length=1, max_length=8)
+    validate_pre_solve: bool = True
+    updated_plan: EngineeringPlan | None = None
+
+    @model_validator(mode="after")
+    def validate_strategy_revision(self) -> Self:
+        paths = [item.path for item in self.replacement_files] + [item.path for item in self.typed_dictionaries] + list(self.drop_paths)
+        if self.block_mesh is not None:
+            paths.append(self.block_mesh.path)
+        if len(paths) != len(set(paths)):
+            raise ValueError("revise_mesh_strategy may replace/drop a path in only one mode per turn.")
+        if set(item.path for item in self.patches) & set(paths):
+            raise ValueError("revise_mesh_strategy cannot patch and replace/drop the same file in one turn.")
+        for path in self.drop_paths:
+            if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
+                raise ValueError(f"Unsafe strategy drop path: {path}")
+        if self.mesh_commands[-1] != "checkMesh" or self.mesh_commands.count("checkMesh") != 1:
+            raise ValueError("revise_mesh_strategy mesh_commands must end with exactly one checkMesh.")
+        if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
+            raise ValueError("Use block_mesh for system/blockMeshDict in strategy revisions.")
+        return self
+
+
 # Phase-specific compact contracts. Agent identity remains one CFDEngineeringAgent; only
 # permissions/schema vary by phase so repeated calls do not carry the giant all-phase union.
 PrepareAction = GatherEvidenceAction | ReadCaseFileAction | ExecuteCasePlanAction | BlockAction
@@ -864,6 +976,10 @@ class CasePlanRetryTurn(_EngineeringModel):
 RepairAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
 class RepairTurn(_EngineeringModel):
     action: RepairAction
+
+StrategyRevisionTurnAction = StrategyRevisionAction | BlockAction
+class StrategyRevisionTurn(_EngineeringModel):
+    action: StrategyRevisionTurnAction
 
 RevisionAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
 class RevisionTurn(_EngineeringModel):
@@ -963,6 +1079,8 @@ class EngineeringEvent(_EngineeringModel):
     artifact_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     native_command_executed: bool = False
     mesh_command_executed: bool = False
+    failure_signature: str | None = Field(default=None, max_length=160)
+    failure_scope: Literal["local", "pipeline", "strategy"] | None = None
     observed_evidence: list[ObservedEngineeringEvidence] = Field(default_factory=list, max_length=24)
     sequence_id: str | None = Field(default=None, max_length=120)
     sequence_goal: str | None = Field(default=None, max_length=1000)

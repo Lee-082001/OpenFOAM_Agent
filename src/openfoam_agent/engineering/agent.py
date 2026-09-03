@@ -21,6 +21,7 @@ from openfoam_agent.llm.prompts import (
     REPAIR_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
     RUNTIME_REPAIR_SYSTEM_PROMPT,
+    STRATEGY_REVISION_SYSTEM_PROMPT,
     FINALIZATION_SYSTEM_PROMPT,
 )
 from openfoam_agent.llm.protocol import StructuredLLM
@@ -52,6 +53,8 @@ from openfoam_agent.schemas.engineering import (
     RepairTurn,
     RevisionTurn,
     RuntimeRepairTurn,
+    StrategyRevisionAction,
+    StrategyRevisionTurn,
     EngineeringTurn,
     ObservedEngineeringEvidence,
     canonical_engineering_evidence_id,
@@ -73,7 +76,11 @@ from openfoam_agent.schemas.engineering import (
 from openfoam_agent.tools.capability_catalog import CapabilityCatalog
 from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
 from openfoam_agent.tools.openfoam import OpenFOAMTools
-from openfoam_agent.tools.foam_serializer import FoamSerializationError, serialize_foam_dictionary
+from openfoam_agent.tools.foam_serializer import (
+    FoamSerializationError,
+    serialize_block_mesh,
+    serialize_foam_dictionary,
+)
 from openfoam_agent.tools.references import OpenFOAMReferenceIndex
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
 from openfoam_agent.verification.presolve import PreSolveCompletenessGate
@@ -469,6 +476,15 @@ class CFDEngineeringAgent:
                 native_execution=native_execution,
             )
 
+        if isinstance(action, StrategyRevisionAction):
+            return self._execute_strategy_revision(
+                state,
+                action,
+                llm_step=llm_step,
+                progress_phase=progress_phase,
+                native_execution=native_execution,
+            )
+
         if isinstance(action, ExecuteCasePlanAction):
             self._mark_evidence_gaps_satisfied("prepare")
             return self._execute_case_plan(
@@ -593,10 +609,13 @@ class CFDEngineeringAgent:
 
         raw = {item.path: item for item in candidate.files}
         typed = {item.path: item for item in candidate.typed_dictionaries}
+        block_mesh = candidate.block_mesh
 
         for path in repair.drop_paths:
             raw.pop(path, None)
             typed.pop(path, None)
+            if block_mesh is not None and block_mesh.path == path:
+                block_mesh = None
 
         for patch in repair.patches:
             if patch.path in raw:
@@ -618,14 +637,20 @@ class CFDEngineeringAgent:
         for item in repair.replacement_files:
             raw[item.path] = item
             typed.pop(item.path, None)
+            if block_mesh is not None and block_mesh.path == item.path:
+                block_mesh = None
 
         for item in repair.typed_dictionaries:
             typed[item.path] = item
             raw.pop(item.path, None)
+            if block_mesh is not None and block_mesh.path == item.path:
+                block_mesh = None
+
 
         data = candidate.model_dump(mode="python")
         data["files"] = [item.model_dump(mode="python") for item in raw.values()]
         data["typed_dictionaries"] = [item.model_dump(mode="python") for item in typed.values()]
+        data["block_mesh"] = block_mesh.model_dump(mode="python") if block_mesh is not None else None
         return ExecuteCasePlanAction.model_validate(data)
 
     def _execute_candidate_case_plan_repair(
@@ -746,6 +771,25 @@ class CFDEngineeringAgent:
                 return blocked
             rendered_files.append((item.path, content))
 
+        if execution.block_mesh is not None:
+            try:
+                rendered_files.append((execution.block_mesh.path, serialize_block_mesh(execution.block_mesh)))
+            except (FoamSerializationError, ValueError) as exc:
+                event = self._event(
+                    llm_step,
+                    "block_mesh_serialize",
+                    False,
+                    f"Typed blockMesh serialization failed: {exc}",
+                )
+                blocked = self._record_case_plan_authoring_failure(state, event)
+                self._emit_engineering_event(
+                    f"{progress_phase}-execution-plan", event, step=progress_step, limit=progress_limit, state=state
+                )
+                self._pending_candidate_execution = execution
+                self._pending_candidate_failed_paths = ("system/blockMeshDict",)
+                self._pending_execution_plan = None
+                return blocked
+
         # v2.11: all-or-nothing authoring preflight.  Validate path/content/library
         # policy and aggregate authored size for the *entire* candidate bundle before
         # the first workspace mutation.  This prevents an early rejected file from
@@ -842,7 +886,7 @@ class CFDEngineeringAgent:
                 status="start",
                 step=progress_step,
                 limit=progress_limit,
-                metrics={"actions": total, "files": len(execution.files) + len(execution.typed_dictionaries)},
+                metrics={"actions": total, "files": len(execution.files) + len(execution.typed_dictionaries) + (1 if execution.block_mesh is not None else 0)},
             )
         )
 
@@ -1026,6 +1070,72 @@ class CFDEngineeringAgent:
                 limit=total,
                 state=state,
             )
+            if not event.success:
+                return terminal
+            if terminal:
+                self._pending_execution_plan = None
+                return True
+        return False
+
+    def _execute_strategy_revision(
+        self,
+        state: CFDState,
+        revision: StrategyRevisionAction,
+        *,
+        llm_step: int,
+        progress_phase: str,
+        native_execution: bool,
+    ) -> bool:
+        """Apply a meshing-strategy delta after tool incompatibility/no-progress.
+
+        Python does not choose the replacement strategy. It only applies the Agent's
+        explicit delta, invalidates stale mesh evidence and executes the new pipeline.
+        """
+        plan = revision.updated_plan or state.engineering_plan or self._pending_execution_plan
+        if plan is None:
+            event = self._event(
+                llm_step, revision.type, False,
+                "Strategy revision has no baseline EngineeringPlan; provide updated_plan or block.",
+            )
+            state.engineering_events.append(event)
+            return False
+
+        actions: list[object] = []
+        for path in revision.drop_paths:
+            actions.append(DeleteCaseFileAction(type="delete_case_file", path=path, rationale=""))
+        for patch in revision.patches:
+            actions.append(PatchCaseFileAction(type="patch_case_file", patch=patch))
+        for item in revision.replacement_files:
+            actions.append(WriteCaseFileAction(type="write_case_file", path=item.path, content=item.content, rationale=""))
+        for item in revision.typed_dictionaries:
+            actions.append(WriteCaseFileAction(type="write_case_file", path=item.path, content=serialize_foam_dictionary(item), rationale=""))
+        if revision.block_mesh is not None:
+            actions.append(WriteCaseFileAction(type="write_case_file", path=revision.block_mesh.path, content=serialize_block_mesh(revision.block_mesh), rationale=""))
+        for path in revision.validate_dictionaries:
+            actions.append(ValidateDictionaryAction(type="validate_dictionary", path=path, rationale=""))
+        for path in revision.surface_checks:
+            actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale=""))
+        for command in revision.mesh_commands:
+            actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
+        if revision.validate_pre_solve:
+            actions.append(ValidatePreSolveAction(type="validate_pre_solve", required_case_files=plan.required_case_files, rationale=""))
+        actions.append(FinishPreviewAction(type="finish_preview", plan=plan, rationale=""))
+
+        sequence_id = f"{progress_phase}:strategy-revision:{llm_step:04d}"
+        total = len(actions)
+        for index, member in enumerate(actions, start=1):
+            if self._tool_action_count(state) >= self.policy.max_tool_actions:
+                state.transition(State.ENGINEERING_BLOCKED, f"Engineering deterministic action budget exhausted ({self.policy.max_tool_actions}).")
+                return True
+            event, terminal = self._dispatch_prepare(state, member, step=llm_step, native_execution=native_execution)
+            event = event.model_copy(update={
+                "sequence_id": sequence_id,
+                "sequence_goal": revision.diagnosis,
+                "sequence_index": index,
+                "sequence_length": total,
+            })
+            state.engineering_events.append(event)
+            self._emit_engineering_event(f"{progress_phase}-strategy-revision", event, step=index, limit=total, state=state)
             if not event.success:
                 return terminal
             if terminal:
@@ -2572,6 +2682,19 @@ class CFDEngineeringAgent:
                         f"{action.command} blocked by generic syntax/safety preflight.",
                         "\n".join(preflight.failures),
                     )
+                precondition_ok, precondition_reason = self._mesh_command_precondition(action.command)
+                if not precondition_ok:
+                    signature = f"tool_contract:{action.command}:prerequisite"
+                    return self._event(
+                        step,
+                        "mesh_tool_precondition",
+                        False,
+                        f"{action.command} blocked by deterministic executable precondition.",
+                        precondition_reason,
+                        failure_signature=signature,
+                        failure_scope="strategy",
+                    )
+
                 result = self.tools.run_mesh_command(action.command, self.workspace.case_dir)
                 if action.command != "checkMesh":
                     self._presolve_case_manifest = None
@@ -2581,9 +2704,15 @@ class CFDEngineeringAgent:
                 event_output = output
                 event_success = result.success
                 summary = f"{action.command} returned status {result.return_code}."
+                failure_signature = None
+                failure_scope = None
                 if not result.success:
                     diagnostic = diagnose_openfoam_failure(result, command_name=action.command)
                     event_output = diagnostic.render()
+                    failure_signature = self._native_failure_signature(
+                        action.command, diagnostic.kind, diagnostic.excerpt
+                    )
+                    failure_scope = "local"
                     summary = (
                         f"{action.command} returned status {result.return_code}; "
                         "native diagnostic captured."
@@ -2606,6 +2735,8 @@ class CFDEngineeringAgent:
                     event_output,
                     native_command_executed=True,
                     mesh_command_executed=True,
+                    failure_signature=failure_signature,
+                    failure_scope=failure_scope,
                 )
         except (ValueError, FileNotFoundError, WorkspaceSafetyError, OSError) as exc:
             return self._event(
@@ -2717,6 +2848,63 @@ class CFDEngineeringAgent:
             and self._pending_candidate_execution is not None
         )
 
+    def _mesh_tool_contracts(self) -> list[dict[str, object]]:
+        provider = getattr(self.tools, "mesh_tool_contracts", None)
+        if callable(provider):
+            value = provider()
+            return list(value) if isinstance(value, list) else []
+        return []
+
+    def _mesh_command_precondition(self, command: str) -> tuple[bool, str]:
+        checker = getattr(self.tools, "mesh_command_precondition", None)
+        if callable(checker):
+            return checker(command, self.workspace.case_dir)
+        return True, ""
+
+    @staticmethod
+    def _native_failure_signature(command: str, kind: str, excerpt: str) -> str:
+        """Normalize a native failure enough to detect repeated no-progress repairs."""
+        primary = ""
+        for line in excerpt.splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            lowered = text.casefold()
+            if (
+                "foam fatal" in lowered
+                or lowered.startswith("file:")
+                or lowered.startswith("from function")
+                or lowered.startswith("in file")
+                or text.startswith("#")
+            ):
+                continue
+            primary = text
+            break
+        if not primary:
+            primary = kind
+        primary = re.sub(r"<[^>]+>", "<PATH>", primary)
+        primary = re.sub(r"\s+", " ", primary).strip().casefold()
+        digest = hashlib.sha256(f"{command}\0{kind}\0{primary}".encode("utf-8", errors="replace")).hexdigest()[:20]
+        return f"native:{command}:{kind}:{digest}"
+
+    def _strategy_revision_required(self, state: CFDState) -> bool:
+        events = self._current_round_events(state)
+        failures = [event for event in events if not event.success]
+        if not failures:
+            return False
+        # Escalation applies only to the *current* failure. A later unrelated
+        # validation failure must not resurrect an already-addressed strategy fault.
+        last = failures[-1]
+        if not last.failure_signature:
+            return False
+        if last.failure_scope == "strategy":
+            return True
+        same = [
+            event for event in failures
+            if event.failure_signature == last.failure_signature
+        ]
+        return len(same) >= 2 and last.mesh_command_executed
+
     def _phase_contract(self, state: CFDState, phase: str):
         if not self.policy.compact_phase_schemas:
             return EngineeringTurn, ENGINEERING_SYSTEM_PROMPT, "legacy"
@@ -2728,6 +2916,8 @@ class CFDEngineeringAgent:
             return RevisionTurn, REVISION_SYSTEM_PROMPT, "revision"
         if phase == "prepare" and self._case_plan_retry_required(state):
             return CasePlanRetryTurn, CASE_PLAN_RETRY_SYSTEM_PROMPT, "replan"
+        if phase == "prepare" and self._strategy_revision_required(state):
+            return StrategyRevisionTurn, STRATEGY_REVISION_SYSTEM_PROMPT, "strategy_revision"
         if phase == "prepare" and self._pending_execution_plan is not None:
             return RepairTurn, REPAIR_SYSTEM_PROMPT, "repair"
         if phase == "prepare" and self._retrieval_cycles.get("prepare", 0) >= self.policy.max_prepare_retrieval_cycles:
@@ -2914,6 +3104,7 @@ class CFDEngineeringAgent:
                 "recent_observations": self._recent_observations_for_model(state),
                 "available_evidence": evidence_records,
                 "evidence_gap_status": self._evidence_gap_status(phase),
+                "tool_execution_contracts": self._mesh_tool_contracts(),
                 "budget": budget,
                 "ready_for_finalization": (
                     self._ready_for_finalization(state, native_execution=native_execution)
@@ -2995,6 +3186,7 @@ class CFDEngineeringAgent:
                     },
                     "case_manifest": {"bound_by": "python", "sha256": manifest_digest},
                 },
+                "tool_execution_contracts": self._mesh_tool_contracts(),
                 "budget": budget,
                 "ready_for_finalization": (
                     self._ready_for_finalization(state, native_execution=native_execution)
@@ -3031,6 +3223,11 @@ class CFDEngineeringAgent:
                     "The full candidate is retained in Python memory. Return only repair_candidate_case_plan "
                     "with the minimum delta for the implicated candidate path(s), or block. No partial "
                     "workspace case was committed:\n"
+                )
+            elif contract_phase == "strategy_revision":
+                instruction = (
+                    "The current meshing strategy was invalidated by a deterministic tool contract or repeated identical native failure. "
+                    "Return revise_mesh_strategy with a different compatible meshing pipeline; do not retry the invalidated command unless its prerequisite state is explicitly changed:\n"
                 )
             elif contract_phase in {"repair", "revision"}:
                 instruction = (
@@ -3419,6 +3616,8 @@ class CFDEngineeringAgent:
         artifact_sha256: str | None = None,
         native_command_executed: bool = False,
         mesh_command_executed: bool = False,
+        failure_signature: str | None = None,
+        failure_scope: str | None = None,
         observed_evidence: list[ObservedEngineeringEvidence] | None = None,
     ) -> EngineeringEvent:
         if len(output) > self.policy.max_observation_chars:
@@ -3433,6 +3632,8 @@ class CFDEngineeringAgent:
             artifact_sha256=artifact_sha256,
             native_command_executed=native_command_executed,
             mesh_command_executed=mesh_command_executed,
+            failure_signature=failure_signature,
+            failure_scope=failure_scope,
             observed_evidence=list(observed_evidence or []),
         )
 

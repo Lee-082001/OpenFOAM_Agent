@@ -1,4 +1,11 @@
-# OpenFOAM Agent v2.16 Architecture
+# OpenFOAM Agent v2.17 Architecture
+
+
+## v2.17 mesh compatibility and repair-scope escalation
+
+Meshing failures are no longer treated as one undifferentiated repair class. Python may enforce executable prerequisites without choosing CFD strategy. The first concrete contract is `snappyHexMesh`: a base `polyMesh` containing an `empty` patch is deterministic evidence that the fully-3D snapping prerequisite is not satisfied. This produces a strategy-scoped failure without consuming the native command. Native mesh failures also receive normalized signatures; when the current failure signature repeats, the compact phase contract escalates from local `RepairTurn` to `StrategyRevisionTurn`.
+
+`StrategyRevisionTurn` lets the Engineering Agent replace/drop meshing artifacts and select a different command pipeline while confirmed intake remains immutable. `TypedBlockMeshFile` is a separate structural DSL because `vertices`, `blocks`, `edges`, and `boundary` use list-heavy blockMesh syntax that should not be flattened into generic dotted dictionary entries. Python renders punctuation and verifies indices; the Agent owns geometry, topology, cell counts, grading, patch types, and the decision to use blockMesh at all.
 
 ## v2.16 compact semantic-evidence boundary
 
