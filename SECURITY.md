@@ -104,3 +104,8 @@ Engineering evidence authority is not delegated to model prose. Successful capab
 ## v2.10 repair/serializer boundary
 
 Delta repair does not introduce fuzzy edits. `CaseFilePatch` is accepted only when its `old` fragment matches exactly once, and the resulting file is re-written through the existing workspace content/path safety checks. Typed OpenFOAM dictionaries do not choose engineering values; they only move brace/semicolon rendering into deterministic Python and the serialized content is still passed through the same workspace safety validation.
+
+
+## Claude Code subscription backend
+
+`--backend claude` is a cloud model transport, not an execution authority. OpenFOAM Agent requires explicit `--confirm-api-calls`, verifies `claude auth status` reports the Claude subscription/OAuth path, and strips API/provider routing variables before invoking the CLI. Calls run in an empty temporary directory with no session persistence, mandatory safe mode, built-in tools disabled, and MCP disabled; returned structured output is revalidated by Pydantic before any deterministic action. Claude Code does not expose Codex's OS-level read-only sandbox flag, so centrally managed Claude Code hooks/policies are treated as part of the trusted local installation boundary. The Agent does not pass the CFD workspace as the Claude working directory or authorize Claude model tools to read/write it.

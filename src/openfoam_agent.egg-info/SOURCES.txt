@@ -19,6 +19,7 @@ src/openfoam_agent/capabilities/graph.py
 src/openfoam_agent/engineering/__init__.py
 src/openfoam_agent/engineering/agent.py
 src/openfoam_agent/llm/__init__.py
+src/openfoam_agent/llm/claude_client.py
 src/openfoam_agent/llm/codex_client.py
 src/openfoam_agent/llm/context.py
 src/openfoam_agent/llm/ollama_client.py
@@ -71,6 +72,7 @@ tests/test_v215_semantic_fidelity.py
 tests/test_v216_compact_semantic_evidence.py
 tests/test_v217_mesh_strategy.py
 tests/test_v218_runtime_boundary_codex.py
+tests/test_v219_claude_backend.py
 tests/test_v21_postprocessing.py
 tests/test_v22_human_feedback.py
 tests/test_v231_checkmesh_preflight.py

@@ -15,16 +15,19 @@ from typing import Any, Sequence
 from openfoam_agent.conversation import ConversationSession, InteractionMode
 from openfoam_agent.engineering import EngineeringPolicy
 from openfoam_agent.llm import (
+    DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
     DEFAULT_OLLAMA_API_KEY,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
+    ClaudeLLM,
     CodexLLM,
     LLMConfigurationError,
     OllamaLLM,
     OpenAILLM,
     RuleBasedLLM,
     WorkflowLLMs,
+    check_claude_cli,
     check_codex_cli,
     check_ollama_health,
     normalize_ollama_base_url,
@@ -63,7 +66,7 @@ SUCCESS_STATES = {
     State.DONE,
 }
 CLARIFICATION_EXIT_CODE = 2
-_AUTONOMOUS_BACKENDS = frozenset({"openai", "ollama", "codex"})
+_AUTONOMOUS_BACKENDS = frozenset({"openai", "ollama", "codex", "claude"})
 _SETTABLE_FACT_PREFIXES = {
     "classification", "objective", "domain", "geometry", "scale", "material",
     "property", "physics", "temporal", "motion", "boundary", "output",
@@ -102,11 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=("rule-based-intake", "openai", "ollama", "codex"),
+        choices=("rule-based-intake", "openai", "ollama", "codex", "claude"),
         default="rule-based-intake",
         help=(
             "rule-based-intake is an offline intake regression baseline only; "
-            "autonomous engineering supports --backend openai, --backend ollama, or --backend codex."
+            "autonomous engineering supports --backend openai, --backend ollama, --backend codex, or --backend claude."
         ),
     )
     parser.add_argument(
@@ -114,7 +117,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Default model for every role. OpenAI otherwise uses OPENAI_MODEL; "
             "Ollama otherwise uses OLLAMA_MODEL or gemma4:31b; Codex otherwise uses "
-            "CODEX_MODEL or the Codex CLI default. Role-specific flags override it."
+            "CODEX_MODEL or the Codex CLI default; Claude otherwise uses CLAUDE_MODEL "
+            "or the Claude Code CLI default. Role-specific flags override it."
         ),
     )
     parser.add_argument(
@@ -149,9 +153,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--confirm-api-calls",
         action="store_true",
-        help=("Explicitly authorize cloud model calls for --backend openai or --backend codex. "
+        help=("Explicitly authorize cloud model calls for --backend openai, --backend codex, or --backend claude. "
               "The CFD request and bounded engineering observations/log excerpts are sent to "
-              "OpenAI/Codex; local absolute paths are redacted. Codex runs ephemeral/read-only."),
+              "OpenAI/Codex/Claude; local absolute paths are redacted. Codex/Claude run isolated and non-persistent with model-side tools disabled or read-only."),
     )
     parser.add_argument(
         "--base-url",
@@ -295,16 +299,16 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         invalid_model_flags = [flag for flag, value in role_model_flags.items() if value]
         if invalid_model_flags:
             parser.error(
-                f"{', '.join(invalid_model_flags)} require --backend openai, --backend ollama, or --backend codex."
+                f"{', '.join(invalid_model_flags)} require --backend openai, --backend ollama, --backend codex, or --backend claude."
             )
         if args.base_url:
             parser.error("--base-url is only valid with --backend ollama.")
         if args.confirm_api_calls:
-            parser.error("--confirm-api-calls is only valid with --backend openai or --backend codex.")
+            parser.error("--confirm-api-calls is only valid with --backend openai, --backend codex, or --backend claude.")
         if args.confirm_intake:
             parser.error(
                 "Autonomous engineering has no rule-based template fallback. "
-                "Use --backend openai/codex with --confirm-api-calls, or --backend ollama."
+                "Use --backend openai/codex/claude with --confirm-api-calls, or --backend ollama."
             )
     elif args.backend == "openai":
         if args.base_url:
@@ -316,10 +320,15 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
             parser.error("--base-url is only valid with --backend ollama.")
         if not args.confirm_api_calls:
             parser.error("--backend codex requires --confirm-api-calls because Codex is a cloud model backend.")
+    elif args.backend == "claude":
+        if args.base_url:
+            parser.error("--base-url is only valid with --backend ollama.")
+        if not args.confirm_api_calls:
+            parser.error("--backend claude requires --confirm-api-calls because Claude Code is a cloud model backend.")
     elif args.backend == "ollama":
         if args.confirm_api_calls:
             parser.error(
-                "--confirm-api-calls is for cloud OpenAI/Codex backends and is not used by Ollama."
+                "--confirm-api-calls is for cloud OpenAI/Codex/Claude backends and is not used by Ollama."
             )
         try:
             normalize_ollama_base_url(
@@ -378,6 +387,12 @@ _ROLE_MODEL_ENV = {
         "postprocessing": "CODEX_POSTPROCESS_MODEL",
         "review": "CODEX_REVIEW_MODEL",
     },
+    "claude": {
+        "intake": "CLAUDE_INTAKE_MODEL",
+        "engineering": "CLAUDE_ENGINEERING_MODEL",
+        "postprocessing": "CLAUDE_POSTPROCESS_MODEL",
+        "review": "CLAUDE_REVIEW_MODEL",
+    },
 }
 
 
@@ -395,18 +410,20 @@ def _resolve_backend_model_names(
     environ: dict[str, str] | None = None,
 ) -> tuple[str | None, dict[str, str]]:
     env = os.environ if environ is None else environ
-    if backend not in {"openai", "ollama", "codex"}:
+    if backend not in {"openai", "ollama", "codex", "claude"}:
         raise LLMConfigurationError(f"Unsupported model backend: {backend}")
 
     default_env = {
         "openai": "OPENAI_MODEL",
         "ollama": "OLLAMA_MODEL",
         "codex": "CODEX_MODEL",
+        "claude": "CLAUDE_MODEL",
     }[backend]
     built_in_default = {
         "openai": None,
         "ollama": DEFAULT_OLLAMA_MODEL,
         "codex": DEFAULT_CODEX_MODEL,
+        "claude": DEFAULT_CLAUDE_MODEL,
     }[backend]
     default_model = _cleaned(args.model) or _cleaned(env.get(default_env)) or built_in_default
     cli_overrides = {
@@ -425,7 +442,7 @@ def _resolve_backend_model_names(
             resolved[role] = model_name
     if missing:
         roles = ", ".join(missing)
-        prefix = {"openai": "OPENAI", "ollama": "OLLAMA", "codex": "CODEX"}[backend]
+        prefix = {"openai": "OPENAI", "ollama": "OLLAMA", "codex": "CODEX", "claude": "CLAUDE"}[backend]
         raise LLMConfigurationError(
             f"No {backend} model is configured for role(s): {roles}. "
             f"Set --model/{prefix}_MODEL or provide every missing role override."
@@ -455,6 +472,14 @@ def _resolve_codex_model_names(
     environ: dict[str, str] | None = None,
 ) -> tuple[str | None, dict[str, str]]:
     return _resolve_backend_model_names(args, backend="codex", environ=environ)
+
+
+def _resolve_claude_model_names(
+    args: argparse.Namespace,
+    *,
+    environ: dict[str, str] | None = None,
+) -> tuple[str | None, dict[str, str]]:
+    return _resolve_backend_model_names(args, backend="claude", environ=environ)
 
 
 def _build_llm(args: argparse.Namespace):
@@ -501,6 +526,27 @@ def _build_llm(args: argparse.Namespace):
             review=codex_client(names["review"]),
         )
         return llms, "codex", default_model
+
+    if args.backend == "claude":
+        default_model, names = _resolve_claude_model_names(args)
+        status = check_claude_cli()
+        clients: dict[str, ClaudeLLM] = {}
+
+        def claude_client(model_name: str) -> ClaudeLLM:
+            if model_name not in clients:
+                clients[model_name] = ClaudeLLM(
+                    model=None if model_name == DEFAULT_CLAUDE_MODEL else model_name,
+                    status=status,
+                )
+            return clients[model_name]
+
+        llms = WorkflowLLMs(
+            intake=claude_client(names["intake"]),
+            engineering=claude_client(names["engineering"]),
+            postprocessing=claude_client(names["postprocessing"]),
+            review=claude_client(names["review"]),
+        )
+        return llms, "claude", default_model
 
     default_model, names = _resolve_ollama_model_names(args)
     base_url = normalize_ollama_base_url(
@@ -875,7 +921,7 @@ def _print_human_report(report: dict[str, Any]) -> None:
     if report["message"]:
         print(f"message: {report['message']}")
     if report["final_state"] == State.INTAKE_REVIEW_REQUIRED.value:
-        print("next: /confirm in interactive mode, or --confirm-intake with --backend openai/ollama/codex")
+        print("next: /confirm in interactive mode, or --confirm-intake with --backend openai/ollama/codex/claude")
     if report["final_state"] == State.SOLVE_READY.value:
         print("next: /solve to approve foamRun, or /feedback <observation> to revise the mesh/case")
     elif report["final_state"] == State.MESH_READY.value:
@@ -1048,7 +1094,7 @@ def _confirm_session(session, args, llm, backend, model) -> None:
         print("blocking 질문에 답변한 뒤 확정할 수 있습니다.")
         return
     if backend not in _AUTONOMOUS_BACKENDS:
-        print("v2 autonomous engineering requires --backend openai, --backend ollama, or --backend codex.")
+        print("v2 autonomous engineering requires --backend openai, --backend ollama, --backend codex, or --backend claude.")
         return
     attempt = session.next_attempt()
     engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
@@ -1084,7 +1130,7 @@ def _feedback_session(session, args, llm, backend, model, feedback_text: str) ->
         print("/feedback은 MESH_READY 또는 RESULT_REVIEW_REQUIRED에서 사용할 수 있습니다.")
         return
     if backend not in _AUTONOMOUS_BACKENDS:
-        print("human-feedback diagnosis requires --backend openai, --backend ollama, or --backend codex.")
+        print("human-feedback diagnosis requires --backend openai, --backend ollama, --backend codex, or --backend claude.")
         return
     text = feedback_text.strip()
     if not text:
@@ -1137,7 +1183,7 @@ def _confirm_revision_session(session, args, llm, backend, model) -> None:
         print("확정할 human-feedback revision proposal이 없습니다.")
         return
     if backend not in _AUTONOMOUS_BACKENDS:
-        print("autonomous revision requires --backend openai, --backend ollama, or --backend codex.")
+        print("autonomous revision requires --backend openai, --backend ollama, --backend codex, or --backend claude.")
         return
     if state.case_dir is None:
         print("수정할 sealed case directory가 없습니다.")
@@ -1405,6 +1451,19 @@ def _interactive(args, llm, backend, model) -> int:
             f"cli={version}; runtime-repair/revision use the engineering model. "
             "ChatGPT/Codex login is used; API-key routing variables are ignored. "
             "Each model call is ephemeral in an isolated read-only working directory."
+        )
+    elif backend == "claude":
+        routes = _model_routes(llm)
+        status = getattr(WorkflowLLMs.coerce(llm).intake, "status", None)
+        version = getattr(status, "version", "claude")
+        subscription = getattr(status, "subscription_type", None) or "subscription"
+        print(
+            "Claude Code model routing: "
+            f"intake={routes['intake']}, engineering={routes['engineering']}, "
+            f"postprocess={routes['postprocessing']}, review={routes['review']}; "
+            f"cli={version}; auth=claude.ai/{subscription}; runtime-repair/revision use the engineering model. "
+            "API/provider routing variables are ignored. Each model call is non-persistent in an "
+            "isolated working directory with built-in tools and MCP disabled."
         )
     elif backend == "ollama":
         routes = _model_routes(llm)

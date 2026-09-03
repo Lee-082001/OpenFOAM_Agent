@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: openfoam-agent
-Version: 2.18.0
+Version: 2.19.0
 Summary: Agent-owned OpenFOAM CFD engineering behind deterministic safety gates
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
@@ -9,7 +9,14 @@ Requires-Dist: pydantic<3,>=2.8
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8; extra == "dev"
 
-# OpenFOAM Agent v2.18.0
+# OpenFOAM Agent v2.19.0
+
+
+## v2.19.0: Claude Code subscription backend
+
+A fourth autonomous model transport is available as `--backend claude`. It invokes an already installed Claude Code CLI in non-interactive print mode (`claude -p`) and requires `claude auth status` to report the Claude subscription/OAuth path (`authMethod=claude.ai`). Startup and model subprocesses remove API/provider routing variables such as `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and Bedrock/Vertex/Foundry selector variables so an exported credential cannot silently turn this backend into a different billing/provider path. `CLAUDE_CODE_OAUTH_TOKEN` is intentionally preserved because Anthropic documents it as a subscription OAuth credential for headless use.
+
+Claude Code is model transport only. Every call runs from an empty temporary working directory with `--no-session-persistence`, mandatory `--safe-mode`, `--tools ""`, and `--strict-mcp-config`; OpenFOAM Agent never asks Claude Code to read/edit the CFD case or execute native tools. Structured output is requested with `--output-format json --json-schema ...`, then the returned `structured_output` is independently revalidated by Pydantic with one bounded protocol-repair attempt. Role routing supports `CLAUDE_MODEL`, `CLAUDE_INTAKE_MODEL`, `CLAUDE_ENGINEERING_MODEL`, `CLAUDE_POSTPROCESS_MODEL`, and `CLAUDE_REVIEW_MODEL`; omitted model IDs delegate selection to the Claude Code CLI default. See `V2_19_CHANGES.md`.
 
 
 ## v2.18.0: runtime exit invariants, boundary consistency, and Codex backend
@@ -110,7 +117,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-v2.9 introduced the execution-plan fast path. Current v2.18.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v2.19.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -294,7 +301,7 @@ The Ollama adapter reuses the installed OpenAI Python SDK against the OpenAI-com
 
 For multi-turn Intake, v2.7.3 also gives only the Ollama/local adapter two bounded **semantic provenance** repair turns. If a local model marks a synthesized summary as `source=user` with translated/paraphrased evidence, the deterministic validator rejects it and the repair prompt re-supplies the exact user turns, the invalid draft, and the provenance rule. Multi-turn summaries should be corrected to `source=derived` with `reason`/`depends_on`; direct facts still require short verbatim evidence. Persistent fabricated evidence remains a terminal failure.
 
-`--confirm-api-calls` is intentionally not required for `--backend ollama` because requests stay on local loopback and traverse the user-created SSH tunnel; that flag remains mandatory for the cloud OpenAI and Codex backends.
+`--confirm-api-calls` is intentionally not required for `--backend ollama` because requests stay on local loopback and traverse the user-created SSH tunnel; that flag remains mandatory for the cloud OpenAI, Codex, and Claude backends.
 
 
 ### Codex CLI backend with ChatGPT login (v2.18.0)
@@ -310,9 +317,26 @@ openfoam-agent --interactive \
 
 Role-specific model flags and `CODEX_MODEL`, `CODEX_INTAKE_MODEL`, `CODEX_ENGINEERING_MODEL`, `CODEX_POSTPROCESS_MODEL`, and `CODEX_REVIEW_MODEL` are supported. If no Codex model is specified, the adapter leaves model selection to the Codex CLI default. Each call is stateless/ephemeral, runs from an empty temporary directory under `--sandbox read-only`, and receives only the bounded prompt/state capsule supplied by OpenFOAM Agent. `OPENAI_API_KEY`, `CODEX_API_KEY`, API base URL, organization, and project routing variables are removed from the Codex subprocess environment by design. The final JSON is validated again by the same Pydantic contract before any deterministic action is permitted.
 
+### Claude Code backend with Claude subscription login (v2.19.0)
+
+Authenticate Claude Code separately and verify the subscription login before starting the Agent:
+
+```bash
+claude auth login
+claude auth status
+
+openfoam-agent --interactive \
+  --backend claude \
+  --confirm-api-calls
+```
+
+Startup requires `claude auth status` to report `loggedIn=true` and `authMethod=claude.ai`. The adapter strips `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and Bedrock/Vertex/Foundry routing selectors before both the auth check and every model call. It then invokes `claude -p` with `--output-format json`, `--json-schema`, `--no-session-persistence`, mandatory `--safe-mode`, `--tools ""`, and `--strict-mcp-config` from an empty temporary directory. The model therefore receives only the bounded prompt/state capsule; case writes and OpenFOAM commands remain deterministic Python actions. Claude Code does not provide the same OS-level read-only sandbox flag used by Codex, so managed enterprise hooks remain an external installation-policy trust boundary rather than something OpenFOAM Agent claims to sandbox.
+
+Role-specific environment variables are `CLAUDE_MODEL`, `CLAUDE_INTAKE_MODEL`, `CLAUDE_ENGINEERING_MODEL`, `CLAUDE_POSTPROCESS_MODEL`, and `CLAUDE_REVIEW_MODEL`. If no Claude model is specified, the adapter delegates model choice to the Claude Code CLI default.
+
 ### Role-based model routing
 
-The workflow has four configurable LLM roles. `--backend` selects the backend for the **whole workflow**, while each role may select a different model ID within that backend. The current CLI does not mix OpenAI, Ollama, and Codex backends in one run.
+The workflow has four configurable LLM roles. `--backend` selects the backend for the **whole workflow**, while each role may select a different model ID within that backend. The current CLI does not mix OpenAI, Ollama, Codex, and Claude backends in one run.
 
 | Role | CLI flag | Environment variable | Used for |
 | --- | --- | --- | --- |
@@ -329,11 +353,11 @@ Runtime repair and confirmed case revision intentionally reuse the **Engineering
 role-specific CLI flag
   > role-specific environment variable
   > --model
-  > OPENAI_MODEL / OLLAMA_MODEL / CODEX_MODEL
-  > backend built-in default (Ollama: gemma4:31b; Codex: CLI-selected model)
+  > OPENAI_MODEL / OLLAMA_MODEL / CODEX_MODEL / CLAUDE_MODEL
+  > backend built-in default (Ollama: gemma4:31b; Codex/Claude: CLI-selected model)
 ```
 
-OpenAI has no built-in default model, so every OpenAI role must resolve either through a global default or an explicit role override. Codex may omit a model ID and delegate selection to the authenticated Codex CLI default. A global default is optional when all four roles are configured explicitly. If multiple roles resolve to the same model ID, the CLI reuses one backend adapter instance for those roles.
+OpenAI has no built-in default model, so every OpenAI role must resolve either through a global default or an explicit role override. Codex and Claude may omit a model ID and delegate selection to their authenticated CLI defaults. A global default is optional when all four roles are configured explicitly. If multiple roles resolve to the same model ID, the CLI reuses one backend adapter instance for those roles.
 
 #### OpenAI examples
 
@@ -390,7 +414,7 @@ openfoam-agent --interactive \
   --review-model "gpt-5.6-luna"
 ```
 
-The OpenAI backend currently uses one `OPENAI_API_KEY`/OpenAI endpoint configuration for the run; the per-role settings choose **model IDs**, not separate API keys or separate providers. Per-role OpenAI/Ollama/Codex backend mixing or per-role API keys/base URLs are not exposed by the current CLI.
+The OpenAI backend currently uses one `OPENAI_API_KEY`/OpenAI endpoint configuration for the run; the per-role settings choose **model IDs**, not separate API keys or separate providers. Per-role OpenAI/Ollama/Codex/Claude backend mixing or per-role API keys/base URLs are not exposed by the current CLI.
 
 #### Ollama role routing
 
@@ -691,7 +715,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2.18.0 release tree currently passes **219 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v2.19.0 release tree currently passes **225 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;

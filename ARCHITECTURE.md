@@ -1,7 +1,7 @@
-# OpenFOAM Agent v2.18 Architecture
+# OpenFOAM Agent v2.19 Architecture
 
 
-## v2.18 runtime-repair exit, boundary, and model-transport invariants
+## v2.19 model-transport and v2.18 runtime/boundary invariants
 
 `RUNTIME_REPAIR` is an internal transient state, not a top-level workflow destination. Every runtime-repair exit carries a `RuntimeRepairDecision`: `RETRY_SOLVER`, `NEEDS_USER_REVIEW`, `BLOCKED`, or `STRATEGY_REVISION`. The Engineering Agent closes the transient state before returning; RuntimeOrchestrator rejects a retry that does not restore `SIMULATION`, and a defensive top-level branch converts any escaped `RUNTIME_REPAIR` into `ENGINEERING_BLOCKED` with an internal-invariant diagnostic. This prevents an OpenFOAM-local repair problem from being masked by a generic state-machine handler failure.
 
@@ -10,6 +10,8 @@ PreSolve now owns a narrow cross-file execution contract between the generated m
 Mesh-topology mutators (`blockMesh`, `snappyHexMesh`, `createPatch`) invalidate cached mesh/checkMesh and pre-solve evidence because native tools may change `constant/polyMesh` even on an unsuccessful attempt. During runtime repair, any case-file mutation also invalidates the CaseSeal. `retry_solver` must therefore re-establish current PreSolve/checkMesh evidence as required and reseal the exact plan+manifest before execution resumes.
 
 `--backend codex` is a model-transport boundary, not a new execution authority. OpenFOAM Agent invokes `codex exec` in an empty temporary directory with an ephemeral session and read-only sandbox, supplies a strict output schema, and reads only the final message. API-routing environment variables are stripped so this backend uses the separately authenticated Codex CLI login path rather than silently becoming ordinary API billing. Python performs its own Pydantic validation after Codex returns. The Codex process has no authority to mutate the CFD workspace; all case changes and native commands still pass through the existing deterministic actions and gates.
+
+`--backend claude` is also a model-transport boundary. It uses Claude Code print mode only after a startup auth check confirms the Claude subscription/OAuth path. API/provider routing environment variables are stripped, each call uses an empty temporary working directory, session persistence is disabled, `--safe-mode` is mandatory, built-in model tools are removed with `--tools ""`, and MCP discovery is disabled with `--strict-mcp-config`. Claude Code structured output is independently revalidated by Pydantic before any Agent action can run. Unlike Codex, Claude Code does not expose the same OS-level read-only sandbox flag; managed enterprise hooks are therefore part of the trusted local Claude Code installation/policy boundary, not an execution authority granted by OpenFOAM Agent.
 
 
 ## v2.17 mesh compatibility and repair-scope escalation
@@ -249,7 +251,7 @@ A mesh-valid case is not necessarily solver-ready. The CLI path now separates `M
 
 ## Local LLM provider boundary (v2.7.0)
 
-All reasoning providers implement the same `StructuredLLM.generate(schema, prompt, system_prompt=...)` protocol. `CFDWorkflow`, Intake, Engineering, Runtime repair, PostProcessing, and Review do not branch on OpenAI versus Ollama. Provider selection and client construction are confined to the CLI/backend layer.
+All reasoning providers implement the same `StructuredLLM.generate(schema, prompt, system_prompt=...)` protocol. `CFDWorkflow`, Intake, Engineering, Runtime repair, PostProcessing, and Review do not branch on OpenAI versus Ollama. Provider selection and client construction are confined to the CLI/backend layer; OpenAI, Ollama, Codex, and Claude all satisfy the same structured protocol.
 
 ```text
 OpenFOAM Agent roles

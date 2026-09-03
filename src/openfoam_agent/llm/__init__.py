@@ -1,3 +1,9 @@
+from .claude_client import (
+    DEFAULT_CLAUDE_MODEL,
+    ClaudeCLIStatus,
+    ClaudeLLM,
+    check_claude_cli,
+)
 from .codex_client import (
     DEFAULT_CODEX_MODEL,
     CodexCLIStatus,
@@ -27,6 +33,10 @@ from .routing import WorkflowLLMs
 from .rule_based import RuleBasedLLM
 
 __all__ = [
+    "DEFAULT_CLAUDE_MODEL",
+    "ClaudeCLIStatus",
+    "ClaudeLLM",
+    "check_claude_cli",
     "DEFAULT_CODEX_MODEL",
     "CodexCLIStatus",
     "CodexLLM",
