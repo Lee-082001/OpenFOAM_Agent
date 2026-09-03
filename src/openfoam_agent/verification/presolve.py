@@ -12,6 +12,10 @@ from openfoam_agent.tools.workspace import CaseWorkspace
 _CORE_SYSTEM_FILES = ("system/controlDict", "system/fvSchemes", "system/fvSolution")
 _FIELD_DIR = "0/"
 _WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]*$")
+# Narrow executable constraint types whose field patch type must match the mesh
+# patch type. Ordinary mesh types such as patch/wall intentionally are not here:
+# their field BCs may legitimately be fixedValue, zeroGradient, etc.
+_CONSTRAINT_PATCH_TYPES = frozenset({"empty", "wedge", "symmetry", "symmetryPlane", "cyclic", "cyclicAMI"})
 
 
 @dataclass
@@ -20,6 +24,7 @@ class PreSolveValidationResult:
     failures: list[str] = field(default_factory=list)
     checked_files: list[str] = field(default_factory=list)
     mesh_patches: list[str] = field(default_factory=list)
+    mesh_patch_types: dict[str, str] = field(default_factory=dict)
 
 
 class PreSolveCompletenessGate:
@@ -68,12 +73,13 @@ class PreSolveCompletenessGate:
 
         boundary_path = self.workspace.resolve_case_path("constant/polyMesh/boundary")
         mesh_patches: list[str] = []
+        mesh_patch_types: dict[str, str] = {}
         if not boundary_path.is_file():
             failures.append("constant/polyMesh/boundary is missing; mesh patch coverage cannot be verified.")
         else:
-            mesh_patches = _parse_boundary_patch_names(
-                boundary_path.read_text(encoding="utf-8", errors="replace")
-            )
+            boundary_text = boundary_path.read_text(encoding="utf-8", errors="replace")
+            mesh_patch_types = _parse_boundary_patch_types(boundary_text)
+            mesh_patches = list(mesh_patch_types) or _parse_boundary_patch_names(boundary_text)
             if not mesh_patches:
                 failures.append("No mesh boundary patches could be parsed from constant/polyMesh/boundary.")
 
@@ -83,12 +89,25 @@ class PreSolveCompletenessGate:
                 if not path.is_file():
                     continue
                 text = path.read_text(encoding="utf-8", errors="replace")
-                field_patches = _parse_boundary_field_names(text)
+                field_patch_types = _parse_boundary_field_types(text)
+                field_patches = list(field_patch_types) or _parse_boundary_field_names(text)
                 missing = sorted(set(mesh_patches) - set(field_patches))
                 if missing:
                     failures.append(
                         f"Boundary coverage mismatch in {relative}; missing patchField entries: {missing}"
                     )
+                for patch_name in sorted(set(mesh_patch_types) & set(field_patch_types)):
+                    mesh_type = mesh_patch_types[patch_name]
+                    field_type = field_patch_types[patch_name]
+                    if (
+                        mesh_type in _CONSTRAINT_PATCH_TYPES
+                        or field_type in _CONSTRAINT_PATCH_TYPES
+                    ) and mesh_type != field_type:
+                        failures.append(
+                            "Boundary constraint-type mismatch in "
+                            f"{relative} for patch {patch_name}: mesh={mesh_type}, field={field_type}. "
+                            "Constraint patches such as empty/wedge/symmetry/cyclic must match before foamRun."
+                        )
                 if "internalField" not in text:
                     failures.append(f"Required initial field {relative} does not declare internalField.")
                 if "dimensions" not in text:
@@ -99,6 +118,7 @@ class PreSolveCompletenessGate:
             failures=failures,
             checked_files=required,
             mesh_patches=mesh_patches,
+            mesh_patch_types=mesh_patch_types,
         )
 
     @staticmethod
@@ -121,6 +141,83 @@ def _parse_boundary_field_names(text: str) -> list[str]:
     if brace < 0:
         return []
     return _top_level_dictionary_names(text, brace, closing="}")
+
+
+def _parse_boundary_patch_types(text: str) -> dict[str, str]:
+    clean = _strip_comments(text)
+    start = _find_list_start_after_count(clean)
+    if start is None:
+        return {}
+    return _named_block_types(clean, start, list_closing=")")
+
+
+def _parse_boundary_field_types(text: str) -> dict[str, str]:
+    clean = _strip_comments(text)
+    match = re.search(r"\bboundaryField\b", clean)
+    if match is None:
+        return {}
+    brace = clean.find("{", match.end())
+    if brace < 0:
+        return {}
+    return _named_block_types(clean, brace, list_closing="}")
+
+
+def _named_block_types(text: str, open_index: int, *, list_closing: str) -> dict[str, str]:
+    """Return top-level block name -> declared `type` from an OpenFOAM section."""
+
+    clean = _strip_comments(text)
+    opener = "(" if list_closing == ")" else "{"
+    if open_index >= len(clean) or clean[open_index] != opener:
+        open_index = clean.find(opener, max(0, open_index - 32))
+        if open_index < 0:
+            return {}
+
+    result: dict[str, str] = {}
+    i = open_index + 1
+    depth = 0
+    while i < len(clean):
+        while i < len(clean) and clean[i].isspace():
+            i += 1
+        if i >= len(clean):
+            break
+        if clean[i] == list_closing and depth == 0:
+            break
+        name_match = re.match(r"[A-Za-z_][A-Za-z0-9_.:-]*", clean[i:])
+        if name_match is None:
+            i += 1
+            continue
+        name = name_match.group(0)
+        j = i + len(name)
+        while j < len(clean) and clean[j].isspace():
+            j += 1
+        if j >= len(clean) or clean[j] != "{":
+            i = j + 1
+            continue
+        end = _matching_brace(clean, j)
+        if end is None:
+            break
+        block = clean[j + 1 : end]
+        type_match = re.search(r"\btype\s+([^;{}]+);", block)
+        if type_match is not None:
+            declared = re.sub(r"\s+", " ", type_match.group(1)).strip()
+            if declared:
+                result[name] = declared.split()[0]
+        else:
+            result[name] = ""
+        i = end + 1
+    return result
+
+
+def _matching_brace(text: str, open_index: int) -> int | None:
+    depth = 0
+    for index in range(open_index, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
 
 
 def _find_list_start_after_count(text: str) -> int | None:

@@ -9,7 +9,12 @@ from openfoam_agent.progress import (
     ProgressReporter,
     SolverProgressTracker,
 )
-from openfoam_agent.schemas.simulation import RuntimePolicy, RuntimeReport, SimulationAttempt
+from openfoam_agent.schemas.simulation import (
+    RuntimePolicy,
+    RuntimeRepairDecision,
+    RuntimeReport,
+    SimulationAttempt,
+)
 from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.parsers import parse_runtime_log
@@ -166,11 +171,33 @@ class RuntimeOrchestrator:
                 native_execution=True,
             )
             attempt.repair_requested = outcome.retry
-            if not outcome.retry:
+            if outcome.decision != RuntimeRepairDecision.RETRY_SOLVER:
                 state.runtime_report = RuntimeReport(
                     success=False,
                     attempts=attempts,
                     final_result=result,
+                )
+                if state.current_state == State.RUNTIME_REPAIR:
+                    # Defensive state invariant: the transient repair state is internal
+                    # and must never escape to the top-level workflow.
+                    state.solve_approved = False
+                    state.transition(
+                        State.ENGINEERING_BLOCKED,
+                        "Runtime repair returned without an explicit terminal/retry state; "
+                        f"decision={outcome.decision.value}. {outcome.reason}",
+                    )
+                return state
+
+            if state.current_state != State.SIMULATION:
+                state.runtime_report = RuntimeReport(
+                    success=False,
+                    attempts=attempts,
+                    final_result=result,
+                )
+                state.solve_approved = False
+                state.transition(
+                    State.ENGINEERING_BLOCKED,
+                    "Runtime repair requested RETRY_SOLVER without restoring SIMULATION state.",
                 )
                 return state
 

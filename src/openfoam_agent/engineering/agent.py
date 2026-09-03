@@ -90,6 +90,7 @@ from openfoam_agent.verification.safety import (
 )
 from openfoam_agent.workflow.state import CFDState
 from openfoam_agent.workflow.states import State
+from openfoam_agent.schemas.simulation import RuntimeRepairDecision
 
 
 @dataclass
@@ -178,9 +179,18 @@ class EngineeringPolicy:
 
 @dataclass
 class RepairOutcome:
-    retry: bool
+    decision: RuntimeRepairDecision
     plan: EngineeringPlan | None = None
     reason: str = ""
+
+    @property
+    def retry(self) -> bool:
+        """Backward-compatible convenience for the runtime orchestrator/tests."""
+
+        return self.decision == RuntimeRepairDecision.RETRY_SOLVER
+
+
+_MESH_TOPOLOGY_MUTATING_COMMANDS = frozenset({"blockMesh", "snappyHexMesh", "createPatch"})
 
 
 class CFDEngineeringAgent:
@@ -1205,33 +1215,43 @@ class CFDEngineeringAgent:
         if isinstance(repair, RuntimeCaseRepairAction) and not (
             repair.file_patches or repair.replacement_files or repair.typed_dictionaries
         ):
-            return RepairOutcome(
-                False,
-                reason=(
-                    "Runtime repair contained no case-file change; automatic solver retry without "
-                    "a concrete repair is not authorized."
-                ),
+            reason = (
+                "Runtime repair contained no case-file change; automatic solver retry without "
+                "a concrete repair is not authorized."
             )
+            state.engineering_events.append(self._event(llm_step, repair.type, False, reason))
+            return None
         if isinstance(repair, RepairCasePlanAction) and not (
             repair.patches or repair.replacement_files or repair.typed_dictionaries or repair.updated_plan is not None
         ):
-            return RepairOutcome(False, reason="Runtime repair contained no executable delta.")
+            reason = "Runtime repair contained no executable delta."
+            state.engineering_events.append(self._event(llm_step, repair.type, False, reason))
+            return None
         self._mark_evidence_gaps_satisfied("runtime_repair")
         try:
             if isinstance(repair, RuntimeCaseRepairAction):
                 actions, plan = self._runtime_repair_actions(state, repair)
             else:
                 actions, plan = self._repair_actions(state, repair, runtime=True)
-        except (WorkspaceSafetyError, FoamSerializationError) as exc:
-            return RepairOutcome(False, reason=str(exc))
+        except FoamSerializationError as exc:
+            state.engineering_events.append(
+                self._event(llm_step, repair.type, False, f"Runtime repair serialization failed: {exc}")
+            )
+            return None
+        except WorkspaceSafetyError as exc:
+            reason = f"Runtime repair blocked by workspace safety: {exc}"
+            return RepairOutcome(RuntimeRepairDecision.BLOCKED, reason=reason)
         if plan.solver != approved_solver:
-            return RepairOutcome(False, reason="Runtime repair attempted to change the user-approved solver.")
+            return RepairOutcome(
+                RuntimeRepairDecision.NEEDS_USER_REVIEW,
+                reason="Runtime repair attempted to change the user-approved solver.",
+            )
         sequence_id = f"runtime-repair:repair-plan:{llm_step:04d}"
         total = len(actions)
         for index, member in enumerate(actions, start=1):
             if len(state.engineering_events) - runtime_event_start >= self.policy.max_runtime_repair_tool_actions:
                 return RepairOutcome(
-                    False,
+                    RuntimeRepairDecision.BLOCKED,
                     reason=f"Runtime repair deterministic action budget exhausted ({self.policy.max_runtime_repair_tool_actions}).",
                 )
             outcome: RepairOutcome | None = None
@@ -1616,6 +1636,34 @@ class CFDEngineeringAgent:
         )
         return state
 
+    def _runtime_repair_outcome(
+        self,
+        state: CFDState,
+        decision: RuntimeRepairDecision,
+        reason: str,
+        plan: EngineeringPlan | None = None,
+    ) -> RepairOutcome:
+        """Close the transient RUNTIME_REPAIR state before returning to the workflow.
+
+        RUNTIME_REPAIR is an internal state owned by RuntimeOrchestrator/Engineering. It
+        must never leak back to the top-level workflow. The decision enum makes every
+        non-retry exit explicit instead of overloading a boolean.
+        """
+
+        if decision == RuntimeRepairDecision.RETRY_SOLVER:
+            if state.current_state != State.SIMULATION:
+                state.transition(State.SIMULATION, reason or "Runtime repair requested solver retry.")
+        elif decision == RuntimeRepairDecision.NEEDS_USER_REVIEW:
+            state.solve_approved = False
+            state.transition(State.ENGINEERING_REVIEW_REQUIRED, reason)
+        elif decision == RuntimeRepairDecision.STRATEGY_REVISION:
+            state.solve_approved = False
+            state.transition(State.ENGINEERING_REVIEW_REQUIRED, reason)
+        else:
+            state.solve_approved = False
+            state.transition(State.ENGINEERING_BLOCKED, reason)
+        return RepairOutcome(decision=decision, plan=plan, reason=reason)
+
     def repair_runtime(
         self,
         state: CFDState,
@@ -1625,12 +1673,12 @@ class CFDEngineeringAgent:
         native_execution: bool = True,
     ) -> RepairOutcome:
         if state.engineering_plan is None or state.case_seal is None:
-            return RepairOutcome(False, reason="No approved engineering plan is available.")
+            return self._runtime_repair_outcome(state, RuntimeRepairDecision.BLOCKED, "No approved engineering plan is available.")
         try:
             self.workspace.adopt_seal(state.case_seal)
             self.safety.verify_seal(state.engineering_plan, state.case_seal)
         except WorkspaceSafetyError as exc:
-            return RepairOutcome(False, reason=f"Approved case integrity verification failed: {exc}")
+            return self._runtime_repair_outcome(state, RuntimeRepairDecision.BLOCKED, f"Approved case integrity verification failed: {exc}")
         if state.mesh_evidence is not None and state.mesh_evidence.passed:
             # The full case seal proves the runtime-repair workspace is still the exact
             # case for which this persisted checkMesh evidence was approved. Restore
@@ -1679,7 +1727,9 @@ class CFDEngineeringAgent:
                     runtime_event_start=runtime_event_start,
                 )
                 if outcome is not None:
-                    return outcome
+                    return self._runtime_repair_outcome(
+                        state, outcome.decision, outcome.reason, outcome.plan
+                    )
                 continue
             if isinstance(action, EngineeringSequenceAction):
                 outcome = self._execute_runtime_sequence(
@@ -1692,7 +1742,9 @@ class CFDEngineeringAgent:
                     runtime_event_start=runtime_event_start,
                 )
                 if outcome is not None:
-                    return outcome
+                    return self._runtime_repair_outcome(
+                        state, outcome.decision, outcome.reason, outcome.plan
+                    )
                 continue
 
             if len(state.engineering_events) - runtime_event_start >= self.policy.max_runtime_repair_tool_actions:
@@ -1700,8 +1752,7 @@ class CFDEngineeringAgent:
                     "Runtime repair deterministic action budget exhausted "
                     f"({self.policy.max_runtime_repair_tool_actions})."
                 )
-                state.transition(State.ENGINEERING_BLOCKED, reason)
-                return RepairOutcome(False, reason=reason)
+                return self._runtime_repair_outcome(state, RuntimeRepairDecision.BLOCKED, reason)
 
             self._emit_action_started(
                 "runtime-repair",
@@ -1726,7 +1777,9 @@ class CFDEngineeringAgent:
                     state=state,
                 )
                 if outcome is not None:
-                    return outcome
+                    return self._runtime_repair_outcome(
+                        state, outcome.decision, outcome.reason, outcome.plan
+                    )
                 continue
             if isinstance(action, BlockAction):
                 event = self._event(step, action.type, True, action.reason)
@@ -1738,11 +1791,12 @@ class CFDEngineeringAgent:
                     limit=self.policy.max_runtime_repair_steps,
                     state=state,
                 )
-                state.transition(
-                    State.ENGINEERING_REVIEW_REQUIRED if action.needs_user_input else State.ENGINEERING_BLOCKED,
-                    action.reason,
+                decision = (
+                    RuntimeRepairDecision.NEEDS_USER_REVIEW
+                    if action.needs_user_input
+                    else RuntimeRepairDecision.BLOCKED
                 )
-                return RepairOutcome(False, reason=action.reason)
+                return self._runtime_repair_outcome(state, decision, action.reason)
 
             event = self._dispatch_tool_action(
                 action,
@@ -1760,8 +1814,7 @@ class CFDEngineeringAgent:
                 state=state,
             )
         reason = f"Runtime repair action budget exhausted ({self.policy.max_runtime_repair_steps})."
-        state.transition(State.ENGINEERING_BLOCKED, reason)
-        return RepairOutcome(False, reason=reason)
+        return self._runtime_repair_outcome(state, RuntimeRepairDecision.BLOCKED, reason)
 
     def _execute_runtime_sequence(
         self,
@@ -1791,8 +1844,7 @@ class CFDEngineeringAgent:
                     "Runtime repair deterministic action budget exhausted "
                     f"({self.policy.max_runtime_repair_tool_actions})."
                 )
-                state.transition(State.ENGINEERING_BLOCKED, reason)
-                return RepairOutcome(False, reason=reason)
+                return self._runtime_repair_outcome(state, RuntimeRepairDecision.BLOCKED, reason)
 
             self._emit_action_started(
                 "runtime-repair-sequence",
@@ -1918,7 +1970,7 @@ class CFDEngineeringAgent:
                     True,
                     "Runtime repair validated, pre-solve complete, and sealed; solver retry requested.",
                 ),
-                RepairOutcome(True, action.plan),
+                RepairOutcome(RuntimeRepairDecision.RETRY_SOLVER, action.plan),
             )
         return (
             self._event(
@@ -2520,6 +2572,10 @@ class CFDEngineeringAgent:
                     self._checkmesh_mesh_manifest = None
                     if state is not None:
                         state.mesh_evidence = None
+                if phase == "runtime_repair" and state is not None:
+                    # Any runtime repair mutation invalidates the user-approved case seal
+                    # until retry_solver revalidates and reseals the current case.
+                    state.case_seal = None
                 return self._event(
                     step,
                     action.type,
@@ -2547,6 +2603,8 @@ class CFDEngineeringAgent:
                     self._checkmesh_mesh_manifest = None
                     if state is not None:
                         state.mesh_evidence = None
+                if phase == "runtime_repair" and state is not None:
+                    state.case_seal = None
                 return self._event(
                     step, action.type, True, f"Patched {patch.path}.", artifact_sha256=digest
                 )
@@ -2573,6 +2631,8 @@ class CFDEngineeringAgent:
                     self._checkmesh_mesh_manifest = None
                     if state is not None:
                         state.mesh_evidence = None
+                if phase == "runtime_repair" and state is not None:
+                    state.case_seal = None
                 return self._event(step, action.type, True, f"Deleted {action.path}.")
 
             if isinstance(action, ValidateDictionaryAction):
@@ -2699,6 +2759,16 @@ class CFDEngineeringAgent:
                 if action.command != "checkMesh":
                     self._presolve_case_manifest = None
                     self._presolve_required_case_files = None
+                if action.command in _MESH_TOPOLOGY_MUTATING_COMMANDS:
+                    # blockMesh/snappyHexMesh/createPatch can change polyMesh patch topology.
+                    # Any previous checkMesh/pre-solve/field-boundary compatibility evidence
+                    # is stale until the new topology is checked again. This holds even on a
+                    # failed native command because partial filesystem mutation is possible.
+                    self._checkmesh_mesh_manifest = None
+                    if state is not None:
+                        state.mesh_evidence = None
+                        if phase == "runtime_repair":
+                            state.case_seal = None
                 output = _tool_output(result)
                 self.workspace.write_log(f"{step:03d}.{action.command}.log", output)
                 event_output = output

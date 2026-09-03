@@ -1,4 +1,13 @@
-# OpenFOAM Agent v2.17.0
+# OpenFOAM Agent v2.18.0
+
+
+## v2.18.0: runtime exit invariants, boundary consistency, and Codex backend
+
+v2.18 closes the transient `RUNTIME_REPAIR` state as an internal orchestration invariant. Runtime repair now returns an explicit `RuntimeRepairDecision` (`RETRY_SOLVER`, `NEEDS_USER_REVIEW`, `BLOCKED`, or `STRATEGY_REVISION`) instead of overloading one boolean, and neither the Engineering Agent nor RuntimeOrchestrator may return `RUNTIME_REPAIR` to the top-level workflow. A defensive top-level handler converts any future leak into an explicit engineering block rather than the misleading `No v2 handler for RUNTIME_REPAIR` failure.
+
+Pre-solve validation now checks cross-file constraint-patch compatibility. If the current `constant/polyMesh/boundary` marks a patch `empty`, `wedge`, `symmetry`, `symmetryPlane`, `cyclic`, or `cyclicAMI`, every required initial field must carry the same constraint patch type. Normal mesh `wall`/`patch` boundaries are intentionally not exact-matched against field BC classes such as `fixedValue` or `zeroGradient`. `blockMesh`, `snappyHexMesh`, and `createPatch` invalidate prior mesh/checkMesh/pre-solve evidence after execution attempts; runtime-repair topology or solver-input mutations also invalidate the current CaseSeal until `retry_solver` re-runs the required gates and reseals the exact case.
+
+A third autonomous model transport is available as `--backend codex`. It invokes an already installed and ChatGPT-authenticated Codex CLI through `codex exec` using an ephemeral session, an isolated temporary working directory, a read-only sandbox, and `--output-schema`/`--output-last-message`. API-key routing environment variables are removed for this backend so it cannot silently become the ordinary API backend; the CLI's ChatGPT/Codex login remains available. Codex structured output is still revalidated by Pydantic, with one bounded protocol-repair attempt. CFD filesystem writes, OpenFOAM tools, safety gates, CaseSeal, and human approvals remain owned by deterministic OpenFOAM Agent Python. See `V2_18_CHANGES.md`.
 
 
 ## v2.17.0: mesh tool contracts and strategy escalation
@@ -90,7 +99,7 @@ LLM -> `search_capabilities` -> LLM round trip is not required merely to redisco
 provider set. Successful `validate_pre_solve` evidence is also reused by finalization when the
 case manifest and required-file declaration are unchanged.
 
-v2.9 introduced the execution-plan fast path. Current v2.17.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
+v2.9 introduced the execution-plan fast path. Current v2.18.0 production defaults are tighter still: 12 engineering LLM turns soft / 24 hard, 6-turn progress extensions, 2 finalization turns, 3 automatic runtime-repair cycles with 4 LLM turns per repair cycle, and 4 post-processing plans. All remain configurable from the CLI.
 
 Typical fast path:
 
@@ -274,18 +283,32 @@ The Ollama adapter reuses the installed OpenAI Python SDK against the OpenAI-com
 
 For multi-turn Intake, v2.7.3 also gives only the Ollama/local adapter two bounded **semantic provenance** repair turns. If a local model marks a synthesized summary as `source=user` with translated/paraphrased evidence, the deterministic validator rejects it and the repair prompt re-supplies the exact user turns, the invalid draft, and the provenance rule. Multi-turn summaries should be corrected to `source=derived` with `reason`/`depends_on`; direct facts still require short verbatim evidence. Persistent fabricated evidence remains a terminal failure.
 
-`--confirm-api-calls` is intentionally not required for `--backend ollama` because requests stay on local loopback and traverse the user-created SSH tunnel; that flag remains mandatory for the cloud OpenAI backend.
+`--confirm-api-calls` is intentionally not required for `--backend ollama` because requests stay on local loopback and traverse the user-created SSH tunnel; that flag remains mandatory for the cloud OpenAI and Codex backends.
+
+
+### Codex CLI backend with ChatGPT login (v2.18.0)
+
+`--backend codex` uses the locally installed Codex CLI as a model-only transport while retaining the same OpenFOAM Agent state machine and deterministic execution boundary. Authenticate the CLI separately with `codex login`; startup verifies `codex login status` and the required non-interactive `codex exec` flags before any Agent call. Explicit cloud authorization is still required:
+
+```bash
+openfoam-agent --interactive \
+  --backend codex \
+  --confirm-api-calls \
+  --capability-db config/openfoam14_capability_graph.json
+```
+
+Role-specific model flags and `CODEX_MODEL`, `CODEX_INTAKE_MODEL`, `CODEX_ENGINEERING_MODEL`, `CODEX_POSTPROCESS_MODEL`, and `CODEX_REVIEW_MODEL` are supported. If no Codex model is specified, the adapter leaves model selection to the Codex CLI default. Each call is stateless/ephemeral, runs from an empty temporary directory under `--sandbox read-only`, and receives only the bounded prompt/state capsule supplied by OpenFOAM Agent. `OPENAI_API_KEY`, `CODEX_API_KEY`, API base URL, organization, and project routing variables are removed from the Codex subprocess environment by design. The final JSON is validated again by the same Pydantic contract before any deterministic action is permitted.
 
 ### Role-based model routing
 
-The workflow has four configurable LLM roles. `--backend` selects the backend for the **whole workflow**, while each role may select a different model ID within that backend. The current CLI does not mix OpenAI and Ollama in one run.
+The workflow has four configurable LLM roles. `--backend` selects the backend for the **whole workflow**, while each role may select a different model ID within that backend. The current CLI does not mix OpenAI, Ollama, and Codex backends in one run.
 
 | Role | CLI flag | Environment variable | Used for |
 | --- | --- | --- | --- |
-| Intake | `--intake-model` | `OPENAI_INTAKE_MODEL` / `OLLAMA_INTAKE_MODEL` | Natural-language intake, clarification, and solver-independent CFD problem definition |
-| Engineering | `--engineering-model` | `OPENAI_ENGINEERING_MODEL` / `OLLAMA_ENGINEERING_MODEL` | Initial CFD engineering, case/mesh repair, **runtime repair**, and confirmed revision engineering |
-| Post-processing | `--postprocess-model` | `OPENAI_POSTPROCESS_MODEL` / `OLLAMA_POSTPROCESS_MODEL` | Post-processing planning/reporting after a successful solve unless `--skip-postprocess` is used |
-| Review | `--review-model` | `OPENAI_REVIEW_MODEL` / `OLLAMA_REVIEW_MODEL` | Human-feedback diagnosis and revision proposal generation after `/feedback` |
+| Intake | `--intake-model` | `OPENAI_INTAKE_MODEL` / `OLLAMA_INTAKE_MODEL` / `CODEX_INTAKE_MODEL` | Natural-language intake, clarification, and solver-independent CFD problem definition |
+| Engineering | `--engineering-model` | `OPENAI_ENGINEERING_MODEL` / `OLLAMA_ENGINEERING_MODEL` / `CODEX_ENGINEERING_MODEL` | Initial CFD engineering, case/mesh repair, **runtime repair**, and confirmed revision engineering |
+| Post-processing | `--postprocess-model` | `OPENAI_POSTPROCESS_MODEL` / `OLLAMA_POSTPROCESS_MODEL` / `CODEX_POSTPROCESS_MODEL` | Post-processing planning/reporting after a successful solve unless `--skip-postprocess` is used |
+| Review | `--review-model` | `OPENAI_REVIEW_MODEL` / `OLLAMA_REVIEW_MODEL` / `CODEX_REVIEW_MODEL` | Human-feedback diagnosis and revision proposal generation after `/feedback` |
 
 Runtime repair and confirmed case revision intentionally reuse the **Engineering** model because they continue the same solver/mesh/BC/numerics responsibility. The Review model only diagnoses feedback and proposes changes; it does not execute the revision.
 
@@ -295,11 +318,11 @@ Runtime repair and confirmed case revision intentionally reuse the **Engineering
 role-specific CLI flag
   > role-specific environment variable
   > --model
-  > OPENAI_MODEL / OLLAMA_MODEL
-  > Ollama built-in default (gemma4:31b only)
+  > OPENAI_MODEL / OLLAMA_MODEL / CODEX_MODEL
+  > backend built-in default (Ollama: gemma4:31b; Codex: CLI-selected model)
 ```
 
-OpenAI has no built-in default model, so every role must resolve either through a global default or an explicit role override. A global default is optional when all four roles are configured explicitly. If multiple roles resolve to the same model ID, the CLI reuses one backend adapter instance for those roles.
+OpenAI has no built-in default model, so every OpenAI role must resolve either through a global default or an explicit role override. Codex may omit a model ID and delegate selection to the authenticated Codex CLI default. A global default is optional when all four roles are configured explicitly. If multiple roles resolve to the same model ID, the CLI reuses one backend adapter instance for those roles.
 
 #### OpenAI examples
 
@@ -356,7 +379,7 @@ openfoam-agent --interactive \
   --review-model "gpt-5.6-luna"
 ```
 
-The OpenAI backend currently uses one `OPENAI_API_KEY`/OpenAI endpoint configuration for the run; the per-role settings choose **model IDs**, not separate API keys or separate providers. Per-role OpenAI/Ollama backend mixing or per-role API keys/base URLs are not exposed by the current CLI.
+The OpenAI backend currently uses one `OPENAI_API_KEY`/OpenAI endpoint configuration for the run; the per-role settings choose **model IDs**, not separate API keys or separate providers. Per-role OpenAI/Ollama/Codex backend mixing or per-role API keys/base URLs are not exposed by the current CLI.
 
 #### Ollama role routing
 
@@ -657,7 +680,7 @@ At `MESH_READY`, v2 seals:
 
 ## Tests
 
-The v2.17.0 release tree currently passes **212 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
+The v2.18.0 release tree currently passes **219 regression tests**. The tests focus on architecture boundaries rather than preserving v0.x planner behavior. They cover:
 
 - no rule-based engineering fallback;
 - capability retrieval without deterministic solver planning;

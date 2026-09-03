@@ -1,9 +1,21 @@
 from __future__ import annotations
 
 import math
+from enum import StrEnum
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+
+
+class RuntimeRepairDecision(StrEnum):
+    """Deterministic exit decision from one autonomous runtime-repair cycle."""
+
+    RETRY_SOLVER = "RETRY_SOLVER"
+    NEEDS_USER_REVIEW = "NEEDS_USER_REVIEW"
+    BLOCKED = "BLOCKED"
+    STRATEGY_REVISION = "STRATEGY_REVISION"
 
 
 class _RuntimeModel(BaseModel):

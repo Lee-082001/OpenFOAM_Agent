@@ -1,4 +1,15 @@
-# OpenFOAM Agent v2.17 Architecture
+# OpenFOAM Agent v2.18 Architecture
+
+
+## v2.18 runtime-repair exit, boundary, and model-transport invariants
+
+`RUNTIME_REPAIR` is an internal transient state, not a top-level workflow destination. Every runtime-repair exit carries a `RuntimeRepairDecision`: `RETRY_SOLVER`, `NEEDS_USER_REVIEW`, `BLOCKED`, or `STRATEGY_REVISION`. The Engineering Agent closes the transient state before returning; RuntimeOrchestrator rejects a retry that does not restore `SIMULATION`, and a defensive top-level branch converts any escaped `RUNTIME_REPAIR` into `ENGINEERING_BLOCKED` with an internal-invariant diagnostic. This prevents an OpenFOAM-local repair problem from being masked by a generic state-machine handler failure.
+
+PreSolve now owns a narrow cross-file execution contract between the generated mesh and required field dictionaries. Constraint mesh patch types (`empty`, `wedge`, `symmetry`, `symmetryPlane`, `cyclic`, `cyclicAMI`) must match the corresponding field patch type exactly. This is execution compatibility, not CFD boundary-condition selection: ordinary mesh `wall` and `patch` types may still use Agent-selected `fixedValue`, `zeroGradient`, wall functions, or other valid field BCs.
+
+Mesh-topology mutators (`blockMesh`, `snappyHexMesh`, `createPatch`) invalidate cached mesh/checkMesh and pre-solve evidence because native tools may change `constant/polyMesh` even on an unsuccessful attempt. During runtime repair, any case-file mutation also invalidates the CaseSeal. `retry_solver` must therefore re-establish current PreSolve/checkMesh evidence as required and reseal the exact plan+manifest before execution resumes.
+
+`--backend codex` is a model-transport boundary, not a new execution authority. OpenFOAM Agent invokes `codex exec` in an empty temporary directory with an ephemeral session and read-only sandbox, supplies a strict output schema, and reads only the final message. API-routing environment variables are stripped so this backend uses the separately authenticated Codex CLI login path rather than silently becoming ordinary API billing. Python performs its own Pydantic validation after Codex returns. The Codex process has no authority to mutate the CFD workspace; all case changes and native commands still pass through the existing deterministic actions and gates.
 
 
 ## v2.17 mesh compatibility and repair-scope escalation

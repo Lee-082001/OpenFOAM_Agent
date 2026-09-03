@@ -172,9 +172,10 @@ def test_runtime_noop_repair_is_controlled_outcome_not_pydantic_failure(tmp_path
         native_execution=False,
         runtime_event_start=0,
     )
-    assert outcome is not None
-    assert outcome.retry is False
-    assert "no case-file change" in outcome.reason
+    assert outcome is None
+    assert state.engineering_events
+    assert state.engineering_events[-1].success is False
+    assert "no case-file change" in state.engineering_events[-1].summary.lower()
 
 
 def test_prepare_noop_repair_is_controlled_event_not_schema_failure(tmp_path, graph_path):

@@ -15,7 +15,11 @@ BOUNDARY = '''FoamFile {}\n5\n(\ninlet { type patch; }\noutlet { type patch; }\n
 
 def field(name: str, *, omit: str | None = None) -> str:
     patches = ["inlet", "outlet", "farField", "cylinder", "frontAndBack"]
-    entries = "\n".join(f"  {p} {{ type fixedValue; value uniform 0; }}" for p in patches if p != omit)
+    entries = "\n".join(
+        (f"  {p} {{ type empty; }}" if p == "frontAndBack" else f"  {p} {{ type fixedValue; value uniform 0; }}")
+        for p in patches
+        if p != omit
+    )
     return f'''FoamFile {{ object {name}; }}\ndimensions [0 0 0 0 0 0 0];\ninternalField uniform 0;\nboundaryField\n{{\n{entries}\n}}\n'''
 
 
