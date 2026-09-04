@@ -167,14 +167,13 @@ def test_tool_precondition_escalates_to_strategy_revision_and_reaches_solve_read
 def test_repeated_identical_native_mesh_failure_requests_strategy_revision(tmp_path, graph_path):
     state = make_state()
     initial = _plan_with_snappy(state).model_copy(update={"mesh_commands": ["blockMesh", "checkMesh"]})
-    # First local repair repeats blockMesh and receives the same normalized diagnostic.
-    from openfoam_agent.schemas.engineering import CaseFilePatch, RepairCasePlanAction
-    repair = RepairCasePlanAction(
-        type="repair_case_plan",
+    # First local repair uses the semantic blockMesh contract and receives the same
+    # normalized native diagnostic. The next turn must escalate to strategy revision.
+    from openfoam_agent.schemas.engineering import BlockMeshRepairAction
+    repair = BlockMeshRepairAction(
+        type="repair_block_mesh",
         diagnosis="try one local topology correction",
-        patches=[CaseFilePatch(path="system/blockMeshDict", old="scale 1;", new="scale 1.0;")],
-        mesh_commands=["blockMesh"],
-        validate_pre_solve=False,
+        block_mesh=_block_mesh(),
     )
     llm = ScriptedLLM([
         initial,
@@ -203,7 +202,7 @@ def test_repeated_identical_native_mesh_failure_requests_strategy_revision(tmp_p
     )
     agent.prepare(state, native_execution=True)
     assert llm.schemas[0] is PrepareTurn
-    assert llm.schemas[1].__name__ == "RepairTurn"
+    assert llm.schemas[1].__name__ == "BlockMeshRepairTurn"
     assert llm.schemas[2] is StrategyRevisionTurn
 
 

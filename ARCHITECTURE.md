@@ -1,6 +1,34 @@
 # OpenFOAM Agent v3.0 Architecture
 
 
+
+## v3.1 semantic blockMesh topology contract
+
+`TypedBlockMeshFile` is no longer only a safe serializer input. Before serialization, `tools/block_mesh_topology.py` builds a generic `BlockMeshTopologyIR` from hexahedral block connectivity. Each canonical four-vertex face is mapped to its owning block/local-face records. This yields deterministic invariants that are independent of any geometry template:
+
+```text
+TypedBlockMeshFile
+        -> BlockMeshTopologyIR
+             face -> owner block(s)
+             block-edge set
+        -> topology contract
+             boundary face owner count == 1
+             no duplicate patch ownership
+             no non-manifold (>2-owner) block face
+             explicit edge is a real block edge
+             mergePatchPairs reference declared patches
+        -> canonical blockMeshDict serialization
+        -> native blockMesh / checkMesh
+```
+
+The Agent still chooses geometry, block decomposition, cell counts, grading, patch types, and whether blockMesh is appropriate. Python only proves topology invariants that any chosen blockMesh must satisfy. Geometric orientation, curved-edge realization, grading compatibility, and mesh quality remain native OpenFOAM evidence.
+
+A topology preflight failure is transactional: the full `execute_case_plan` candidate remains in Python memory and the next compact contract is `CandidateBlockMeshRepairTurn`, which accepts exactly one corrected structured `block_mesh` (or `block`). Nothing is written until the corrected candidate passes the same topology/bundle preflight.
+
+If native `blockMesh` still fails after commit, Python preserves the exact structured blockMesh representation that generated the file and exposes it through `BlockMeshRepairTurn`. This local repair contract replaces the complete semantic mesh object and deterministically runs serialize -> dictionary validation -> blockMesh -> checkMesh -> PreSolve. A second semantically identical native failure escalates to `StrategyRevisionTurn`; blockMesh failure signatures normalize transient numeric face/cell/vertex labels so reordered labels do not masquerade as novel failures.
+
+This keeps the repair path representation-aware rather than text-aware: ordinary dictionary edits may remain exact patches, while structured mesh topology is repaired as structured topology.
+
 ## v3.0 semantic interpretation boundary
 
 PreSolve no longer parses each validation rule directly from raw OpenFOAM text. The `verification/foam_semantics/` package separates four responsibilities:

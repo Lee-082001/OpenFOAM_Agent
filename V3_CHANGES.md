@@ -49,3 +49,11 @@ v3.0.2 closes the gap between dictionary-syntax acceptance and OpenFOAM `regIOob
 The complete-case transactional preflight now validates solve-critical raw/typed artifacts before the first workspace mutation. `validate_dictionary` checks the IOobject-facing header before calling `foamDictionary`, and PreSolve checks header presence, required metadata, object/path consistency, system `class dictionary`, field-class validity, and unambiguous `internalField` class consistency. A runtime-repair context also includes a deterministic batch scan of core system files, current initial fields, and Agent-declared required solve inputs so systematic header defects are repaired together.
 
 Regression suite: **252 passed**. See `V3_0_2_CHANGES.md`.
+
+## v3.1.0 — semantic blockMesh topology and representation-aware repair
+
+v3.1.0 interprets `TypedBlockMeshFile` as a deterministic face-ownership graph before serialization. Boundary faces must be actual exterior one-owner block faces; internal/shared, nonexistent, duplicate, non-manifold, degenerate, and invalid explicit edge/merge-patch references are rejected before native `blockMesh`. The Agent still owns geometry and mesh design; Python proves generic topology invariants only.
+
+Pre-commit topology failures use a dedicated compact `CandidateBlockMeshRepairTurn` against the retained structured candidate. Native blockMesh failures use a dedicated `BlockMeshRepairTurn` against the exact structured mesh that generated the current file, eliminating whitespace-sensitive text patching as the primary mesh-topology repair path. Repeated blockMesh signatures normalize transient numeric labels before strategy escalation, and patch-based mesh mutations now count toward repair-cycle budgets.
+
+Regression suite: **261 passed**. See `V3_1_CHANGES.md`.

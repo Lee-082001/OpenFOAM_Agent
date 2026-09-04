@@ -855,6 +855,8 @@ class RepairCasePlanAction(_EngineeringModel):
             raise ValueError("repair_case_plan may replace a file in only one representation per turn.")
         if set(patch_paths) & set(non_patch_paths):
             raise ValueError("repair_case_plan cannot patch and replace the same file in one turn.")
+        if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
+            raise ValueError("Use block_mesh for system/blockMeshDict repairs.")
         if self.mesh_commands and self.mesh_commands.count("checkMesh") > 1:
             raise ValueError("repair_case_plan may run checkMesh at most once.")
         return self
@@ -922,10 +924,33 @@ class CandidateCasePlanRepairAction(_EngineeringModel):
             raise ValueError("repair_candidate_case_plan may replace/drop a path in only one mode per turn.")
         if set(patch_paths) & set(exclusive_paths):
             raise ValueError("repair_candidate_case_plan cannot patch and replace/drop the same path in one turn.")
+        if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
+            raise ValueError("Use block_mesh for system/blockMeshDict candidate repairs.")
         for path in self.drop_paths:
             if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
                 raise ValueError(f"Unsafe candidate drop path: {path}")
         return self
+
+class CandidateBlockMeshRepairAction(_EngineeringModel):
+    """Replace only the structured blockMesh candidate after pre-commit topology rejection."""
+
+    type: Literal["repair_candidate_block_mesh"]
+    diagnosis: str = Field(min_length=1, max_length=800)
+    block_mesh: TypedBlockMeshFile
+
+
+class BlockMeshRepairAction(_EngineeringModel):
+    """Local semantic blockMesh repair after a native blockMesh failure.
+
+    The existing EngineeringPlan and all non-mesh files remain Python state. The
+    deterministic executor writes this complete structured replacement, validates it,
+    reruns blockMesh/checkMesh, then re-runs pre-solve completeness.
+    """
+
+    type: Literal["repair_block_mesh"]
+    diagnosis: str = Field(min_length=1, max_length=800)
+    block_mesh: TypedBlockMeshFile
+
 
 class StrategyRevisionAction(_EngineeringModel):
     """Delta strategy replacement after a meshing/tool contract is invalidated.
@@ -985,6 +1010,14 @@ class PrepareDecisionOnlyTurn(_EngineeringModel):
 CasePlanRetryAction = CandidateCasePlanRepairAction | BlockAction
 class CasePlanRetryTurn(_EngineeringModel):
     action: CasePlanRetryAction
+
+CandidateBlockMeshRepairTurnAction = CandidateBlockMeshRepairAction | BlockAction
+class CandidateBlockMeshRepairTurn(_EngineeringModel):
+    action: CandidateBlockMeshRepairTurnAction
+
+BlockMeshRepairTurnAction = BlockMeshRepairAction | BlockAction
+class BlockMeshRepairTurn(_EngineeringModel):
+    action: BlockMeshRepairTurnAction
 
 RepairAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
 class RepairTurn(_EngineeringModel):

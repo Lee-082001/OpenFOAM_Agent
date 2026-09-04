@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: openfoam-agent
-Version: 3.0.1
+Version: 3.1.0
 Summary: Agent-owned OpenFOAM CFD engineering behind deterministic safety gates
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
@@ -9,9 +9,16 @@ Requires-Dist: pydantic<3,>=2.8
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8; extra == "dev"
 
-# OpenFOAM Agent v3.0.1
+# OpenFOAM Agent v3.1.0
 
 
+
+
+
+
+> **v3.1.0 semantic blockMesh topology contract:** `TypedBlockMeshFile` is now interpreted as a block-face ownership graph before native execution. Python rejects boundary faces that are internal/shared, nonexistent, non-manifold, or assigned to multiple patches, and validates explicit edge/merge-patch references without choosing a mesh design. A dedicated `CandidateBlockMeshRepairTurn` repairs rejected in-memory topology before any case commit; a compact `BlockMeshRepairTurn` performs one complete structured replacement after a native blockMesh failure. Exact text patching is no longer the primary repair interface for structured block topology, and repeated blockMesh failure signatures normalize transient face/cell/vertex labels so semantically identical failures escalate instead of consuming LLM turns.
+
+> **v3.0.2 OpenFOAM case-file contract:** deterministic serializers now own complete `FoamFile` headers (`version`, `format`, `class`, path-derived `location`, path-derived `object`). Initial-field class is inferred from an unambiguous `internalField` shape or supplied explicitly as `foam_class`. Complete case bundles and PreSolve validate IOobject-facing headers before native execution, and runtime repair receives one batch scan of systematic header defects instead of discovering them one `foamRun` attempt at a time.
 
 > **v3.0.1 backend compatibility:** Claude and Codex structured-output schemas are now compiled per backend. Claude fixed tuples no longer emit unsupported `prefixItems`; Codex strict schemas explicitly require every property and remove transport-only defaults while retaining final Pydantic validation.
 

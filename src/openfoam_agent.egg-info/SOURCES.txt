@@ -50,8 +50,10 @@ src/openfoam_agent/schemas/postprocessing.py
 src/openfoam_agent/schemas/request.py
 src/openfoam_agent/schemas/simulation.py
 src/openfoam_agent/tools/__init__.py
+src/openfoam_agent/tools/block_mesh_topology.py
 src/openfoam_agent/tools/capability_catalog.py
 src/openfoam_agent/tools/diagnostics.py
+src/openfoam_agent/tools/foam_file.py
 src/openfoam_agent/tools/foam_serializer.py
 src/openfoam_agent/tools/openfoam.py
 src/openfoam_agent/tools/parsers.py
@@ -107,3 +109,5 @@ tests/test_v2_security_hardening.py
 tests/test_v2_workspace.py
 tests/test_v300_foam_semantics.py
 tests/test_v301_structured_schema_compiler.py
+tests/test_v302_case_file_contract.py
+tests/test_v310_block_mesh_topology_contract.py

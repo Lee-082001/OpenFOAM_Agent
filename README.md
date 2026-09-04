@@ -1,7 +1,11 @@
-# OpenFOAM Agent v3.0.2
+# OpenFOAM Agent v3.1.0
 
 
 
+
+
+
+> **v3.1.0 semantic blockMesh topology contract:** `TypedBlockMeshFile` is now interpreted as a block-face ownership graph before native execution. Python rejects boundary faces that are internal/shared, nonexistent, non-manifold, or assigned to multiple patches, and validates explicit edge/merge-patch references without choosing a mesh design. A dedicated `CandidateBlockMeshRepairTurn` repairs rejected in-memory topology before any case commit; a compact `BlockMeshRepairTurn` performs one complete structured replacement after a native blockMesh failure. Exact text patching is no longer the primary repair interface for structured block topology, and repeated blockMesh failure signatures normalize transient face/cell/vertex labels so semantically identical failures escalate instead of consuming LLM turns.
 
 > **v3.0.2 OpenFOAM case-file contract:** deterministic serializers now own complete `FoamFile` headers (`version`, `format`, `class`, path-derived `location`, path-derived `object`). Initial-field class is inferred from an unambiguous `internalField` shape or supplied explicitly as `foam_class`. Complete case bundles and PreSolve validate IOobject-facing headers before native execution, and runtime repair receives one batch scan of systematic header defects instead of discovering them one `foamRun` attempt at a time.
 

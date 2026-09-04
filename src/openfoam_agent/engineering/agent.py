@@ -18,6 +18,8 @@ from openfoam_agent.llm.prompts import (
     PREPARE_SYSTEM_PROMPT,
     PREPARE_DECISION_ONLY_SYSTEM_PROMPT,
     CASE_PLAN_RETRY_SYSTEM_PROMPT,
+    CANDIDATE_BLOCK_MESH_REPAIR_SYSTEM_PROMPT,
+    BLOCK_MESH_REPAIR_SYSTEM_PROMPT,
     REPAIR_SYSTEM_PROMPT,
     REVISION_SYSTEM_PROMPT,
     RUNTIME_REPAIR_SYSTEM_PROMPT,
@@ -47,6 +49,10 @@ from openfoam_agent.schemas.engineering import (
     PrepareDecisionOnlyTurn,
     CasePlanRetryTurn,
     CandidateCasePlanRepairAction,
+    CandidateBlockMeshRepairAction,
+    CandidateBlockMeshRepairTurn,
+    BlockMeshRepairAction,
+    BlockMeshRepairTurn,
     GatherEvidenceAction,
     RepairCasePlanAction,
     RuntimeCaseRepairAction,
@@ -55,6 +61,7 @@ from openfoam_agent.schemas.engineering import (
     RuntimeRepairTurn,
     StrategyRevisionAction,
     StrategyRevisionTurn,
+    TypedBlockMeshFile,
     EngineeringTurn,
     ObservedEngineeringEvidence,
     canonical_engineering_evidence_id,
@@ -222,6 +229,7 @@ class CFDEngineeringAgent:
         self._pending_execution_plan: EngineeringPlan | None = None
         self._pending_candidate_execution: ExecuteCasePlanAction | None = None
         self._pending_candidate_failed_paths: tuple[str, ...] = ()
+        self._structured_block_mesh: TypedBlockMeshFile | None = None
         self._phase_prompt_counts: dict[str, int] = {}
         self._phase_context_snapshots: dict[str, dict[str, str | None]] = {}
         self._evidence_gap_ledger: dict[str, dict[str, dict[str, object]]] = {}
@@ -467,6 +475,26 @@ class CFDEngineeringAgent:
     ) -> bool:
         """Execute one LLM decision, which may contain a bounded action sequence."""
 
+        if isinstance(action, CandidateBlockMeshRepairAction):
+            return self._execute_candidate_block_mesh_repair(
+                state,
+                action,
+                llm_step=llm_step,
+                progress_phase=progress_phase,
+                progress_step=progress_step,
+                progress_limit=progress_limit,
+                native_execution=native_execution,
+            )
+
+        if isinstance(action, BlockMeshRepairAction):
+            return self._execute_block_mesh_repair(
+                state,
+                action,
+                llm_step=llm_step,
+                progress_phase=progress_phase,
+                native_execution=native_execution,
+            )
+
         if isinstance(action, CandidateCasePlanRepairAction):
             return self._execute_candidate_case_plan_repair(
                 state,
@@ -592,6 +620,24 @@ class CFDEngineeringAgent:
                         "entries": [entry.model_dump(mode="json") for entry in item.entries],
                     }
                 )
+        if candidate.block_mesh is not None:
+            manifest.append(
+                {
+                    "path": candidate.block_mesh.path,
+                    "kind": "block_mesh",
+                    "vertices": len(candidate.block_mesh.vertices),
+                    "blocks": len(candidate.block_mesh.blocks),
+                    "boundary_patches": len(candidate.block_mesh.boundary),
+                }
+            )
+            if candidate.block_mesh.path in failed:
+                artifacts.append(
+                    {
+                        "path": candidate.block_mesh.path,
+                        "kind": "block_mesh",
+                        "spec": candidate.block_mesh.model_dump(mode="json"),
+                    }
+                )
         return {
             "goal": candidate.goal,
             "failed_paths": list(self._pending_candidate_failed_paths),
@@ -659,12 +705,79 @@ class CFDEngineeringAgent:
             if block_mesh is not None and block_mesh.path == item.path:
                 block_mesh = None
 
-
         data = candidate.model_dump(mode="python")
         data["files"] = [item.model_dump(mode="python") for item in raw.values()]
         data["typed_dictionaries"] = [item.model_dump(mode="python") for item in typed.values()]
         data["block_mesh"] = block_mesh.model_dump(mode="python") if block_mesh is not None else None
         return ExecuteCasePlanAction.model_validate(data)
+
+    def _execute_candidate_block_mesh_repair(
+        self,
+        state: CFDState,
+        repair: CandidateBlockMeshRepairAction,
+        *,
+        llm_step: int,
+        progress_phase: str,
+        progress_step: int,
+        progress_limit: int,
+        native_execution: bool,
+    ) -> bool:
+        """Replace only retained structured blockMesh state, then retry whole plan.
+
+        This is a dedicated compact repair path so a topological preflight failure does
+        not force the model to regenerate the large generic RepairTurn union or use
+        whitespace-sensitive text patches.
+        """
+        candidate = self._pending_candidate_execution
+        if candidate is None:
+            event = self._event(
+                llm_step, repair.type, False, "No retained candidate blockMesh exists to repair."
+            )
+            state.engineering_events.append(event)
+            return False
+
+        data = candidate.model_dump(mode="python")
+        data["files"] = [
+            item for item in data.get("files", []) if item.get("path") != "system/blockMeshDict"
+        ]
+        data["typed_dictionaries"] = [
+            item
+            for item in data.get("typed_dictionaries", [])
+            if item.get("path") != "system/blockMeshDict"
+        ]
+        data["block_mesh"] = repair.block_mesh.model_dump(mode="python")
+        try:
+            candidate = ExecuteCasePlanAction.model_validate(data)
+        except ValueError as exc:
+            event = self._event(llm_step, repair.type, False, f"Candidate blockMesh repair rejected: {exc}")
+            state.engineering_events.append(event)
+            return False
+
+        self._pending_candidate_execution = candidate
+        self._pending_candidate_failed_paths = ("system/blockMeshDict",)
+        event = self._event(
+            llm_step,
+            repair.type,
+            True,
+            "Replaced retained structured blockMesh candidate; re-running topology/bundle preflight.",
+        )
+        state.engineering_events.append(event)
+        self._emit_engineering_event(
+            f"{progress_phase}-candidate-block-mesh-repair",
+            event,
+            step=progress_step,
+            limit=progress_limit,
+            state=state,
+        )
+        return self._execute_case_plan(
+            state,
+            candidate,
+            llm_step=llm_step,
+            progress_phase=progress_phase,
+            progress_step=progress_step,
+            progress_limit=progress_limit,
+            native_execution=native_execution,
+        )
 
     def _execute_candidate_case_plan_repair(
         self,
@@ -678,7 +791,12 @@ class CFDEngineeringAgent:
         native_execution: bool,
     ) -> bool:
         """Repair the retained candidate, then rerun transactional whole-plan preflight."""
-        if not (repair.patches or repair.replacement_files or repair.typed_dictionaries or repair.drop_paths):
+        if not (
+            repair.patches
+            or repair.replacement_files
+            or repair.typed_dictionaries
+            or repair.drop_paths
+        ):
             event = self._event(
                 llm_step,
                 repair.type,
@@ -990,6 +1108,8 @@ class CFDEngineeringAgent:
                     )
                 )
                 return terminal
+            if isinstance(member, WriteCaseFileAction) and member.path == "system/blockMeshDict":
+                self._structured_block_mesh = execution.block_mesh
             if terminal:
                 self.progress.emit(
                     ProgressEvent(
@@ -1002,6 +1122,94 @@ class CFDEngineeringAgent:
                 self._pending_execution_plan = None
                 return True
 
+        return False
+
+    def _execute_block_mesh_repair(
+        self,
+        state: CFDState,
+        repair: BlockMeshRepairAction,
+        *,
+        llm_step: int,
+        progress_phase: str,
+        native_execution: bool,
+    ) -> bool:
+        """Apply one semantic blockMesh replacement and deterministic validation pipeline."""
+        plan = state.engineering_plan or self._pending_execution_plan
+        if plan is None:
+            event = self._event(
+                llm_step, repair.type, False, "Structured blockMesh repair has no baseline EngineeringPlan."
+            )
+            state.engineering_events.append(event)
+            return False
+        try:
+            content = serialize_block_mesh(repair.block_mesh)
+        except (FoamSerializationError, ValueError) as exc:
+            event = self._event(
+                llm_step,
+                "block_mesh_repair_preflight",
+                False,
+                f"Structured blockMesh repair rejected before workspace mutation: {exc}",
+            )
+            state.engineering_events.append(event)
+            self._emit_engineering_event(
+                f"{progress_phase}-block-mesh-repair", event, state=state
+            )
+            return False
+
+        actions: list[object] = [
+            WriteCaseFileAction(
+                type="write_case_file",
+                path=repair.block_mesh.path,
+                content=content,
+                rationale="",
+            ),
+            ValidateDictionaryAction(
+                type="validate_dictionary", path=repair.block_mesh.path, rationale=""
+            ),
+            RunMeshCommandAction(type="run_mesh_command", command="blockMesh", rationale=""),
+            RunMeshCommandAction(type="run_mesh_command", command="checkMesh", rationale=""),
+            ValidatePreSolveAction(
+                type="validate_pre_solve",
+                required_case_files=plan.required_case_files,
+                rationale="",
+            ),
+            FinishPreviewAction(type="finish_preview", plan=plan, rationale=""),
+        ]
+        sequence_id = f"{progress_phase}:block-mesh-repair:{llm_step:04d}"
+        total = len(actions)
+        for index, member in enumerate(actions, start=1):
+            if self._tool_action_count(state) >= self.policy.max_tool_actions:
+                state.transition(
+                    State.ENGINEERING_BLOCKED,
+                    f"Engineering deterministic action budget exhausted ({self.policy.max_tool_actions}).",
+                )
+                return True
+            event, terminal = self._dispatch_prepare(
+                state, member, step=llm_step, native_execution=native_execution
+            )
+            event = event.model_copy(
+                update={
+                    "sequence_id": sequence_id,
+                    "sequence_goal": repair.diagnosis,
+                    "sequence_index": index,
+                    "sequence_length": total,
+                }
+            )
+            state.engineering_events.append(event)
+            self._emit_engineering_event(
+                f"{progress_phase}-block-mesh-repair",
+                event,
+                step=index,
+                limit=total,
+                state=state,
+            )
+            if not event.success:
+                return terminal
+            if isinstance(member, WriteCaseFileAction):
+                self._structured_block_mesh = repair.block_mesh
+            if terminal:
+                self._pending_execution_plan = None
+                return True
         return False
 
     def _repair_actions(
@@ -1068,7 +1276,12 @@ class CFDEngineeringAgent:
         progress_phase: str,
         native_execution: bool,
     ) -> bool:
-        if not (repair.patches or repair.replacement_files or repair.typed_dictionaries or repair.updated_plan is not None):
+        if not (
+            repair.patches
+            or repair.replacement_files
+            or repair.typed_dictionaries
+            or repair.updated_plan is not None
+        ):
             event = self._event(
                 llm_step,
                 repair.type,
@@ -1179,6 +1392,12 @@ class CFDEngineeringAgent:
             self._emit_engineering_event(f"{progress_phase}-strategy-revision", event, step=index, limit=total, state=state)
             if not event.success:
                 return terminal
+            if (
+                revision.block_mesh is not None
+                and isinstance(member, WriteCaseFileAction)
+                and member.path == revision.block_mesh.path
+            ):
+                self._structured_block_mesh = revision.block_mesh
             if terminal:
                 self._pending_execution_plan = None
                 return True
@@ -1253,7 +1472,10 @@ class CFDEngineeringAgent:
             state.engineering_events.append(self._event(llm_step, repair.type, False, reason))
             return None
         if isinstance(repair, RepairCasePlanAction) and not (
-            repair.patches or repair.replacement_files or repair.typed_dictionaries or repair.updated_plan is not None
+            repair.patches
+            or repair.replacement_files
+            or repair.typed_dictionaries
+            or repair.updated_plan is not None
         ):
             reason = "Runtime repair contained no executable delta."
             state.engineering_events.append(self._event(llm_step, repair.type, False, reason))
@@ -1579,7 +1801,7 @@ class CFDEngineeringAgent:
             if (
                 failure_pending
                 and event.success
-                and event.action_type in {"write_case_file", "delete_case_file"}
+                and event.action_type in {"write_case_file", "patch_case_file", "delete_case_file"}
                 and not current_cycle_started
             ):
                 cycles += 1
@@ -2653,6 +2875,10 @@ class CFDEngineeringAgent:
                         )
                 mesh_affecting = self.workspace.is_mesh_affecting_path(action.path)
                 digest = self.workspace.write_text(action.path, action.content)
+                if action.path == "system/blockMeshDict":
+                    # Generic text writes have no trustworthy structured topology representation.
+                    # Higher-level block_mesh actions restore this registry after the write succeeds.
+                    self._structured_block_mesh = None
                 self._presolve_case_manifest = None
                 self._presolve_required_case_files = None
                 if mesh_affecting:
@@ -2684,6 +2910,8 @@ class CFDEngineeringAgent:
                         )
                 mesh_affecting = self.workspace.is_mesh_affecting_path(patch.path)
                 digest = self.workspace.patch_text_once(patch.path, patch.old, patch.new)
+                if patch.path == "system/blockMeshDict":
+                    self._structured_block_mesh = None
                 self._presolve_case_manifest = None
                 self._presolve_required_case_files = None
                 if mesh_affecting:
@@ -2712,6 +2940,8 @@ class CFDEngineeringAgent:
                         )
                 mesh_affecting = self.workspace.is_mesh_affecting_path(action.path)
                 self.workspace.delete(action.path)
+                if action.path == "system/blockMeshDict":
+                    self._structured_block_mesh = None
                 self._presolve_case_manifest = None
                 self._presolve_required_case_files = None
                 if mesh_affecting:
@@ -2975,7 +3205,7 @@ class CFDEngineeringAgent:
             for event in self._current_round_events(state)
             if (
                 not event.success
-                and event.action_type in {"typed_dictionary_serialize", "case_bundle_preflight"}
+                and event.action_type in {"typed_dictionary_serialize", "block_mesh_serialize", "case_bundle_preflight"}
             )
         )
 
@@ -2999,6 +3229,19 @@ class CFDEngineeringAgent:
             )
             return True
         return False
+
+    def _candidate_block_mesh_retry_required(self, state: CFDState) -> bool:
+        events = self._current_round_events(state)
+        if not events:
+            return False
+        last = events[-1]
+        return (
+            not last.success
+            and last.action_type == "block_mesh_serialize"
+            and self._pending_execution_plan is None
+            and self._pending_candidate_execution is not None
+            and self._pending_candidate_execution.block_mesh is not None
+        )
 
     def _case_plan_retry_required(self, state: CFDState) -> bool:
         """Return whether the previous complete-plan authoring attempt failed pre-commit.
@@ -3054,6 +3297,16 @@ class CFDEngineeringAgent:
         if not primary:
             primary = kind
         primary = re.sub(r"<[^>]+>", "<PATH>", primary)
+        # blockMesh diagnostics commonly embed transient cell/face/vertex labels in an
+        # otherwise identical topology error. Those labels must not defeat repeated-
+        # failure detection (e.g. face 4(3 4 20 19) vs 4(3 19 20 4)). Preserve the
+        # message structure while normalizing only numeric labels for blockMesh.
+        if command == "blockMesh":
+            primary = re.sub(
+                r"(?<![A-Za-z_])[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?",
+                "<N>",
+                primary,
+            )
         primary = re.sub(r"\s+", " ", primary).strip().casefold()
         digest = hashlib.sha256(f"{command}\0{kind}\0{primary}".encode("utf-8", errors="replace")).hexdigest()[:20]
         return f"native:{command}:{kind}:{digest}"
@@ -3076,6 +3329,21 @@ class CFDEngineeringAgent:
         ]
         return len(same) >= 2 and last.mesh_command_executed
 
+    def _block_mesh_repair_required(self, state: CFDState) -> bool:
+        if self._pending_execution_plan is None or self._structured_block_mesh is None:
+            return False
+        events = self._current_round_events(state)
+        for event in reversed(events):
+            if event.mesh_command_executed:
+                return bool(
+                    not event.success
+                    and event.failure_signature
+                    and str(event.failure_signature).startswith("native:blockMesh:")
+                )
+            if not event.success and event.action_type == "block_mesh_repair_preflight":
+                return True
+        return False
+
     def _phase_contract(self, state: CFDState, phase: str):
         if not self.policy.compact_phase_schemas:
             return EngineeringTurn, ENGINEERING_SYSTEM_PROMPT, "legacy"
@@ -3085,10 +3353,18 @@ class CFDEngineeringAgent:
             return RuntimeRepairTurn, RUNTIME_REPAIR_SYSTEM_PROMPT, "runtime_repair"
         if phase.startswith("human_revision"):
             return RevisionTurn, REVISION_SYSTEM_PROMPT, "revision"
+        if phase == "prepare" and self._candidate_block_mesh_retry_required(state):
+            return (
+                CandidateBlockMeshRepairTurn,
+                CANDIDATE_BLOCK_MESH_REPAIR_SYSTEM_PROMPT,
+                "block_mesh_replan",
+            )
         if phase == "prepare" and self._case_plan_retry_required(state):
             return CasePlanRetryTurn, CASE_PLAN_RETRY_SYSTEM_PROMPT, "replan"
         if phase == "prepare" and self._strategy_revision_required(state):
             return StrategyRevisionTurn, STRATEGY_REVISION_SYSTEM_PROMPT, "strategy_revision"
+        if phase == "prepare" and self._block_mesh_repair_required(state):
+            return BlockMeshRepairTurn, BLOCK_MESH_REPAIR_SYSTEM_PROMPT, "block_mesh_repair"
         if phase == "prepare" and self._pending_execution_plan is not None:
             return RepairTurn, REPAIR_SYSTEM_PROMPT, "repair"
         if phase == "prepare" and self._retrieval_cycles.get("prepare", 0) >= self.policy.max_prepare_retrieval_cycles:
@@ -3180,7 +3456,7 @@ class CFDEngineeringAgent:
         use_delta = bool(
             self.policy.state_delta_context
             and prompt_count > 0
-            and contract_phase != "runtime_repair"
+            and contract_phase not in {"runtime_repair", "block_mesh_replan", "block_mesh_repair"}
         )
         previous_snapshot = self._phase_context_snapshots.get(conversation_key, {})
 
@@ -3399,6 +3675,16 @@ class CFDEngineeringAgent:
                     "with the minimum delta for the implicated candidate path(s), or block. No partial "
                     "workspace case was committed:\n"
                 )
+            elif contract_phase == "block_mesh_replan":
+                instruction = (
+                    "The retained candidate block_mesh failed deterministic topology preflight. Return one "
+                    "repair_candidate_block_mesh semantic replacement or block; do not text-patch it:\n"
+                )
+            elif contract_phase == "block_mesh_repair":
+                instruction = (
+                    "Native blockMesh failed. Return one repair_block_mesh semantic replacement using the "
+                    "supplied structured_block_mesh baseline, or block:\n"
+                )
             elif contract_phase == "strategy_revision":
                 instruction = (
                     "The current meshing strategy was invalidated by a deterministic tool contract or repeated identical native failure. "
@@ -3412,8 +3698,26 @@ class CFDEngineeringAgent:
             else:
                 instruction = "Finalize or block from the validated state:\n"
 
-        if contract_phase == "replan":
+        if contract_phase in {"replan", "block_mesh_replan"}:
             payload["retained_candidate"] = self._candidate_repair_context()
+
+        # Preserve the semantic blockMesh representation across native failures. A text
+        # patch is intentionally not the primary repair interface for structured mesh
+        # topology; when blockMesh itself failed, provide the exact TypedBlockMeshFile
+        # that produced the authored dictionary so the Agent can return one complete
+        # block_mesh replacement without whitespace-sensitive matching.
+        recent_block_mesh_failure = any(
+            (not event.success)
+            and bool(event.failure_signature)
+            and str(event.failure_signature).startswith("native:blockMesh:")
+            for event in self._current_round_events(state)[-8:]
+        )
+        if (
+            contract_phase in {"repair", "block_mesh_repair", "strategy_revision"}
+            and recent_block_mesh_failure
+            and self._structured_block_mesh is not None
+        ):
+            payload["structured_block_mesh"] = self._structured_block_mesh.model_dump(mode="json")
 
         prompt_result = build_bounded_json_prompt(
             instruction,

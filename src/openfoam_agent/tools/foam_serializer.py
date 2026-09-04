@@ -8,6 +8,7 @@ from openfoam_agent.schemas.engineering import (
     TypedBlockMeshFile,
     TypedFoamDictionaryFile,
 )
+from openfoam_agent.tools.block_mesh_topology import validate_block_mesh_topology
 from openfoam_agent.tools.foam_file import (
     FoamFileContract,
     FoamFileContractError,
@@ -133,9 +134,17 @@ def _render_mapping(mapping: OrderedDict[str, object], lines: list[str], *, inde
 def serialize_block_mesh(spec: TypedBlockMeshFile) -> str:
     """Render the blockMesh-specific list/dictionary DSL deterministically.
 
-    Geometry/topology values are Agent-owned; Python only owns the structural syntax
-    that generic dotted dictionary serialization cannot faithfully represent.
+    Geometry/topology choices remain Agent-owned, but Python proves generic topology
+    invariants before serialization. This prevents known-invalid boundary ownership
+    (for example, declaring an internal shared block face as a cylinder boundary) from
+    reaching native blockMesh and turning into an expensive LLM repair loop.
     """
+
+    topology = validate_block_mesh_topology(spec)
+    if not topology.valid:
+        raise FoamSerializationError(
+            "blockMesh topology contract failed before native execution:\n" + topology.render()
+        )
 
     def num(value: float) -> str:
         return format(float(value), ".16g")
