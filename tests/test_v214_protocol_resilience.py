@@ -72,7 +72,7 @@ def test_prepare_turn_accepts_overlong_or_blank_evidence_queries_after_normaliza
     assert len(gap.reference_queries[0]) == 500
 
 
-def test_gather_evidence_merges_duplicate_gap_ids_as_protocol_noise():
+def test_gather_evidence_preserves_duplicate_requested_ids_for_ledger_authority():
     action = GatherEvidenceAction(
         type="gather_evidence",
         gaps=[
@@ -84,14 +84,15 @@ def test_gather_evidence_merges_duplicate_gap_ids_as_protocol_noise():
             ),
             EvidenceGapRequest(
                 gap_id="G01",
-                missing_evidence="release syntax",
+                missing_evidence="different release syntax",
                 why_required="needed",
                 reference_queries=["query two"],
             ),
         ],
     )
-    assert len(action.gaps) == 1
-    assert action.gaps[0].reference_queries == ["query one", "query two"]
+    # The schema no longer guesses whether duplicate opaque IDs mean duplicate
+    # evidence requests. The phase ledger owns that decision with history context.
+    assert len(action.gaps) == 2
 
 
 def test_evidence_gap_lifecycle_closes_on_proceed_and_blocks_refining_satisfied_gap(tmp_path, graph_path):

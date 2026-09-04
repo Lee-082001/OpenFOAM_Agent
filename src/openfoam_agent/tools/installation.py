@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -11,26 +12,8 @@ from openfoam_agent.schemas.installation import (
 )
 
 
-# Operational solver modules documented in the Foundation v13/v14 User Guides.
-# Base classes (fluidSolver, twoPhaseSolver, ...) are intentionally excluded because
-# they are not direct engineering execution targets.
-DOCUMENTED_SOLVER_MODULES: dict[str, tuple[str, ...]] = {
-    "13": (
-        "fluid", "incompressibleDenseParticleFluid", "incompressibleFluid",
-        "multicomponentFluid", "shockFluid", "XiFluid", "compressibleMultiphaseVoF",
-        "compressibleVoF", "incompressibleDriftFlux", "incompressibleMultiphaseVoF",
-        "incompressibleVoF", "isothermalFluid", "multiphaseEuler", "solid",
-        "solidDisplacement", "isothermalFilm", "film", "functions", "movingMesh",
-    ),
-    "14": (
-        "fluid", "incompressibleDenseParticleFluid", "incompressibleFluid",
-        "multicomponentFluid", "shockFluid", "XiFluid", "compressibleMultiphaseVoF",
-        "compressibleVoF", "incompressibleDriftFlux", "incompressibleMultiphaseVoF",
-        "incompressibleVoF", "isothermalFluid", "multiphaseEuler", "solid",
-        "solidDisplacement", "isothermalFilm", "film", "functions", "movingMesh",
-    ),
-}
-
+# Documented solver applications are used only to classify discovered executables.
+# They do not create installed capability evidence.
 DOCUMENTED_SOLVER_APPLICATIONS: dict[str, tuple[str, ...]] = {
     "13": (
         "foamRun", "foamMultiRun", "boundaryFoam", "chemFoam", "potentialFoam",
@@ -48,20 +31,13 @@ DOCUMENTED_SOLVER_APPLICATIONS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# These are documented/runtime-selectable models that matter for capability routing even
-# when source trees are not installed.  Installed source discovery supplements this list.
-DOCUMENTED_FV_MODELS: dict[str, tuple[str, ...]] = {
-    "13": ("heatSource",),
-    "14": ("heatSource",),
-}
-
 
 class OpenFOAMInstallationDiscovery:
     """Discover all trusted Foundation applications plus runtime-selectable components.
 
     Executables are discovered from trusted OpenFOAM PATH entries and FOAM_APPBIN, not
-    from a hand-maintained command allowlist.  Source-tree discovery is additive and
-    bounded; documented v13/v14 profiles provide solver-module/model fallback names.
+    from a hand-maintained command allowlist.  Source-tree discovery is additive and bounded. Documented v13/v14 fallback evidence
+    lives in the capability graphs and is never promoted into InstalledOpenFOAMIR.
     """
 
     def __init__(
@@ -142,17 +118,6 @@ class OpenFOAMInstallationDiscovery:
 
     def _components(self, version: str | None) -> list[InstalledComponent]:
         items: dict[tuple[str, str], InstalledComponent] = {}
-        if version in DOCUMENTED_SOLVER_MODULES:
-            for name in DOCUMENTED_SOLVER_MODULES[version]:
-                items[("solver_module", name)] = InstalledComponent(
-                    name=name, category="solver_module", source="documented_profile"
-                )
-        if version in DOCUMENTED_FV_MODELS:
-            for name in DOCUMENTED_FV_MODELS[version]:
-                items[("fv_model", name)] = InstalledComponent(
-                    name=name, category="fv_model", source="documented_profile"
-                )
-
         modules_root = self._trusted_directory(self.base_env.get("FOAM_MODULES", ""))
         if modules_root is not None:
             for name in _source_component_names(modules_root, max_files=2500):
@@ -162,11 +127,27 @@ class OpenFOAMInstallationDiscovery:
 
         src_root = self._trusted_directory(self.base_env.get("FOAM_SRC", ""))
         if src_root is not None:
-            for relative, category in (("fvModels", "fv_model"), ("functionObjects", "function_object")):
+            for relative, category, base_types in (
+                ("fvModels", "fv_model", ("fvModel",)),
+                ("functionObjects", "function_object", ("functionObject",)),
+            ):
                 root = src_root / relative
                 if not root.is_dir():
                     continue
-                for name in _source_component_names(root, max_files=5000):
+                # Library/component directories are useful coarse evidence, but OpenFOAM's
+                # actual runtime-selectable type names are registered in C++ macros.  Parse
+                # those bounded registration sites so InstalledOpenFOAMIR reflects what the
+                # sourced installation can instantiate, not merely which libraries exist.
+                names = _source_component_names(root, max_files=5000)
+                names.update(
+                    _runtime_selection_names(
+                        root,
+                        base_types=base_types,
+                        max_files=8000,
+                        max_file_bytes=1_000_000,
+                    )
+                )
+                for name in names:
                     items[(category, name)] = InstalledComponent(
                         name=name, category=category, source="installed_source"
                     )
@@ -213,6 +194,70 @@ def _source_component_names(root: Path, *, max_files: int) -> set[str]:
             if parent == root or not _safe_executable_name(parent.name):
                 continue
             names.add(parent.name)
+    except OSError:
+        return names
+    return names
+
+
+_RUNTIME_SELECTION = re.compile(
+    r"\baddToRunTimeSelectionTable\s*\(\s*"
+    r"(?P<base>[A-Za-z_][A-Za-z0-9_:]*)\s*,\s*"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*,",
+    re.MULTILINE,
+)
+_RUNTIME_SELECTION_NAMED = re.compile(
+    r"\baddNamedToRunTimeSelectionTable\s*\(\s*"
+    r"(?P<base>[A-Za-z_][A-Za-z0-9_:]*)\s*,\s*"
+    r"(?P<type>[A-Za-z_][A-Za-z0-9_]*)\s*,\s*"
+    r"[A-Za-z_][A-Za-z0-9_]*\s*,\s*"
+    r"(?P<lookup>[A-Za-z_][A-Za-z0-9_]*)\s*\)",
+    re.MULTILINE,
+)
+
+
+def _runtime_selection_names(
+    root: Path,
+    *,
+    base_types: Sequence[str],
+    max_files: int,
+    max_file_bytes: int,
+) -> set[str]:
+    """Discover bounded OpenFOAM run-time selection registrations from source.
+
+    This is installation evidence, not a hand-maintained capability list.  Only simple
+    identifier registrations are retained; templated/generated registrations that cannot be
+    resolved without compiling OpenFOAM are deliberately left to documented fallback
+    profiles or native runtime evidence.
+    """
+
+    wanted = {item.split("::")[-1] for item in base_types}
+    names: set[str] = set()
+    inspected = 0
+    try:
+        iterator = root.rglob("*.C")
+        for source in iterator:
+            if inspected >= max_files:
+                break
+            inspected += 1
+            try:
+                resolved = source.resolve()
+                if not resolved.is_file() or root not in resolved.parents:
+                    continue
+                if resolved.stat().st_size > max_file_bytes:
+                    continue
+                text = resolved.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for match in _RUNTIME_SELECTION.finditer(text):
+                base = match.group("base").split("::")[-1]
+                name = match.group("name")
+                if base in wanted and _safe_executable_name(name):
+                    names.add(name)
+            for match in _RUNTIME_SELECTION_NAMED.finditer(text):
+                base = match.group("base").split("::")[-1]
+                lookup = match.group("lookup")
+                if base in wanted and _safe_executable_name(lookup):
+                    names.add(lookup)
     except OSError:
         return names
     return names

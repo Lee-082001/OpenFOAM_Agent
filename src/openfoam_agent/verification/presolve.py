@@ -12,6 +12,7 @@ from openfoam_agent.verification.foam_semantics import (
     ResolutionStatus,
     parse_boundary_selectors,
     parse_mesh_boundary,
+    parse_top_level_assignments,
 )
 
 
@@ -159,10 +160,20 @@ class PreSolveCompletenessGate:
                             f"(resolved via {via} {selector}). "
                             "Constraint patches such as empty/wedge/symmetry/cyclic must match before the selected OpenFOAM runtime."
                         )
-                if "internalField" not in text:
-                    failures.append(f"Required initial field {relative} does not declare internalField.")
-                if "dimensions" not in text:
-                    failures.append(f"Required initial field {relative} does not declare dimensions.")
+                field_entries, field_projection_complete = parse_top_level_assignments(text)
+                for required_key in ("internalField", "dimensions"):
+                    if required_key in field_entries:
+                        continue
+                    if field_projection_complete:
+                        failures.append(
+                            f"Required initial field {relative} does not declare {required_key}."
+                        )
+                    else:
+                        warnings.append(
+                            f"Required initial field {relative} has no literal top-level {required_key}, "
+                            "but dynamic OpenFOAM directives/expansions make the effective value "
+                            "indeterminate; Python did not prove it missing."
+                        )
 
         return PreSolveValidationResult(
             valid=not failures,

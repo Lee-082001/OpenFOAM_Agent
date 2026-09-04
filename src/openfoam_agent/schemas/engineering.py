@@ -567,11 +567,9 @@ class EvidenceGapRequest(_EngineeringModel):
         normalized["read_top_reference_matches"] = max(0, min(2, read_top))
         return normalized
 
-    @model_validator(mode="after")
-    def validate_refinement(self) -> Self:
-        if self.refines_gap_id == self.gap_id:
-            raise ValueError("An evidence gap cannot refine itself.")
-        return self
+    # Gap identity/refinement is protocol metadata, not CFD semantics.  Do not
+    # reject harmless ID mistakes here: the authoritative EvidenceGapLedger in
+    # CFDEngineeringAgent deterministically reissues colliding/self-refining IDs.
 
 
 class GatherEvidenceAction(_EngineeringModel):
@@ -585,37 +583,10 @@ class GatherEvidenceAction(_EngineeringModel):
     gaps: list[EvidenceGapRequest] = Field(min_length=1, max_length=4)
     rationale: str = Field(default="", max_length=200)
 
-    @model_validator(mode="after")
-    def normalize_duplicate_gap_ids(self) -> Self:
-        # Duplicate opaque IDs are a protocol nuisance. Merge compatible requests
-        # instead of turning them into a workflow-fatal Pydantic error.
-        merged: dict[str, EvidenceGapRequest] = {}
-        for gap in self.gaps:
-            previous = merged.get(gap.gap_id)
-            if previous is None:
-                merged[gap.gap_id] = gap
-                continue
-            capability = _soft_query_list(
-                [*previous.capability_queries, *gap.capability_queries],
-                limit=500,
-                max_items=2,
-            )
-            references = _soft_query_list(
-                [*previous.reference_queries, *gap.reference_queries],
-                limit=500,
-                max_items=3,
-            )
-            merged[gap.gap_id] = previous.model_copy(
-                update={
-                    "capability_queries": capability,
-                    "reference_queries": references,
-                    "read_top_reference_matches": max(
-                        previous.read_top_reference_matches, gap.read_top_reference_matches
-                    ),
-                }
-            )
-        self.gaps = list(merged.values())
-        return self
+    # Duplicate/colliding IDs are intentionally preserved until the Agent's
+    # EvidenceGapLedger sees the current phase history.  Only that ledger can
+    # distinguish an exact duplicate from a legitimate refinement that needs a
+    # freshly issued opaque ID.
 
 
 class ReadReferenceAction(_EngineeringModel):
@@ -1153,15 +1124,58 @@ class StrategyRevisionAction(_EngineeringModel):
         return self
 
 
+def _route_action_payload(value: Any, routes: dict[str, type[_EngineeringModel]]):
+    """Validate only the union branch named by ``action.type``.
+
+    JSON transport schemas remain plain ``anyOf`` unions for Codex/Claude compatibility,
+    but Python validation does not need to fan a bad payload through every unrelated
+    action model.  This keeps diagnostics local to the intended protocol branch.
+    """
+
+    if not isinstance(value, dict):
+        return value
+    raw_action = value.get("action")
+    if not isinstance(raw_action, dict):
+        return value
+    action_type = str(raw_action.get("type", "")).strip()
+    model = routes.get(action_type)
+    if model is None:
+        return value
+    normalized = dict(value)
+    normalized["action"] = model.model_validate(raw_action)
+    return normalized
+
+
 # Phase-specific compact contracts. Agent identity remains one CFDEngineeringAgent; only
 # permissions/schema vary by phase so repeated calls do not carry the giant all-phase union.
 PrepareAction = GatherEvidenceAction | ReadCaseFileAction | ExecuteCasePlanAction | BlockAction
 class PrepareTurn(_EngineeringModel):
     action: PrepareAction
 
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {
+                "gather_evidence": GatherEvidenceAction,
+                "read_case_file": ReadCaseFileAction,
+                "execute_case_plan": ExecuteCasePlanAction,
+                "block": BlockAction,
+            },
+        )
+
 PrepareDecisionOnlyAction = ExecuteCasePlanAction | BlockAction
 class PrepareDecisionOnlyTurn(_EngineeringModel):
     action: PrepareDecisionOnlyAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {"execute_case_plan": ExecuteCasePlanAction, "block": BlockAction},
+        )
 
 # A case-plan authoring failure happens before any candidate file is committed.
 # At that point reference/tool exploration is usually counterproductive: the model
@@ -1172,33 +1186,113 @@ CasePlanRetryAction = CandidateCasePlanRepairAction | BlockAction
 class CasePlanRetryTurn(_EngineeringModel):
     action: CasePlanRetryAction
 
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {"repair_candidate_case_plan": CandidateCasePlanRepairAction, "block": BlockAction},
+        )
+
 CandidateBlockMeshRepairTurnAction = CandidateBlockMeshRepairAction | BlockAction
 class CandidateBlockMeshRepairTurn(_EngineeringModel):
     action: CandidateBlockMeshRepairTurnAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {"repair_candidate_block_mesh": CandidateBlockMeshRepairAction, "block": BlockAction},
+        )
 
 BlockMeshRepairTurnAction = BlockMeshRepairAction | BlockAction
 class BlockMeshRepairTurn(_EngineeringModel):
     action: BlockMeshRepairTurnAction
 
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {"repair_block_mesh": BlockMeshRepairAction, "block": BlockAction},
+        )
+
 RepairAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
 class RepairTurn(_EngineeringModel):
     action: RepairAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {
+                "search_references": SearchReferencesAction,
+                "read_reference": ReadReferenceAction,
+                "read_case_file": ReadCaseFileAction,
+                "repair_case_plan": RepairCasePlanAction,
+                "block": BlockAction,
+            },
+        )
 
 StrategyRevisionTurnAction = StrategyRevisionAction | BlockAction
 class StrategyRevisionTurn(_EngineeringModel):
     action: StrategyRevisionTurnAction
 
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {"revise_mesh_strategy": StrategyRevisionAction, "block": BlockAction},
+        )
+
 RevisionAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
 class RevisionTurn(_EngineeringModel):
     action: RevisionAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {
+                "search_references": SearchReferencesAction,
+                "read_reference": ReadReferenceAction,
+                "read_case_file": ReadCaseFileAction,
+                "repair_case_plan": RepairCasePlanAction,
+                "block": BlockAction,
+            },
+        )
 
 FinalizationAction = FinishPreviewAction | BlockAction
 class FinalizationTurn(_EngineeringModel):
     action: FinalizationAction
 
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {"finish_preview": FinishPreviewAction, "block": BlockAction},
+        )
+
 RuntimeRepairAction = GatherEvidenceAction | RuntimeCaseRepairAction | BlockAction
 class RuntimeRepairTurn(_EngineeringModel):
     action: RuntimeRepairAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {
+                "gather_evidence": GatherEvidenceAction,
+                "repair_runtime_case": RuntimeCaseRepairAction,
+                "block": BlockAction,
+            },
+        )
 
 
 class EngineeringSequenceAction(_EngineeringModel):
@@ -1208,6 +1302,33 @@ class EngineeringSequenceAction(_EngineeringModel):
     goal: str = Field(min_length=1, max_length=1000)
     actions: list[EngineeringSequenceMemberAction] = Field(min_length=2, max_length=6)
     rationale: str = Field(default="", max_length=200)
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_member_actions(cls, value: Any):
+        if not isinstance(value, dict) or not isinstance(value.get("actions"), list):
+            return value
+        routes: dict[str, type[_EngineeringModel]] = {
+            "write_case_file": WriteCaseFileAction,
+            "delete_case_file": DeleteCaseFileAction,
+            "validate_dictionary": ValidateDictionaryAction,
+            "surface_check": SurfaceCheckAction,
+            "run_mesh_command": RunMeshCommandAction,
+            "run_openfoam_command": RunNativeOpenFOAMAction,
+            "validate_pre_solve": ValidatePreSolveAction,
+            "finish_preview": FinishPreviewAction,
+            "retry_solver": RetrySolverAction,
+        }
+        normalized = dict(value)
+        routed: list[object] = []
+        for item in value["actions"]:
+            if isinstance(item, dict):
+                model = routes.get(str(item.get("type", "")).strip())
+                if model is not None:
+                    item = model.model_validate(item)
+            routed.append(item)
+        normalized["actions"] = routed
+        return normalized
 
     @model_validator(mode="after")
     def validate_sequence_shape(self) -> Self:
@@ -1276,6 +1397,35 @@ EngineeringAction = (
 
 class EngineeringTurn(_EngineeringModel):
     action: EngineeringAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {
+                "inspect_environment": InspectEnvironmentAction,
+                "search_capabilities": SearchCapabilitiesAction,
+                "search_references": SearchReferencesAction,
+                "read_reference": ReadReferenceAction,
+                "list_case_files": ListCaseFilesAction,
+                "read_case_file": ReadCaseFileAction,
+                "write_case_file": WriteCaseFileAction,
+                "patch_case_file": PatchCaseFileAction,
+                "delete_case_file": DeleteCaseFileAction,
+                "validate_dictionary": ValidateDictionaryAction,
+                "surface_check": SurfaceCheckAction,
+                "run_mesh_command": RunMeshCommandAction,
+                "run_openfoam_command": RunNativeOpenFOAMAction,
+                "validate_pre_solve": ValidatePreSolveAction,
+                "finish_preview": FinishPreviewAction,
+                "retry_solver": RetrySolverAction,
+                "block": BlockAction,
+                "sequence": EngineeringSequenceAction,
+                "execute_case_plan": ExecuteCasePlanAction,
+                "repair_case_plan": RepairCasePlanAction,
+            },
+        )
 
 
 class EngineeringEvent(_EngineeringModel):

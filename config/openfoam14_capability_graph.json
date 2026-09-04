@@ -70,6 +70,55 @@
       ]
     },
     {
+      "id": "model.VoFSolidificationMelting",
+      "name": "VoFSolidificationMelting",
+      "provider_type": "fv_model",
+      "capabilities": [
+        "fvModel.VoFSolidificationMelting",
+        "phase_change.solid_liquid",
+        "melting",
+        "solidification",
+        "energy.latent_heat",
+        "multiphase.vof"
+      ],
+      "openfoam_version": "14",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v14/classFoam_1_1fv_1_1VoFSolidificationMelting.html",
+          "note": "Foundation VoF solidification/melting fvModel with latent-heat and solid-fraction coupling."
+        }
+      ],
+      "metadata": {
+        "runtime_selectable": true
+      }
+    },
+    {
+      "id": "model.coefficientPhaseChange",
+      "name": "coefficientPhaseChange",
+      "provider_type": "fv_model",
+      "capabilities": [
+        "fvModel.coefficientPhaseChange",
+        "phase_change.fluid_fluid",
+        "phase_change.mass_transfer"
+      ],
+      "openfoam_version": "14",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v14/classFoam_1_1fv_1_1coefficientPhaseChange.html",
+          "note": "Foundation coefficient-based phase-change fvModel."
+        }
+      ],
+      "metadata": {
+        "runtime_selectable": true
+      }
+    },
+    {
       "id": "model.heatSource",
       "name": "heatSource",
       "provider_type": "fv_model",
@@ -88,6 +137,30 @@
           "note": "OpenFOAM Foundation fv::heatSource runtime-selectable fvModel."
         }
       ]
+    },
+    {
+      "id": "model.heatTransferLimitedPhaseChange",
+      "name": "heatTransferLimitedPhaseChange",
+      "provider_type": "fv_model",
+      "capabilities": [
+        "fvModel.heatTransferLimitedPhaseChange",
+        "phase_change.fluid_fluid",
+        "phase_change.mass_transfer",
+        "phase_change.heat_transfer_limited"
+      ],
+      "openfoam_version": "14",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v14/classFoam_1_1fv_1_1heatTransferLimitedPhaseChange.html",
+          "note": "Foundation heat-transfer-limited phase-change fvModel."
+        }
+      ],
+      "metadata": {
+        "runtime_selectable": true
+      }
     },
     {
       "id": "model.momentumTransport",
@@ -127,6 +200,32 @@
           "note": "OpenFOAM v14 generalized-Newtonian and visco-elastic models."
         }
       ]
+    },
+    {
+      "id": "model.solidificationMelting",
+      "name": "solidificationMelting",
+      "provider_type": "fv_model",
+      "capabilities": [
+        "fvModel.solidificationMelting",
+        "phase_change.solid_liquid",
+        "melting",
+        "solidification",
+        "energy.latent_heat",
+        "phase_change.enthalpy_porosity"
+      ],
+      "openfoam_version": "14",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v14/classFoam_1_1fv_1_1solidificationMelting.html",
+          "note": "This Foundation fvModel represents solidification/melting using enthalpy and momentum-porosity contributions."
+        }
+      ],
+      "metadata": {
+        "runtime_selectable": true
+      }
     },
     {
       "id": "solver.XiFluid",

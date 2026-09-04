@@ -63,6 +63,12 @@ Pre-commit topology failures use a dedicated compact `CandidateBlockMeshRepairTu
 Regression suite: **261 passed**. See `V3_1_CHANGES.md`.
 
 
+
+## v3.4.0 — Evidence-gap ledger authority and installed-semantics hardening
+
+Python now owns opaque evidence-gap identity/lifecycle, normalizing self-refinement/collisions without changing CFD evidence intent. Action-union validation is routed to the declared branch before canonical union validation, installed OpenFOAM provenance is separated from documented fallback, and bounded Foundation source registration discovery identifies actual runtime-selectable fvModels/function objects. OF13/14 phase-change fallback evidence is expanded, PreSolve top-level field checks use semantic projection rather than raw substrings, Codex/Claude model calls expose wait heartbeats/timeouts, and the environment model capsule is compacted. See `V3_4_CHANGES.md`.
+
+
 ## v3.3.0 — Native OpenFOAM discovery and multi-region execution contract
 
 A sourced Foundation 13/14 installation is now the production command authority. All trusted installed applications are discovered dynamically, runtime-selectable modules/models are represented in `InstalledOpenFOAMIR`, and the capability catalog merges installed evidence with version-matched documented fallback graphs. `EngineeringPlan.execution` now represents single-region `foamRun`, multi-region `foamMultiRun` with `regionSolvers`, or a trusted direct solver application. `native_pipeline` can invoke any discovered Foundation utility while Python retains workspace, argument, executable provenance, budget and native-evidence gates. Both OF13 and OF14 capability profiles ship with the release and the CLI selects the default from `WM_PROJECT_VERSION`. See `V3_3_CHANGES.md`.

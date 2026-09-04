@@ -116,6 +116,7 @@ def test_evidence_infrastructure_failure_disables_retrieval_and_escalates_phase(
     )
     assert not first.success
     assert first.failure_signature == "evidence_retrieval:prepare:infrastructure"
+    assert "synthetic evidence store failure" in first.summary
     assert "prepare" in agent._evidence_retrieval_disabled
     assert agent._retrieval_cycles["prepare"] == agent.policy.max_prepare_retrieval_cycles
     assert agent._phase_contract(state, "prepare")[2] == "prepare_decide"

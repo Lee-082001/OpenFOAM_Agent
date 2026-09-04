@@ -211,9 +211,11 @@ def test_claude_model_routing_precedence_and_cli_construction(monkeypatch):
     class DummyClaudeLLM:
         created = []
 
-        def __init__(self, *, model, status):
+        def __init__(self, *, model, status, timeout_seconds, wait_callback):
             self.model = model or "claude-default"
             self.status = status
+            self.timeout_seconds = timeout_seconds
+            self.wait_callback = wait_callback
             self.last_usage = None
             self.__class__.created.append(self.model)
 

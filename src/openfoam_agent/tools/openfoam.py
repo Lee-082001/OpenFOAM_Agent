@@ -36,9 +36,16 @@ class OpenFOAMTools:
         return self.runner.executable_status("checkMesh")
 
     def environment_snapshot(self) -> dict[str, object]:
-        # Deliberately expose no absolute local paths to the remote model.
-        commands = sorted(self.runner.allowed_commands)
+        """Return a compact, path-free installation capsule for model context.
+
+        The full executable inventory lives in CapabilityCatalog and is retrieved by
+        evidence query when needed. Repeating one status dictionary per installed utility
+        in every model turn made large Foundation installations dominate the prompt.
+        """
         installation = self.installed_openfoam
+        execution_drivers = sorted(
+            item.name for item in installation.executables if item.category == "execution_driver"
+        )
         return {
             "wm_project": os.environ.get("WM_PROJECT", ""),
             "wm_project_version": os.environ.get("WM_PROJECT_VERSION", ""),
@@ -46,9 +53,10 @@ class OpenFOAMTools:
             "trusted_installation_configured": bool(self.runner.trusted_executable_roots),
             "installed_ir_fingerprint": installation.fingerprint,
             "installed_executable_count": len(installation.executables),
+            "installed_execution_drivers": execution_drivers,
             "installed_solver_modules": sorted(installation.solver_modules),
             "installed_fv_models": sorted(installation.fv_models),
-            "commands": [self.runner.executable_status(command) for command in commands],
+            "capability_inventory_queryable": True,
             "reference_scopes_configured": {
                 "tutorials": bool(os.environ.get("FOAM_TUTORIALS")),
                 "source": bool(os.environ.get("FOAM_SRC")),

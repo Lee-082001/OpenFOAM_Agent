@@ -65,9 +65,58 @@
         {
           "kind": "source_code",
           "reference": "https://cpp.openfoam.org/v13/MRFZone_8C_source.html",
-          "note": "OpenFOAM v14 multiple-reference-frame implementation."
+          "note": "OpenFOAM v13 multiple-reference-frame implementation."
         }
       ]
+    },
+    {
+      "id": "model.VoFSolidificationMelting",
+      "name": "VoFSolidificationMelting",
+      "provider_type": "fv_model",
+      "capabilities": [
+        "fvModel.VoFSolidificationMelting",
+        "phase_change.solid_liquid",
+        "melting",
+        "solidification",
+        "energy.latent_heat",
+        "multiphase.vof"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v13/classFoam_1_1fv_1_1VoFSolidificationMelting.html",
+          "note": "Foundation VoF solidification/melting fvModel with latent-heat and solid-fraction coupling."
+        }
+      ],
+      "metadata": {
+        "runtime_selectable": true
+      }
+    },
+    {
+      "id": "model.coefficientPhaseChange",
+      "name": "coefficientPhaseChange",
+      "provider_type": "fv_model",
+      "capabilities": [
+        "fvModel.coefficientPhaseChange",
+        "phase_change.fluid_fluid",
+        "phase_change.mass_transfer"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v13/classFoam_1_1fv_1_1coefficientPhaseChange.html",
+          "note": "Foundation coefficient-based phase-change fvModel."
+        }
+      ],
+      "metadata": {
+        "runtime_selectable": true
+      }
     },
     {
       "id": "model.heatSource",
@@ -90,6 +139,30 @@
       ]
     },
     {
+      "id": "model.heatTransferLimitedPhaseChange",
+      "name": "heatTransferLimitedPhaseChange",
+      "provider_type": "fv_model",
+      "capabilities": [
+        "fvModel.heatTransferLimitedPhaseChange",
+        "phase_change.fluid_fluid",
+        "phase_change.mass_transfer",
+        "phase_change.heat_transfer_limited"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v13/classFoam_1_1fv_1_1heatTransferLimitedPhaseChange.html",
+          "note": "Foundation heat-transfer-limited phase-change fvModel."
+        }
+      ],
+      "metadata": {
+        "runtime_selectable": true
+      }
+    },
+    {
       "id": "model.momentumTransport",
       "name": "OpenFOAM momentum transport models",
       "provider_type": "model",
@@ -106,7 +179,7 @@
         {
           "kind": "user_guide",
           "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/models",
-          "note": "OpenFOAM v14 models and turbulence-model documentation."
+          "note": "OpenFOAM v13 models and turbulence-model documentation."
         }
       ]
     },
@@ -124,9 +197,35 @@
         {
           "kind": "user_guide",
           "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/transport-rheology",
-          "note": "OpenFOAM v14 generalized-Newtonian and visco-elastic models."
+          "note": "OpenFOAM v13 generalized-Newtonian and visco-elastic models."
         }
       ]
+    },
+    {
+      "id": "model.solidificationMelting",
+      "name": "solidificationMelting",
+      "provider_type": "fv_model",
+      "capabilities": [
+        "fvModel.solidificationMelting",
+        "phase_change.solid_liquid",
+        "melting",
+        "solidification",
+        "energy.latent_heat",
+        "phase_change.enthalpy_porosity"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v13/classFoam_1_1fv_1_1solidificationMelting.html",
+          "note": "This Foundation fvModel represents solidification/melting using enthalpy and momentum-porosity contributions."
+        }
+      ],
+      "metadata": {
+        "runtime_selectable": true
+      }
     },
     {
       "id": "solver.XiFluid",
@@ -254,7 +353,7 @@
         {
           "kind": "source_code",
           "reference": "https://cpp.openfoam.org/v13/fluid_8C_source.html",
-          "note": "OpenFOAM v14 run-time selectable compressible fluid module."
+          "note": "OpenFOAM v13 run-time selectable compressible fluid module."
         },
         {
           "kind": "user_guide",
@@ -368,7 +467,7 @@
         {
           "kind": "source_code",
           "reference": "https://cpp.openfoam.org/v13/incompressibleFluid_8C_source.html",
-          "note": "OpenFOAM v14 run-time selectable incompressibleFluid module."
+          "note": "OpenFOAM v13 run-time selectable incompressibleFluid module."
         },
         {
           "kind": "source_code",
@@ -681,7 +780,7 @@
         {
           "kind": "source_code",
           "reference": "https://cpp.openfoam.org/v13/namespaceFoam_1_1fvm.html",
-          "note": "OpenFOAM v14 implicit finite-volume operator namespace."
+          "note": "OpenFOAM v13 implicit finite-volume operator namespace."
         }
       ]
     },

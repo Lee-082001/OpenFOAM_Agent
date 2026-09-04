@@ -6,9 +6,11 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel
 
@@ -24,6 +26,7 @@ T = TypeVar("T", bound=BaseModel)
 
 DEFAULT_CLAUDE_MODEL = "claude-default"
 DEFAULT_CLAUDE_TIMEOUT_SECONDS = 900
+DEFAULT_CLAUDE_WAIT_HEARTBEAT_SECONDS = 15.0
 DEFAULT_CLAUDE_STRUCTURED_REPAIRS = 1
 
 # --backend claude is intentionally the Claude Code subscription/OAuth path. Claude Code
@@ -207,12 +210,16 @@ class ClaudeLLM:
         timeout_seconds: int = DEFAULT_CLAUDE_TIMEOUT_SECONDS,
         structured_repair_attempts: int = DEFAULT_CLAUDE_STRUCTURED_REPAIRS,
         status: ClaudeCLIStatus | None = None,
+        wait_callback: Callable[[float, float], None] | None = None,
+        wait_heartbeat_seconds: float = DEFAULT_CLAUDE_WAIT_HEARTBEAT_SECONDS,
     ) -> None:
         normalized = (model or "").strip()
         if timeout_seconds < 1:
             raise LLMConfigurationError("Claude timeout_seconds must be positive.")
         if structured_repair_attempts < 0:
             raise LLMConfigurationError("Claude structured_repair_attempts must be non-negative.")
+        if wait_heartbeat_seconds <= 0:
+            raise LLMConfigurationError("Claude wait_heartbeat_seconds must be positive.")
         self.cli_model = normalized or None
         self.model = normalized or DEFAULT_CLAUDE_MODEL
         # Claude Code print mode does not expose a stable per-response max-output-token flag.
@@ -221,6 +228,8 @@ class ClaudeLLM:
         self.structured_repair_attempts = structured_repair_attempts
         self.status = status or check_claude_cli(binary=binary)
         self.binary = self.status.binary
+        self.wait_callback = wait_callback
+        self.wait_heartbeat_seconds = float(wait_heartbeat_seconds)
         self.last_usage: dict[str, int] | None = None
 
     def generate(
@@ -314,15 +323,13 @@ class ClaudeLLM:
                 command.extend(["--model", self.cli_model])
             command.append(prompt)
             try:
-                proc = subprocess.run(
+                proc = _run_with_wait_heartbeat(
                     command,
-                    capture_output=True,
-                    text=True,
                     cwd=temp,
-                    timeout=self.timeout_seconds,
-                    check=False,
+                    timeout_seconds=self.timeout_seconds,
                     env=env,
-                    stdin=subprocess.DEVNULL,
+                    wait_callback=self.wait_callback,
+                    heartbeat_seconds=self.wait_heartbeat_seconds,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise StructuredOutputError(
@@ -389,3 +396,46 @@ def _claude_usage(envelope: dict[str, Any]) -> dict[str, int] | None:
 def _validation_error(exc: Exception, *, limit: int = 4000) -> str:
     text = str(exc).strip() or type(exc).__name__
     return text[:limit] + ("...<truncated>" if len(text) > limit else "")
+
+
+def _run_with_wait_heartbeat(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: float,
+    env: dict[str, str],
+    wait_callback: Callable[[float, float], None] | None,
+    heartbeat_seconds: float,
+):
+    """Run one blocking CLI call while emitting bounded wait heartbeats."""
+    stop = threading.Event()
+    started = time.monotonic()
+    watcher: threading.Thread | None = None
+
+    if wait_callback is not None:
+        def watch() -> None:
+            while not stop.wait(heartbeat_seconds):
+                elapsed = time.monotonic() - started
+                try:
+                    wait_callback(elapsed, timeout_seconds)
+                except Exception:
+                    continue
+
+        watcher = threading.Thread(target=watch, name="claude-wait-heartbeat", daemon=True)
+        watcher.start()
+
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=timeout_seconds,
+            check=False,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+    finally:
+        stop.set()
+        if watcher is not None:
+            watcher.join(timeout=0.2)

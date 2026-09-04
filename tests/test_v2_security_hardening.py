@@ -115,6 +115,9 @@ def test_environment_snapshot_does_not_expose_absolute_openfoam_paths(tmp_path, 
     assert str(project) not in encoded
     assert "foam_src" not in snapshot
     assert snapshot["trusted_installation_configured"] is True
+    assert "commands" not in snapshot
+    assert snapshot["installed_executable_count"] == 1
+    assert snapshot["capability_inventory_queryable"] is True
 
 
 def test_model_prompt_redacts_known_local_paths(tmp_path, graph_path, monkeypatch):

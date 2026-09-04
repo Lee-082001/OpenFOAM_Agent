@@ -7,6 +7,7 @@ from openfoam_agent.verification.foam_semantics import (
     ResolutionStatus,
     parse_boundary_selectors,
     parse_mesh_boundary,
+    parse_top_level_assignments,
 )
 from openfoam_agent.verification.presolve import PreSolveCompletenessGate
 from openfoam_agent.tools.workspace import CaseWorkspace
@@ -200,3 +201,28 @@ def test_presolve_reports_indeterminate_as_warning_not_false_missing(tmp_path):
     assert result.valid, result.failures
     assert result.warnings
     assert "did not prove this patch missing" in result.warnings[0]
+
+
+def test_top_level_field_projection_ignores_comment_substrings():
+    text = foam_header("0/U", "volVectorField") + """
+// dimensions [0 1 -1 0 0 0 0];
+// internalField uniform (0 0 0);
+boundaryField { inlet { type zeroGradient; } }
+"""
+    entries, complete = parse_top_level_assignments(text)
+    assert complete
+    assert "dimensions" not in entries
+    assert "internalField" not in entries
+    assert entries["boundaryField"] == "<dictionary>"
+
+
+def test_top_level_field_projection_marks_dynamic_include_indeterminate_without_swallowing_later_keys():
+    text = foam_header("0/U", "volVectorField") + """
+#include "fieldDefaults"
+internalField uniform (0 0 0);
+boundaryField { inlet { type zeroGradient; } }
+"""
+    entries, complete = parse_top_level_assignments(text)
+    assert not complete
+    assert entries["internalField"] == "uniform (0 0 0)"
+    assert "dimensions" not in entries

@@ -302,3 +302,56 @@ def parse_named_dictionary_assignments(text: str, name: str) -> tuple[dict[str, 
                 complete = False
         i = semi + 1
     return result, complete
+
+
+def parse_top_level_assignments(text: str) -> tuple[dict[str, str], bool]:
+    """Project top-level OpenFOAM entries into literal key -> raw value semantics.
+
+    Comments are removed and nested dictionaries are skipped as structured entries.
+    Dynamic directives/expansions make the projection incomplete instead of proving a
+    missing key.  This is intentionally bounded semantic parsing for validation gates,
+    not a replacement for OpenFOAM's own dictionary reader.
+    """
+    clean = strip_comments(text)
+    result: dict[str, str] = {}
+    complete = True
+    i = 0
+    while i < len(clean):
+        i = _skip_ws(clean, i)
+        if i >= len(clean):
+            break
+        key, after_key = parse_key(clean, i)
+        if key is None:
+            i = max(i + 1, after_key)
+            continue
+        j = _skip_ws(clean, after_key)
+
+        if key.pattern_state == PatternState.INDETERMINATE:
+            complete = False
+            # Preprocessor directives such as #include are line-oriented and often
+            # have no semicolon.  Skip only that line so later literal entries remain
+            # visible to the semantic projection.
+            if key.token_kind == FoamTokenKind.DIRECTIVE:
+                newline = clean.find("\n", j)
+                i = len(clean) if newline < 0 else newline + 1
+            else:
+                i = _scan_to_statement_end(clean, j, "}") + 1
+            continue
+
+        if j < len(clean) and clean[j] == "{":
+            end = matching_delimiter(clean, j, "{", "}")
+            if end is None:
+                return result, False
+            result[key.value] = "<dictionary>"
+            i = end + 1
+            continue
+
+        semi = _scan_to_statement_end(clean, j, "}")
+        raw_value = clean[j:semi].strip()
+        if raw_value:
+            result[key.value] = raw_value
+        else:
+            complete = False
+        i = semi + 1
+
+    return result, complete

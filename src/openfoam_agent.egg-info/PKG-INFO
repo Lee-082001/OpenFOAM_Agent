@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: openfoam-agent
-Version: 3.2.0
+Version: 3.4.0
 Summary: Agent-owned OpenFOAM CFD engineering behind deterministic safety gates
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
@@ -9,12 +9,16 @@ Requires-Dist: pydantic<3,>=2.8
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8; extra == "dev"
 
-# OpenFOAM Agent v3.2.0
+# OpenFOAM Agent v3.4.0
 
 
 
 
 
+
+> **v3.4.0 evidence protocol / installed-semantics hardening:** Python now owns evidence-gap IDs and refinement lifecycle, so harmless model bookkeeping collisions such as `G1086 -> G1086` cannot fail an Engineering turn. Action validation is routed to the declared branch before plain-union validation, installed OpenFOAM evidence is separated from documented fallback provenance, and sourced OF13/14 runtime-selection registrations are discovered directly from OpenFOAM source. PreSolve no longer uses raw `internalField`/`dimensions` substring checks. Codex/Claude blocking calls emit wait heartbeats and expose configurable timeouts, and the normal environment capsule no longer repeats the complete installed executable inventory on every LLM turn. See `V3_4_CHANGES.md`.
+
+> **v3.3.0 native OpenFOAM discovery / execution contract:** a sourced OpenFOAM Foundation 13 or 14 installation is now the executable authority. Python builds a sanitized `InstalledOpenFOAMIR` from every executable found under the trusted installation app bins/PATH plus installed solver-module, fvModel and function-object source components. The historical command list is only an offline-test fallback, not a production feature allowlist. `EngineeringPlan.execution` can represent `foamRun`, `foamMultiRun` with region-specific solver modules, or a trusted direct solver application, while `native_pipeline` can invoke any discovered Foundation utility under the same workspace/shell-free safety boundary. Bundled v13 and v14 capability graphs are version-matched fallback evidence; the CLI selects the graph from `WM_PROJECT_VERSION`.
 
 > **v3.2.0 engineering evidence/assumption contract:** deterministic retrieval payloads are now stored as structured `EngineeringEvidenceRecord` objects in `CFDState` instead of being serialized into `EngineeringEvent.output_excerpt`. Events keep only bounded audit/display metadata plus a `payload_ref`, and the LLM context compiler projects canonical evidence back from the structured store. This removes the 12k event-overflow failure class. When exploratory completion is authorized, concrete delegated values are recorded as typed `engineering_defaults` with `source=engineering_default`; a structured `block_kind=engineering_choice_missing` cannot terminally send those choices back to the user. A retrieval infrastructure failure now disables further retrieval for the phase and deterministically escalates preparation to the decision-only contract instead of repeating the same failed query.
 
@@ -164,14 +168,15 @@ Natural-language request
        - batch-retrieve capability + trusted installed OpenFOAM evidence with novelty tracking
        - choose solver / mesh / BC / numerics / motion strategy
        - write and patch case files
-       - run allowlisted OpenFOAM validation and mesh tools
+       - run trusted discovered OpenFOAM validation/preprocess/mesh utilities
        - read real failure logs and iterate
   -> deterministic safety + integrity gate
   -> MESH_READY
   -> deterministic pre-solve completeness gate
   -> SOLVE_READY
   -> user /solve
-  -> foamRun
+  -> selected OpenFOAM execution driver
+       - foamRun / foamMultiRun / trusted direct solver application
        - failure log -> same CFDEngineeringAgent -> bounded repair/retry
   -> runtime evidence
   -> CFDPostProcessingAgent
@@ -207,11 +212,11 @@ The semantic fields `temporal_behavior`, `motion_kind`, and `mesh_motion_require
 
 Python owns only bounded execution and evidence boundaries:
 
-- allowlisted OpenFOAM commands;
+- trusted Foundation 13/14 installation discovery and executable provenance;
 - workspace/path sandboxing;
 - executable OpenFOAM directive and arbitrary code blocking;
 - confirmed-user-fact provenance;
-- solver identity consistency between `EngineeringPlan` and `system/controlDict`;
+- execution-driver/module consistency between `EngineeringPlan.execution` and `system/controlDict` (`solver` or `regionSolvers`);
 - native `foamDictionary`, `surfaceCheck`, and `checkMesh` evidence;
 - SHA-256 sealing of every pre-solve execution input under `0/`, `constant/`, and `system/`, including native-generated mesh files;
 - agent-step, solver-attempt, command-timeout, file-size, and mesh-cell limits;
@@ -242,7 +247,7 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
-For native execution, source an installed OpenFOAM Foundation environment first. The bundled capability graph is Foundation v14; a different version can use `--capability-db` with a version-matched graph. The engineering agent can also search the installed `FOAM_TUTORIALS`, `FOAM_SRC`, and `FOAM_ETC` trees directly.
+For native execution, source an installed OpenFOAM Foundation **13 or 14** environment first. The release bundles both `config/openfoam13_capability_graph.json` and `config/openfoam14_capability_graph.json`; the CLI chooses the version-matched default from `WM_PROJECT_VERSION`, while `--capability-db` can still override it explicitly. Production command authority comes from the sourced trusted installation itself: every executable discovered under the trusted OpenFOAM app bins/PATH becomes available to the Engineering Agent without a Python per-tool allowlist. Installed `$FOAM_MODULES`, `$FOAM_SRC/fvModels`, and `$FOAM_SRC/functionObjects` are projected into `InstalledOpenFOAMIR`, and the static graphs act as bounded documented fallback evidence rather than the list of everything the Agent may use.
 
 ## CLI
 
@@ -331,7 +336,7 @@ For multi-turn Intake, v2.7.3 also gives only the Ollama/local adapter two bound
 openfoam-agent --interactive \
   --backend codex \
   --confirm-api-calls \
-  --capability-db config/openfoam14_capability_graph.json
+  --capability-db config/openfoam14_capability_graph.json  # optional; auto-selects v13/v14 when omitted
 ```
 
 Role-specific model flags and `CODEX_MODEL`, `CODEX_INTAKE_MODEL`, `CODEX_ENGINEERING_MODEL`, `CODEX_POSTPROCESS_MODEL`, and `CODEX_REVIEW_MODEL` are supported. If no Codex model is specified, the adapter leaves model selection to the Codex CLI default. Each call is stateless/ephemeral, runs from an empty temporary directory under `--sandbox read-only`, and receives only the bounded prompt/state capsule supplied by OpenFOAM Agent. `OPENAI_API_KEY`, `CODEX_API_KEY`, API base URL, organization, and project routing variables are removed from the Codex subprocess environment by design. The final JSON is validated again by the same Pydantic contract before any deterministic action is permitted.

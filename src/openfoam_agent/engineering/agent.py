@@ -56,6 +56,7 @@ from openfoam_agent.schemas.engineering import (
     BlockMeshRepairAction,
     BlockMeshRepairTurn,
     GatherEvidenceAction,
+    EvidenceGapRequest,
     RepairCasePlanAction,
     RuntimeCaseRepairAction,
     RepairTurn,
@@ -2456,6 +2457,120 @@ class CFDEngineeringAgent:
             False,
         )
 
+    @staticmethod
+    def _next_evidence_gap_id(*, occupied: set[str]) -> str:
+        """Issue a deterministic opaque gap ID not already owned by the ledger.
+
+        Gap IDs are workflow bookkeeping only.  The Agent may propose one, but Python
+        owns identity/lifecycle so a harmless model-side collision cannot terminate CFD.
+        """
+
+        numbers = sorted(
+            int(match.group(1))
+            for item in occupied
+            if (match := re.fullmatch(r"G([0-9]{2,4})", str(item))) is not None
+        )
+        start = (numbers[-1] + 1) if numbers and numbers[-1] < 9999 else 1
+        for offset in range(9999):
+            number = ((start - 1 + offset) % 9999) + 1
+            candidate = f"G{number:02d}"
+            if candidate not in occupied:
+                return candidate
+        raise RuntimeError("Evidence-gap ID space exhausted.")
+
+    @staticmethod
+    def _evidence_gap_protocol_fingerprint(gap: EvidenceGapRequest) -> str:
+        payload = gap.model_dump(
+            mode="json",
+            exclude={"gap_id", "refines_gap_id"},
+        )
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:20]
+
+    def _normalize_evidence_gap_batch(
+        self,
+        action: GatherEvidenceAction,
+        *,
+        phase: str,
+    ) -> list[tuple[EvidenceGapRequest, str, list[str]]]:
+        """Resolve harmless LLM gap-ID mistakes against the authoritative phase ledger.
+
+        The model chooses *what evidence is needed*. Python owns opaque IDs and the
+        refinement lifecycle.  This keeps protocol metadata from becoming a CFD-fatal
+        structured-output error while preserving the single-retrieval hard fuse.
+        """
+
+        ledger = self._evidence_gap_ledger.setdefault(phase, {})
+        occupied = set(ledger)
+        reserved: set[str] = set()
+        exact_seen: set[tuple[str, str | None, str]] = set()
+        normalized: list[tuple[EvidenceGapRequest, str, list[str]]] = []
+
+        for gap in action.gaps:
+            requested_id = gap.gap_id
+            parent_id = gap.refines_gap_id
+            fingerprint = self._evidence_gap_protocol_fingerprint(gap)
+            exact_key = (requested_id, parent_id, fingerprint)
+            if exact_key in exact_seen:
+                # Exact duplicate in one model response is pure protocol noise.
+                continue
+            exact_seen.add(exact_key)
+
+            effective_id = requested_id
+            notes: list[str] = []
+
+            if parent_id == requested_id:
+                if requested_id in ledger:
+                    # The common model mistake seen in v3.3: "refine G1086" while
+                    # reusing G1086 as the child. Preserve the intended parent and
+                    # issue a fresh child ID.
+                    effective_id = self._next_evidence_gap_id(
+                        occupied=occupied | reserved
+                    )
+                    notes.append(
+                        f"self-refining requested ID {requested_id} reissued as {effective_id}"
+                    )
+                else:
+                    # No such parent exists, so the self-reference carries no usable
+                    # lifecycle meaning. Keep the proposed child and clear the parent.
+                    parent_id = None
+                    notes.append(
+                        f"self-refinement parent {requested_id} was unknown and was cleared"
+                    )
+
+            if effective_id in reserved:
+                reissued = self._next_evidence_gap_id(occupied=occupied | reserved)
+                notes.append(
+                    f"duplicate in-batch requested ID {effective_id} reissued as {reissued}"
+                )
+                effective_id = reissued
+            elif effective_id in ledger and parent_id is not None and effective_id != parent_id:
+                # A refinement child collided with some already-owned ID.  Reissue the
+                # child without changing its requested evidence semantics.
+                reissued = self._next_evidence_gap_id(occupied=occupied | reserved)
+                notes.append(
+                    f"colliding requested ID {effective_id} reissued as {reissued}"
+                )
+                effective_id = reissued
+
+            if parent_id is not None and parent_id not in ledger:
+                notes.append(
+                    f"unknown refinement parent {parent_id} cleared; request treated as a root gap"
+                )
+                parent_id = None
+
+            normalized_gap = gap.model_copy(
+                update={
+                    "gap_id": effective_id,
+                    "refines_gap_id": parent_id,
+                }
+            )
+            normalized.append((normalized_gap, requested_id, notes))
+            reserved.add(effective_id)
+
+        return normalized
+
     def _evidence_gap_status(self, phase: str) -> list[dict[str, object]]:
         ledger = self._evidence_gap_ledger.get(phase, {})
         result: list[dict[str, object]] = []
@@ -2528,7 +2643,15 @@ class CFDEngineeringAgent:
             compact_gaps.append(
                 {
                     key: item[key]
-                    for key in ("gap_id", "status", "new_evidence_ids", "total_seen", "message")
+                    for key in (
+                        "gap_id",
+                        "requested_gap_id",
+                        "status",
+                        "new_evidence_ids",
+                        "total_seen",
+                        "message",
+                        "protocol_notes",
+                    )
                     if key in item
                 }
             )
@@ -2592,47 +2715,47 @@ class CFDEngineeringAgent:
         new_observed_ids: set[str] = set()
         gap_results: list[dict[str, object]] = []
 
-        for gap in action.gaps:
+        normalized_gaps = self._normalize_evidence_gap_batch(action, phase=phase)
+        for gap, requested_gap_id, protocol_notes in normalized_gaps:
             existing = ledger.get(gap.gap_id)
             if existing is not None:
-                gap_results.append(
-                    {
-                        "gap_id": gap.gap_id,
-                        "status": "already_retrieved_blocked",
-                        "message": (
-                            "Each evidence gap may be retrieved once. Use the accumulated evidence, "
-                            "proceed, or declare a new more-specific gap with refines_gap_id."
-                        ),
-                    }
-                )
+                result: dict[str, object] = {
+                    "gap_id": gap.gap_id,
+                    "status": "already_retrieved_blocked",
+                    "message": (
+                        "Each evidence gap may be retrieved once. Use the accumulated evidence, "
+                        "proceed, or declare a more-specific refinement; Python owns the child ID."
+                    ),
+                }
+                if requested_gap_id != gap.gap_id:
+                    result["requested_gap_id"] = requested_gap_id
+                if protocol_notes:
+                    result["protocol_notes"] = protocol_notes
+                gap_results.append(result)
                 continue
 
             parent = None
             if gap.refines_gap_id is not None:
                 parent = ledger.get(gap.refines_gap_id)
-                if parent is None:
-                    gap_results.append(
-                        {
-                            "gap_id": gap.gap_id,
-                            "status": "unknown_refinement_parent",
-                            "message": f"refines_gap_id {gap.refines_gap_id} is not present in the evidence-gap ledger.",
-                        }
-                    )
-                    continue
-                if str(parent.get("status", "")) == "satisfied":
-                    gap_results.append(
-                        {
-                            "gap_id": gap.gap_id,
-                            "status": "satisfied_parent_blocked",
-                            "message": f"Evidence gap {gap.refines_gap_id} is already satisfied and cannot be refined.",
-                        }
-                    )
+                if parent is not None and str(parent.get("status", "")) == "satisfied":
+                    result = {
+                        "gap_id": gap.gap_id,
+                        "status": "satisfied_parent_blocked",
+                        "message": f"Evidence gap {gap.refines_gap_id} is already satisfied and cannot be refined.",
+                    }
+                    if requested_gap_id != gap.gap_id:
+                        result["requested_gap_id"] = requested_gap_id
+                    if protocol_notes:
+                        result["protocol_notes"] = protocol_notes
+                    gap_results.append(result)
                     continue
 
             entry = {
                 "missing_evidence": gap.missing_evidence,
                 "why_required": gap.why_required,
                 "refines_gap_id": gap.refines_gap_id,
+                "requested_gap_id": requested_gap_id,
+                "protocol_notes": list(protocol_notes),
                 "seen_ids": set(),
                 "retrievals": 0,
                 "last_new_count": 0,
@@ -2714,15 +2837,18 @@ class CFDEngineeringAgent:
             entry["retrievals"] = int(entry.get("retrievals", 0)) + 1
             entry["last_new_count"] = len(new_ids)
             entry["status"] = "evidence_available" if new_ids else "stagnant"
-            gap_results.append(
-                {
-                    "gap_id": gap.gap_id,
-                    "status": "new_evidence" if new_ids else "no_new_evidence",
-                    "new_evidence_ids": new_ids,
-                    "new_evidence": [found[eid] for eid in new_ids],
-                    "total_seen": len(seen_ids),
-                }
-            )
+            result = {
+                "gap_id": gap.gap_id,
+                "status": "new_evidence" if new_ids else "no_new_evidence",
+                "new_evidence_ids": new_ids,
+                "new_evidence": [found[eid] for eid in new_ids],
+                "total_seen": len(seen_ids),
+            }
+            if requested_gap_id != gap.gap_id:
+                result["requested_gap_id"] = requested_gap_id
+            if protocol_notes:
+                result["protocol_notes"] = protocol_notes
+            gap_results.append(result)
 
         if performed_retrieval:
             self._retrieval_cycles[phase] = cycles + 1
@@ -3396,12 +3522,13 @@ class CFDEngineeringAgent:
             if isinstance(action, GatherEvidenceAction):
                 reason = f"{type(exc).__name__}: {exc}"
                 self._disable_evidence_retrieval(phase, reason)
+                diagnostic = reason[:280]
                 return self._event(
                     step,
                     action.type,
                     False,
                     "Evidence retrieval infrastructure failed once; further retrieval is disabled for this phase. "
-                    "Proceed with existing evidence/authorized engineering defaults or block.",
+                    f"Cause: {diagnostic}. Proceed with existing evidence/authorized engineering defaults or block.",
                     reason,
                     failure_signature=f"evidence_retrieval:{phase}:infrastructure",
                     failure_scope="pipeline",

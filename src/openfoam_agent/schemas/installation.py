@@ -20,7 +20,7 @@ class InstalledComponent(BaseModel):
 
     name: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.+-]*$", max_length=160)
     category: Literal["solver_module", "fv_model", "function_object", "source_component"]
-    source: Literal["installed_source", "documented_profile"]
+    source: Literal["installed_source"]
 
 
 class InstalledOpenFOAMIR(BaseModel):

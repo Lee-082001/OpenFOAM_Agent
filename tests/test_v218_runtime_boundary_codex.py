@@ -255,9 +255,11 @@ def test_cli_codex_requires_confirmation_and_builds_no_openai_adapter(monkeypatc
 
     class DummyCodexLLM:
         created = []
-        def __init__(self, *, model, status):
+        def __init__(self, *, model, status, timeout_seconds, wait_callback):
             self.model = model or "codex-default"
             self.status = status
+            self.timeout_seconds = timeout_seconds
+            self.wait_callback = wait_callback
             self.last_usage = None
             self.__class__.created.append(self.model)
 

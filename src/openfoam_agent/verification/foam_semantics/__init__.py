@@ -1,5 +1,6 @@
 from .boundary import BoundaryFieldInterpreter, parse_boundary_selectors
 from .mesh import parse_mesh_boundary
+from .parser import parse_top_level_assignments
 from .model import (
     BoundaryMatchKind,
     BoundaryResolution,
@@ -31,4 +32,5 @@ __all__ = [
     "ResolutionTraceStep",
     "parse_boundary_selectors",
     "parse_mesh_boundary",
+    "parse_top_level_assignments",
 ]

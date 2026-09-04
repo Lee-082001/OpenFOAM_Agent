@@ -16,7 +16,9 @@ from openfoam_agent.conversation import ConversationSession, InteractionMode
 from openfoam_agent.engineering import EngineeringPolicy
 from openfoam_agent.llm import (
     DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CLAUDE_TIMEOUT_SECONDS,
     DEFAULT_CODEX_MODEL,
+    DEFAULT_CODEX_TIMEOUT_SECONDS,
     DEFAULT_OLLAMA_API_KEY,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
@@ -33,7 +35,12 @@ from openfoam_agent.llm import (
     normalize_ollama_base_url,
 )
 from openfoam_agent.postprocessing import PostProcessingPolicy
-from openfoam_agent.progress import CLIProgressReporter, ProgressLevel, ProgressReporter
+from openfoam_agent.progress import (
+    CLIProgressReporter,
+    ProgressEvent,
+    ProgressLevel,
+    ProgressReporter,
+)
 from openfoam_agent.schemas.intake import CFDIntakeSpec
 from openfoam_agent.schemas.request import UserRequest
 from openfoam_agent.schemas.simulation import RuntimePolicy
@@ -179,6 +186,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=3.0,
         help="Startup Ollama /v1/models health-check timeout in seconds (default: 3).",
+    )
+    parser.add_argument(
+        "--codex-timeout",
+        type=int,
+        default=DEFAULT_CODEX_TIMEOUT_SECONDS,
+        help=(
+            "Maximum wall-clock seconds for one Codex CLI model call "
+            f"(default: {DEFAULT_CODEX_TIMEOUT_SECONDS}). Normal/verbose progress emits a wait heartbeat."
+        ),
+    )
+    parser.add_argument(
+        "--claude-timeout",
+        type=int,
+        default=DEFAULT_CLAUDE_TIMEOUT_SECONDS,
+        help=(
+            "Maximum wall-clock seconds for one Claude Code model call "
+            f"(default: {DEFAULT_CLAUDE_TIMEOUT_SECONDS}). Normal/verbose progress emits a wait heartbeat."
+        ),
     )
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     parser.add_argument("--capability-db", type=Path, default=DEFAULT_CAPABILITY_DB)
@@ -349,6 +374,10 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--llm-max-output-tokens must be >= 1.")
     if args.ollama_health_timeout <= 0:
         parser.error("--ollama-health-timeout must be > 0.")
+    if args.codex_timeout < 1:
+        parser.error("--codex-timeout must be >= 1.")
+    if args.claude_timeout < 1:
+        parser.error("--claude-timeout must be >= 1.")
     positive_budget_fields = {
         "--engineering-steps": args.engineering_steps,
         "--engineering-hard-cap": args.engineering_hard_cap,
@@ -491,6 +520,26 @@ def _resolve_claude_model_names(
     return _resolve_backend_model_names(args, backend="claude", environ=environ)
 
 
+def _llm_wait_callback(args: argparse.Namespace, *, backend: str):
+    reporter = CLIProgressReporter(args.progress)
+    label = "Codex CLI" if backend == "codex" else "Claude Code"
+
+    def callback(elapsed: float, timeout: float) -> None:
+        reporter.emit(
+            ProgressEvent(
+                phase="llm-wait",
+                message=f"{label} 응답 대기 중",
+                status="info",
+                metrics={
+                    "elapsedSeconds": int(elapsed),
+                    "timeoutSeconds": int(timeout),
+                },
+            )
+        )
+
+    return callback
+
+
 def _build_llm(args: argparse.Namespace):
     if args.backend == "rule-based-intake":
         return WorkflowLLMs.uniform(RuleBasedLLM()), "rule-based-intake", None
@@ -525,6 +574,8 @@ def _build_llm(args: argparse.Namespace):
                 clients[model_name] = CodexLLM(
                     model=None if model_name == DEFAULT_CODEX_MODEL else model_name,
                     status=status,
+                    timeout_seconds=args.codex_timeout,
+                    wait_callback=_llm_wait_callback(args, backend="codex"),
                 )
             return clients[model_name]
 
@@ -546,6 +597,8 @@ def _build_llm(args: argparse.Namespace):
                 clients[model_name] = ClaudeLLM(
                     model=None if model_name == DEFAULT_CLAUDE_MODEL else model_name,
                     status=status,
+                    timeout_seconds=args.claude_timeout,
+                    wait_callback=_llm_wait_callback(args, backend="claude"),
                 )
             return clients[model_name]
 

@@ -30,6 +30,28 @@ def _fake_install(tmp_path: Path, version: str, *executables: str):
     custom = modules / "customThermalModule" / "Make"
     custom.mkdir(parents=True, exist_ok=True)
     (custom / "files").write_text("customThermalModule.C\n", encoding="utf-8")
+
+    # Runtime-selection registrations prove that installed fvModel/functionObject types
+    # are discovered from OpenFOAM's own registration semantics rather than directory
+    # names or a Python enum.
+    fv_model = src / "fvModels" / "general" / "customLatentModel" / "customLatentModel.C"
+    fv_model.parent.mkdir(parents=True, exist_ok=True)
+    fv_model.write_text(
+        "addToRunTimeSelectionTable(fvModel, customLatentModel, dictionary);\n",
+        encoding="utf-8",
+    )
+    named_model = src / "fvModels" / "general" / "namedModel" / "namedModel.C"
+    named_model.parent.mkdir(parents=True, exist_ok=True)
+    named_model.write_text(
+        "addNamedToRunTimeSelectionTable(fvModel, namedModel, dictionary, customLookupModel);\n",
+        encoding="utf-8",
+    )
+    function_object = src / "functionObjects" / "field" / "customFunction" / "customFunction.C"
+    function_object.parent.mkdir(parents=True, exist_ok=True)
+    function_object.write_text(
+        "addToRunTimeSelectionTable(functionObject, customFunction, dictionary);\n",
+        encoding="utf-8",
+    )
     env = {
         "WM_PROJECT": "OpenFOAM",
         "WM_PROJECT_VERSION": version,
@@ -67,7 +89,7 @@ def test_sourced_installation_discovers_every_trusted_application_not_static_all
     assert "ls" not in runner.allowed_commands
     assert runner.installation.version == version
     assert "customThermalModule" in runner.installation.solver_modules
-    assert "solid" in runner.installation.solver_modules  # documented fallback profile
+    assert "solid" not in runner.installation.solver_modules  # docs are not installed evidence
 
     tools = OpenFOAMTools(runner)
     result = tools.run_native_command("brandNewUtility", workspace, arguments=["hello"])
@@ -94,6 +116,54 @@ def test_discovered_catalog_merges_installed_tools_modules_and_documented_graph(
     assert any(item["name"] == "newMeshThing" for item in catalog.search("newMeshThing"))
     assert any(item["name"] == "customThermalModule" for item in catalog.search("customThermalModule"))
 
+
+@pytest.mark.parametrize("version", ["13", "14"])
+def test_foundation_phase_change_models_are_available_as_documented_fallback(tmp_path, version):
+    root, _, env = _fake_install(tmp_path, version, "foamRun")
+    runner = SafeRunner(
+        workspace_root=tmp_path / "workspace",
+        trusted_executable_roots=[root],
+        base_env=env,
+    )
+    assert "solidificationMelting" not in runner.installation.fv_models
+    assert "VoFSolidificationMelting" not in runner.installation.fv_models
+
+    catalog = CapabilityCatalog(
+        Path(__file__).resolve().parents[1] / "config" / f"openfoam{version}_capability_graph.json",
+        installation=runner.installation,
+    )
+    melting = {item["name"] for item in catalog.search("melting", limit=12)}
+    assert "solidificationMelting" in melting
+    assert "VoFSolidificationMelting" in melting
+    assert catalog.provider("model.solidificationMelting").verification_level == "documented"
+    assert catalog.provider("installed.fv_model.solidificationMelting") is None
+
+
+
+@pytest.mark.parametrize("version", ["13", "14"])
+def test_sourced_installation_discovers_runtime_selection_types_from_openfoam_source(tmp_path, version):
+    root, _, env = _fake_install(tmp_path, version, "foamRun")
+    runner = SafeRunner(
+        workspace_root=tmp_path / "workspace",
+        trusted_executable_roots=[root],
+        base_env=env,
+    )
+
+    assert "customLatentModel" in runner.installation.fv_models
+    assert "customLookupModel" in runner.installation.fv_models
+    assert any(
+        item.category == "function_object" and item.name == "customFunction"
+        for item in runner.installation.components
+    )
+
+    catalog = CapabilityCatalog(
+        Path(__file__).resolve().parents[1] / "config" / f"openfoam{version}_capability_graph.json",
+        installation=runner.installation,
+    )
+    installed = catalog.provider("installed.fv_model.customLatentModel")
+    assert installed is not None
+    assert installed.verification_level == "installed"
+    assert catalog.provider("installed.fv_model.customLookupModel") is not None
 
 def test_native_generic_tool_cannot_escape_case_or_override_case_root(tmp_path):
     root, _, env = _fake_install(tmp_path, "14", "arbitraryFoamTool")

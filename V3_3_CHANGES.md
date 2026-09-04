@@ -5,8 +5,8 @@
 - Production command authority is no longer the historical Python `SafeRunner` command list.
 - A sourced `WM_PROJECT=OpenFOAM`, `WM_PROJECT_VERSION=13|14`, trusted `WM_PROJECT_DIR` is discovered into a sanitized `InstalledOpenFOAMIR`.
 - Every executable found in trusted `FOAM_APPBIN` / OpenFOAM PATH entries is available as an Agent-selectable native application without adding a per-command Python wrapper.
-- `$FOAM_MODULES`, `$FOAM_SRC/fvModels`, and `$FOAM_SRC/functionObjects` are scanned for installed runtime-selectable components when source trees are available.
-- Documented v13/v14 solver-module and `heatSource` metadata provides fallback evidence when source components are not installed; fallback metadata never grants executable authority.
+- `$FOAM_MODULES` is scanned for installed solver modules; runtime-selectable model/function-object source evidence is discovered from the sourced tree.
+- Documented v13/v14 capability metadata lives in the static capability graphs as fallback evidence. It is not inserted into `InstalledOpenFOAMIR` and never grants executable authority.
 - Dynamic command authority is disabled for other project names/versions. The historical minimal command set remains only for offline/unit-test compatibility.
 
 ## Version-matched capability evidence

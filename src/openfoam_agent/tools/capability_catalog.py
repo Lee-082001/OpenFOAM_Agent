@@ -13,7 +13,7 @@ class CapabilityCatalog:
 
     Static v13/v14 graphs supply documented semantics. The sourced installation is
     authoritative for executable availability and augments the graph with every trusted
-    application plus discovered/documented runtime-selectable components.
+    application plus runtime-selectable components actually discovered from the installed source tree.
     """
 
     def __init__(self, graph_path: str | Path, *, installation: InstalledOpenFOAMIR | None = None):
@@ -138,6 +138,22 @@ class CapabilityCatalog:
                 capabilities = [f"fvModel.{item.name}"]
                 if item.name == "heatSource":
                     capabilities += ["source.heat.volumetric", "heat_generation.volumetric"]
+                elif item.name in {"solidificationMelting", "VoFSolidificationMelting"}:
+                    capabilities += [
+                        "phase_change.solid_liquid",
+                        "melting",
+                        "solidification",
+                        "energy.latent_heat",
+                    ]
+                    if item.name == "VoFSolidificationMelting":
+                        capabilities.append("multiphase.vof")
+                    else:
+                        capabilities.append("phase_change.enthalpy_porosity")
+                elif item.name in {"heatTransferLimitedPhaseChange", "coefficientPhaseChange"}:
+                    capabilities += [
+                        "phase_change.fluid_fluid",
+                        "phase_change.mass_transfer",
+                    ]
                 provider_id = f"installed.fv_model.{item.name}"
             else:
                 continue

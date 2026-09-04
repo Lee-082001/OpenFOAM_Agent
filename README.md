@@ -1,9 +1,11 @@
-# OpenFOAM Agent v3.3.0
+# OpenFOAM Agent v3.4.0
 
 
 
 
 
+
+> **v3.4.0 evidence protocol / installed-semantics hardening:** Python now owns evidence-gap IDs and refinement lifecycle, so harmless model bookkeeping collisions such as `G1086 -> G1086` cannot fail an Engineering turn. Action validation is routed to the declared branch before plain-union validation, installed OpenFOAM evidence is separated from documented fallback provenance, and sourced OF13/14 runtime-selection registrations are discovered directly from OpenFOAM source. PreSolve no longer uses raw `internalField`/`dimensions` substring checks. Codex/Claude blocking calls emit wait heartbeats and expose configurable timeouts, and the normal environment capsule no longer repeats the complete installed executable inventory on every LLM turn. See `V3_4_CHANGES.md`.
 
 > **v3.3.0 native OpenFOAM discovery / execution contract:** a sourced OpenFOAM Foundation 13 or 14 installation is now the executable authority. Python builds a sanitized `InstalledOpenFOAMIR` from every executable found under the trusted installation app bins/PATH plus installed solver-module, fvModel and function-object source components. The historical command list is only an offline-test fallback, not a production feature allowlist. `EngineeringPlan.execution` can represent `foamRun`, `foamMultiRun` with region-specific solver modules, or a trusted direct solver application, while `native_pipeline` can invoke any discovered Foundation utility under the same workspace/shell-free safety boundary. Bundled v13 and v14 capability graphs are version-matched fallback evidence; the CLI selects the graph from `WM_PROJECT_VERSION`.
 
