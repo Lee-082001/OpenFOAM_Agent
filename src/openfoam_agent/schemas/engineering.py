@@ -13,6 +13,9 @@ class _EngineeringModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT = 24
+
+
 def _soft_text(value: object, *, limit: int) -> str:
     """Normalize non-authoritative protocol text without changing CFD semantics."""
 
@@ -108,7 +111,7 @@ class EngineeringEvidenceRecord(_EngineeringModel):
     step: int = Field(ge=1)
     action_type: str = Field(min_length=1, max_length=80)
     payload: Any
-    observed_evidence: list[ObservedEngineeringEvidence] = Field(default_factory=list, max_length=64)
+    observed_evidence: list[ObservedEngineeringEvidence] = Field(default_factory=list)
 
 
 class EngineeringDefaultAssumption(_EngineeringModel):
@@ -1429,6 +1432,25 @@ class EngineeringTurn(_EngineeringModel):
 
 
 class EngineeringEvent(_EngineeringModel):
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_bounded_projection(cls, value: object) -> object:
+        """Keep progress/audit projection limits from becoming workflow-fatal.
+
+        EngineeringEvent is not the durable evidence store.  When a caller supplies a
+        larger observed-evidence set, retain a bounded projection here; the complete set
+        belongs in EngineeringEvidenceRecord and is referenced by payload_ref.
+        """
+
+        if not isinstance(value, dict):
+            return value
+        observed = value.get("observed_evidence")
+        if isinstance(observed, (list, tuple)) and len(observed) > ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT:
+            normalized = dict(value)
+            normalized["observed_evidence"] = list(observed)[:ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT]
+            return normalized
+        return value
+
     step: int = Field(ge=1)
     action_type: str = Field(min_length=1, max_length=80)
     success: bool
@@ -1440,7 +1462,7 @@ class EngineeringEvent(_EngineeringModel):
     mesh_command_executed: bool = False
     failure_signature: str | None = Field(default=None, max_length=160)
     failure_scope: Literal["local", "pipeline", "strategy"] | None = None
-    observed_evidence: list[ObservedEngineeringEvidence] = Field(default_factory=list, max_length=24)
+    observed_evidence: list[ObservedEngineeringEvidence] = Field(default_factory=list, max_length=ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT)
     sequence_id: str | None = Field(default=None, max_length=120)
     sequence_goal: str | None = Field(default=None, max_length=1000)
     sequence_index: int | None = Field(default=None, ge=1, le=64)

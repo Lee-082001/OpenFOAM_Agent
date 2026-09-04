@@ -1,4 +1,9 @@
 
+## v3.5.0 — Evidence projection contract hardening
+
+Evidence retrieval now separates durable cardinality from UI/audit projection cardinality: full observed evidence is retained in `EngineeringEvidenceRecord`, while `EngineeringEvent` is deterministically bounded before validation. This prevents valid large retrieval batches from being misclassified as infrastructure failures. See `V3_5_CHANGES.md`.
+
+
 ## v3.2.0 — Engineering evidence / assumption contract
 
 Structured evidence storage is separated from event logging, delegated engineering defaults receive explicit provenance, and repeated evidence-infrastructure failures deterministically close retrieval instead of consuming LLM turns. See `V3_2_CHANGES.md`.

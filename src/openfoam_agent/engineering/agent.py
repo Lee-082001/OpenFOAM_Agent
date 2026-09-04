@@ -42,6 +42,7 @@ from openfoam_agent.schemas.engineering import (
     DeleteCaseFileAction,
     EngineeringBudgetExtension,
     EngineeringEvent,
+    ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT,
     EngineeringEvidenceRecord,
     EngineeringPlan,
     EngineeringSequenceAction,
@@ -4602,7 +4603,7 @@ class CFDEngineeringAgent:
                     self._redact_local_paths(line.rstrip())[:800]
                     for line in event.output_excerpt.splitlines()
                     if line.strip()
-                )[:24]
+                )[:ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT]
         self.progress.emit(
             ProgressEvent(
                 phase=phase,
@@ -4638,6 +4639,14 @@ class CFDEngineeringAgent:
         output_limit = min(self.policy.max_observation_chars, 12_000)
         summary = compact_text(str(summary), 4000)
         output = compact_text(str(output), output_limit) if output else ""
+        # Events are a bounded projection only.  The durable EngineeringEvidenceRecord
+        # retains the complete observed-evidence set referenced by payload_ref.  Never let
+        # a large but valid retrieval batch turn a progress/UI cardinality limit into a
+        # workflow-fatal validation error.
+        projected_evidence = sorted(
+            list(observed_evidence or []),
+            key=lambda item: (item.kind, item.reference, item.evidence_id),
+        )[:ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT]
         return EngineeringEvent(
             step=step,
             action_type=action_type,
@@ -4650,7 +4659,7 @@ class CFDEngineeringAgent:
             mesh_command_executed=mesh_command_executed,
             failure_signature=failure_signature,
             failure_scope=failure_scope,
-            observed_evidence=list(observed_evidence or []),
+            observed_evidence=projected_evidence,
         )
 
 

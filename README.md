@@ -1,5 +1,6 @@
-# OpenFOAM Agent v3.4.0
+# OpenFOAM Agent v3.5.0
 
+> **v3.5.0 evidence projection contract:** deterministic evidence retrieval now stores the complete observed-evidence set in `EngineeringEvidenceRecord` without an arbitrary cardinality ceiling, while `EngineeringEvent` is explicitly a bounded progress/audit projection. Event construction and the event model itself cap the projection before validation, so a valid batch with 25, 65, or more evidence items cannot disable retrieval or block Engineering merely because a UI/event list limit was exceeded. See `V3_5_CHANGES.md`.
 
 
 
