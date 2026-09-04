@@ -87,7 +87,7 @@ class EngineeringEvidence(_EngineeringModel):
 
 
 class ObservedEngineeringEvidence(_EngineeringModel):
-    """Deterministically issued evidence record attached to successful tool events."""
+    """Deterministically issued compact evidence descriptor."""
 
     evidence_id: str = Field(pattern=r"^ev_(?:cap|ref)_[0-9a-f]{20}$")
     kind: Literal["capability", "openfoam_reference"]
@@ -95,6 +95,53 @@ class ObservedEngineeringEvidence(_EngineeringModel):
     summary: str = Field(min_length=1, max_length=1200)
 
 
+class EngineeringEvidenceRecord(_EngineeringModel):
+    """Durable structured payload produced by deterministic evidence retrieval.
+
+    Large capability/reference payloads live here instead of in EngineeringEvent.output_excerpt.
+    Events remain compact progress/audit records while the context compiler selectively projects
+    these structured records back to the LLM.
+    """
+
+    record_id: str = Field(pattern=r"^evrec_[0-9a-f]{20}$")
+    phase: str = Field(min_length=1, max_length=80)
+    step: int = Field(ge=1)
+    action_type: str = Field(min_length=1, max_length=80)
+    payload: Any
+    observed_evidence: list[ObservedEngineeringEvidence] = Field(default_factory=list, max_length=64)
+
+
+class EngineeringDefaultAssumption(_EngineeringModel):
+    """Agent-selected value for a detail the user intentionally delegated.
+
+    This is not user evidence.  The explicit provenance marker prevents representative
+    engineering choices from being confused with confirmed intake facts.
+    """
+
+    parameter: str = Field(min_length=1, max_length=160)
+    value: str = Field(min_length=1, max_length=300)
+    unit: str = Field(default="", max_length=80)
+    basis: Literal[
+        "representative",
+        "common_practice",
+        "simplified_geometry",
+        "dimensionless_normalization",
+        "material_reference",
+        "conservative",
+        "other",
+    ] = "representative"
+    rationale: str = Field(min_length=1, max_length=600)
+    source: Literal["engineering_default"] = "engineering_default"
+    evidence_ids: list[str] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_evidence_ids(self) -> Self:
+        for evidence_id in self.evidence_ids:
+            if not re.fullmatch(r"ev_(?:cap|ref)_[0-9a-f]{20}", evidence_id):
+                raise ValueError(f"Invalid engineering-default evidence ID: {evidence_id}")
+        if len(self.evidence_ids) != len(set(self.evidence_ids)):
+            raise ValueError("Engineering default contains duplicate evidence IDs.")
+        return self
 
 
 _BINDABLE_PLAN_FIELDS = Literal[
@@ -105,6 +152,7 @@ _BINDABLE_PLAN_FIELDS = Literal[
     "mesh_strategy",
     "decisions",
     "assumptions",
+    "engineering_defaults",
     "required_case_files",
     "postprocess_strategy",
 ]
@@ -301,6 +349,7 @@ class EngineeringPlan(_EngineeringModel):
     mesh_strategy: str = Field(min_length=1, max_length=1000)
     decisions: list[EngineeringDecision] = Field(default_factory=list, max_length=80)
     assumptions: list[str] = Field(default_factory=list, max_length=80)
+    engineering_defaults: list[EngineeringDefaultAssumption] = Field(default_factory=list, max_length=80)
     confirmed_fact_ids: list[str] = Field(default_factory=list, max_length=200)
     confirmed_fact_bindings: list[ConfirmedFactBinding] = Field(default_factory=list, max_length=200)
     evidence: list[EngineeringEvidence] = Field(default_factory=list, max_length=120)
@@ -325,6 +374,9 @@ class EngineeringPlan(_EngineeringModel):
         evidence_ids = [item.evidence_id for item in self.evidence]
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("Engineering plan contains duplicate evidence IDs.")
+        default_parameters = [item.parameter.casefold() for item in self.engineering_defaults]
+        if len(default_parameters) != len(set(default_parameters)):
+            raise ValueError("Engineering plan contains duplicate engineering-default parameters.")
         return self
 
     def digest(self) -> str:
@@ -722,6 +774,16 @@ class RetrySolverAction(_EngineeringModel):
 class BlockAction(_EngineeringModel):
     type: Literal["block"]
     reason: str = Field(min_length=1, max_length=4000)
+    block_kind: Literal[
+        "physical_objective_unknown",
+        "routing_physics_unknown",
+        "engineering_choice_missing",
+        "tool_version_unsupported",
+        "environment_unavailable",
+        "safety_or_integrity",
+        "other",
+    ] = "other"
+    missing_items: list[str] = Field(default_factory=list, max_length=24)
     needs_user_input: bool = False
     rationale: str = Field(default="", max_length=200)
 
@@ -1122,6 +1184,7 @@ class EngineeringEvent(_EngineeringModel):
     success: bool
     summary: str = Field(min_length=1, max_length=4000)
     output_excerpt: str = Field(default="", max_length=12000)
+    payload_ref: str | None = Field(default=None, pattern=r"^evrec_[0-9a-f]{20}$")
     artifact_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     native_command_executed: bool = False
     mesh_command_executed: bool = False

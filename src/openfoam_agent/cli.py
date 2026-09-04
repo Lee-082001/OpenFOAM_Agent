@@ -804,6 +804,14 @@ def _print_human_report(report: dict[str, Any]) -> None:
             print("engineering assumptions:")
             for assumption in plan["assumptions"]:
                 print(f"- {assumption}")
+        if plan.get("engineering_defaults"):
+            print("engineering defaults:")
+            for item in plan["engineering_defaults"]:
+                unit = f" {item['unit']}" if item.get("unit") else ""
+                print(
+                    f"- {item['parameter']}: {item['value']}{unit} "
+                    f"[engineering_default/{item['basis']}] — {item['rationale']}"
+                )
         if intake and intake.get("semantic_contract_version") == "2":
             bindings = plan.get("confirmed_fact_bindings") or []
             machine_asserted = sum(

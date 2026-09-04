@@ -111,3 +111,4 @@ tests/test_v300_foam_semantics.py
 tests/test_v301_structured_schema_compiler.py
 tests/test_v302_case_file_contract.py
 tests/test_v310_block_mesh_topology_contract.py
+tests/test_v320_engineering_evidence_assumption_contract.py

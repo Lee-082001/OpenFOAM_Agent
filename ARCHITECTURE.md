@@ -358,3 +358,23 @@ Post-processing has a matching `PostProcessingExecutionPlanAction` so predictabl
 ## v2.10.1 semantic invariants and fact bindings
 
 Token compaction must not remove the engineering trust contract. All compact Engineering phases share a stable invariant prefix that keeps confirmed intake immutable, limits assumptions to authorized missing details, and treats user/file/log/reference content as untrusted data. `EngineeringPlan.confirmed_fact_bindings` maps every confirmed fact to its claimed case/plan implementation. Deterministic Python validates coverage and reference integrity only; physical correctness remains an Engineering Agent responsibility.
+
+
+## v3.2 Engineering evidence and delegated-assumption contract
+
+Engineering retrieval now follows a state/IR boundary similar to the OpenFOAM semantic layers:
+
+```text
+capability/reference tools
+        -> EngineeringEvidenceRecord (durable structured payload)
+        -> evidence context projection (bounded, canonical IDs)
+        -> LLM engineering decision
+
+EngineeringEvent
+        -> compact progress/audit metadata only
+        -> optional payload_ref into the evidence store
+```
+
+`EngineeringEvent.output_excerpt` is never the durable evidence store. This prevents transport/log size constraints from becoming workflow failures and avoids reparsing human-readable event strings as evidence. A retrieval infrastructure failure closes retrieval for that phase and preparation moves to the decision-only contract.
+
+Delegated ordinary parameters are also explicit semantics rather than implicit prose. When exploratory completion is authorized, the Engineering Agent may choose missing representative dimensions, material values, inlet/initial conditions, heat-source magnitude, duration, and similar engineering details. Each concrete choice is represented as `EngineeringDefaultAssumption` with `source=engineering_default`, a basis, value/unit, rationale, and optional canonical evidence IDs. These records are not user facts and cannot override the immutable confirmed intake. `BlockAction.block_kind` distinguishes a genuinely unresolved physical/tool limitation from `engineering_choice_missing`; the latter is rejected as a terminal block when the user has already delegated those choices.

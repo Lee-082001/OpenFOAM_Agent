@@ -1,9 +1,11 @@
-# OpenFOAM Agent v3.1.0
+# OpenFOAM Agent v3.2.0
 
 
 
 
 
+
+> **v3.2.0 engineering evidence/assumption contract:** deterministic retrieval payloads are now stored as structured `EngineeringEvidenceRecord` objects in `CFDState` instead of being serialized into `EngineeringEvent.output_excerpt`. Events keep only bounded audit/display metadata plus a `payload_ref`, and the LLM context compiler projects canonical evidence back from the structured store. This removes the 12k event-overflow failure class. When exploratory completion is authorized, concrete delegated values are recorded as typed `engineering_defaults` with `source=engineering_default`; a structured `block_kind=engineering_choice_missing` cannot terminally send those choices back to the user. A retrieval infrastructure failure now disables further retrieval for the phase and deterministically escalates preparation to the decision-only contract instead of repeating the same failed query.
 
 > **v3.1.0 semantic blockMesh topology contract:** `TypedBlockMeshFile` is now interpreted as a block-face ownership graph before native execution. Python rejects boundary faces that are internal/shared, nonexistent, non-manifold, or assigned to multiple patches, and validates explicit edge/merge-patch references without choosing a mesh design. A dedicated `CandidateBlockMeshRepairTurn` repairs rejected in-memory topology before any case commit; a compact `BlockMeshRepairTurn` performs one complete structured replacement after a native blockMesh failure. Exact text patching is no longer the primary repair interface for structured block topology, and repeated blockMesh failure signatures normalize transient face/cell/vertex labels so semantically identical failures escalate instead of consuming LLM turns.
 

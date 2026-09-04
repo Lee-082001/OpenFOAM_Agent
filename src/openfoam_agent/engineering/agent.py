@@ -11,6 +11,7 @@ from openfoam_agent.agents.intake import confirmed_intake_definition
 from openfoam_agent.llm.context import (
     build_bounded_json_prompt,
     compact_event_for_model,
+    compact_text,
     structured_request_metrics,
 )
 from openfoam_agent.llm.prompts import (
@@ -41,6 +42,7 @@ from openfoam_agent.schemas.engineering import (
     DeleteCaseFileAction,
     EngineeringBudgetExtension,
     EngineeringEvent,
+    EngineeringEvidenceRecord,
     EngineeringPlan,
     EngineeringSequenceAction,
     ExecuteCasePlanAction,
@@ -234,11 +236,13 @@ class CFDEngineeringAgent:
         self._phase_context_snapshots: dict[str, dict[str, str | None]] = {}
         self._evidence_gap_ledger: dict[str, dict[str, dict[str, object]]] = {}
         self._retrieval_cycles: dict[str, int] = {}
+        self._evidence_retrieval_disabled: dict[str, str] = {}
 
     def prepare(self, state: CFDState, *, native_execution: bool = True) -> CFDState:
         state.assert_confirmed_intake()
         self._evidence_gap_ledger["prepare"] = {}
         self._retrieval_cycles["prepare"] = 0
+        self._evidence_retrieval_disabled.pop("prepare", None)
         if native_execution and not self._checkmesh_preflight(state, phase="preflight"):
             return state
         state.engineering_round_start_index = len(state.engineering_events)
@@ -1941,6 +1945,7 @@ class CFDEngineeringAgent:
         approved_solver = state.engineering_plan.solver
         self._evidence_gap_ledger["runtime_repair"] = {}
         self._retrieval_cycles["runtime_repair"] = 0
+        self._evidence_retrieval_disabled.pop("runtime_repair", None)
         state.last_runtime_log_excerpt = runtime_log[-12000:]
         state.transition(
             State.RUNTIME_REPAIR,
@@ -2180,6 +2185,7 @@ class CFDEngineeringAgent:
     ) -> tuple[EngineeringEvent, RepairOutcome | None]:
         result = self.safety.validate_plan(action.plan, state.intake)  # type: ignore[arg-type]
         result.failures.extend(self._validate_observed_provenance(action.plan, state))
+        result.failures.extend(self._validate_engineering_defaults(action.plan, state))
         result.valid = not result.failures
         if action.plan.solver != approved_solver:
             result.failures.append("Runtime repair attempted to change the user-approved solver.")
@@ -2247,6 +2253,7 @@ class CFDEngineeringAgent:
         if isinstance(action, FinishPreviewAction):
             validation = self.safety.validate_plan(action.plan, state.intake)  # type: ignore[arg-type]
             validation.failures.extend(self._validate_observed_provenance(action.plan, state))
+            validation.failures.extend(self._validate_engineering_defaults(action.plan, state))
             validation.valid = not validation.failures
             if native_execution and validation.valid:
                 if state.mesh_evidence is None or not state.mesh_evidence.passed:
@@ -2393,6 +2400,23 @@ class CFDEngineeringAgent:
                 False,
             )
         if isinstance(action, BlockAction):
+            if (
+                action.block_kind == "engineering_choice_missing"
+                and state.user_request.exploratory_completion_authorized
+            ):
+                missing = ", ".join(action.missing_items[:12]) or "delegated engineering details"
+                return (
+                    self._event(
+                        step,
+                        action.type,
+                        False,
+                        "Block rejected by delegated-assumption policy: choose the missing engineering details as engineering_defaults.",
+                        f"delegatedMissing={missing}",
+                        failure_signature="assumption_policy:delegated_engineering_choice",
+                        failure_scope="pipeline",
+                    ),
+                    False,
+                )
             state.transition(
                 State.ENGINEERING_REVIEW_REQUIRED if action.needs_user_input else State.ENGINEERING_BLOCKED,
                 action.reason,
@@ -2440,12 +2464,79 @@ class CFDEngineeringAgent:
             if str(entry.get("status", "")) == "evidence_available":
                 entry["status"] = "satisfied"
 
+    def _store_evidence_payload(
+        self,
+        state: CFDState,
+        *,
+        phase: str,
+        step: int,
+        action_type: str,
+        payload: object,
+        observed_evidence: list[ObservedEngineeringEvidence],
+    ) -> str:
+        """Persist structured retrieval payload outside the progress event log."""
+
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        digest = hashlib.sha256(
+            f"{state.run_id}\0{phase}\0{step}\0{action_type}\0{canonical}".encode("utf-8")
+        ).hexdigest()[:20]
+        record_id = f"evrec_{digest}"
+        record = EngineeringEvidenceRecord(
+            record_id=record_id,
+            phase=phase,
+            step=step,
+            action_type=action_type,
+            payload=payload,
+            observed_evidence=list(observed_evidence),
+        )
+        for index, existing in enumerate(state.engineering_evidence_records):
+            if existing.record_id == record_id:
+                state.engineering_evidence_records[index] = record
+                break
+        else:
+            state.engineering_evidence_records.append(record)
+        return record_id
+
+    @staticmethod
+    def _evidence_batch_display(gap_results: list[dict[str, object]], *, cycle: int, limit: int) -> str:
+        """Return compact protocol metadata only; full evidence stays in the structured store."""
+
+        compact_gaps: list[dict[str, object]] = []
+        for item in gap_results:
+            compact_gaps.append(
+                {
+                    key: item[key]
+                    for key in ("gap_id", "status", "new_evidence_ids", "total_seen", "message")
+                    if key in item
+                }
+            )
+        return json.dumps(
+            {"cycle": cycle, "cycle_limit": limit, "gaps": compact_gaps},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def _disable_evidence_retrieval(self, phase: str, reason: str) -> None:
+        """Fail closed for retrieval infrastructure without trapping the LLM in retry loops."""
+
+        self._evidence_retrieval_disabled[phase] = reason[:1200]
+        limit = (
+            self.policy.max_runtime_retrieval_cycles
+            if phase == "runtime_repair"
+            else self.policy.max_prepare_retrieval_cycles
+        )
+        self._retrieval_cycles[phase] = limit
+        for entry in self._evidence_gap_ledger.get(phase, {}).values():
+            if str(entry.get("status", "")) in {"open", "evidence_available", "stagnant"}:
+                entry["status"] = "retrieval_unavailable"
+
     def _gather_evidence(
         self,
         action: GatherEvidenceAction,
         *,
         step: int,
         phase: str,
+        state: CFDState,
     ) -> EngineeringEvent:
         """Resolve explicit evidence gaps with bounded deterministic batch retrieval."""
 
@@ -2455,12 +2546,23 @@ class CFDEngineeringAgent:
             else self.policy.max_prepare_retrieval_cycles
         )
         cycles = self._retrieval_cycles.get(phase, 0)
+        disabled_reason = self._evidence_retrieval_disabled.get(phase)
+        if disabled_reason:
+            return self._event(
+                step,
+                action.type,
+                False,
+                f"Evidence retrieval is disabled for {phase} after an infrastructure failure; use existing evidence/defaults or block.",
+                disabled_reason,
+                failure_signature=f"evidence_retrieval:{phase}:disabled",
+                failure_scope="pipeline",
+            )
         if cycles >= limit:
             return self._event(
                 step,
                 action.type,
                 False,
-                f"Evidence retrieval hard fuse reached for {phase} ({limit} cycle(s)); use existing evidence or block.",
+                f"Evidence retrieval hard fuse reached for {phase} ({limit} cycle(s)); use existing evidence/defaults or block.",
             )
         ledger = self._evidence_gap_ledger.setdefault(phase, {})
         performed_retrieval = False
@@ -2613,17 +2715,36 @@ class CFDEngineeringAgent:
                 "satisfied_parent_blocked",
             }
         ]
+        payload = {
+            "cycle": self._retrieval_cycles.get(phase, cycles),
+            "cycle_limit": limit,
+            "gaps": gap_results,
+        }
+        observed = [
+            observed_by_id[eid]
+            for eid in sorted(new_observed_ids)
+            if eid in observed_by_id
+        ]
+        payload_ref = self._store_evidence_payload(
+            state,
+            phase=phase,
+            step=step,
+            action_type=action.type,
+            payload=payload,
+            observed_evidence=observed,
+        )
         return self._event(
             step,
             action.type,
             True,
             f"Evidence-gap batch completed: {new_total} new evidence item(s); stagnant={len(stagnant)}.",
-            _json({
-                "cycle": self._retrieval_cycles.get(phase, cycles),
-                "cycle_limit": limit,
-                "gaps": gap_results,
-            }),
-            observed_evidence=[observed_by_id[eid] for eid in sorted(new_observed_ids) if eid in observed_by_id],
+            self._evidence_batch_display(
+                gap_results,
+                cycle=self._retrieval_cycles.get(phase, cycles),
+                limit=limit,
+            ),
+            payload_ref=payload_ref,
+            observed_evidence=observed,
         )
 
     def _runtime_case_file_contract_scan(self, state: CFDState) -> dict[str, object]:
@@ -2750,7 +2871,14 @@ class CFDEngineeringAgent:
                 )
 
             if isinstance(action, GatherEvidenceAction):
-                return self._gather_evidence(action, step=step, phase=phase)
+                if state is None:
+                    return self._event(
+                        step, action.type, False,
+                        "Evidence retrieval requires an active CFDState for structured payload storage.",
+                        failure_signature=f"evidence_retrieval:{phase}:missing_state",
+                        failure_scope="pipeline",
+                    )
+                return self._gather_evidence(action, step=step, phase=phase, state=state)
 
             if isinstance(action, InspectEnvironmentAction):
                 payload = {
@@ -2777,12 +2905,23 @@ class CFDEngineeringAgent:
                     for item in results
                     if isinstance(item, dict) and item.get("provider_id")
                 ]
+                payload_ref = (
+                    self._store_evidence_payload(
+                        state, phase=phase, step=step, action_type=action.type,
+                        payload=results, observed_evidence=observed,
+                    )
+                    if state is not None else None
+                )
+                display = "\n".join(
+                    f"{item.evidence_id}: {item.summary}" for item in observed[:12]
+                )
                 return self._event(
                     step,
                     action.type,
                     True,
                     f"Capability search returned {len(results)} provider(s).",
-                    _json(results),
+                    display,
+                    payload_ref=payload_ref,
                     observed_evidence=observed,
                 )
 
@@ -2803,12 +2942,23 @@ class CFDEngineeringAgent:
                     for item in results
                     if isinstance(item, dict) and item.get("reference")
                 ]
+                payload_ref = (
+                    self._store_evidence_payload(
+                        state, phase=phase, step=step, action_type=action.type,
+                        payload=results, observed_evidence=observed,
+                    )
+                    if state is not None else None
+                )
+                display = "\n".join(
+                    f"{item.evidence_id}: {item.summary}" for item in observed[:12]
+                )
                 return self._event(
                     step,
                     action.type,
                     True,
                     f"Reference search returned {len(results)} result(s).",
-                    _json(results),
+                    display,
+                    payload_ref=payload_ref,
                     observed_evidence=observed,
                 )
 
@@ -2828,12 +2978,21 @@ class CFDEngineeringAgent:
                         summary=f"Read installed OpenFOAM reference {action.reference}.",
                     )
                 ]
+                payload_ref = (
+                    self._store_evidence_payload(
+                        state, phase=phase, step=step, action_type=action.type,
+                        payload={"reference": action.reference, "content": text},
+                        observed_evidence=observed,
+                    )
+                    if state is not None else None
+                )
                 return self._event(
                     step,
                     action.type,
                     True,
                     f"Read {action.reference}.",
-                    text,
+                    compact_text(text, min(self.policy.model_event_excerpt_chars, 2500)),
+                    payload_ref=payload_ref,
                     observed_evidence=observed,
                 )
 
@@ -3140,6 +3299,19 @@ class CFDEngineeringAgent:
                     failure_scope=failure_scope,
                 )
         except (ValueError, FileNotFoundError, WorkspaceSafetyError, OSError) as exc:
+            if isinstance(action, GatherEvidenceAction):
+                reason = f"{type(exc).__name__}: {exc}"
+                self._disable_evidence_retrieval(phase, reason)
+                return self._event(
+                    step,
+                    action.type,
+                    False,
+                    "Evidence retrieval infrastructure failed once; further retrieval is disabled for this phase. "
+                    "Proceed with existing evidence/authorized engineering defaults or block.",
+                    reason,
+                    failure_signature=f"evidence_retrieval:{phase}:infrastructure",
+                    failure_scope="pipeline",
+                )
             return self._event(
                 step,
                 getattr(action, "type", "unknown"),
@@ -3405,10 +3577,7 @@ class CFDEngineeringAgent:
         prompt_count = self._phase_prompt_counts.get(conversation_key, 0)
         plan_digest = state.engineering_plan.digest() if state.engineering_plan is not None else None
         manifest_digest = self.workspace.manifest_digest()
-        evidence_records = [
-            item.model_dump(mode="json")
-            for item in self._observed_evidence_registry(state).values()
-        ]
+        evidence_records = self._available_evidence_for_model(state)
         case_files = [
             {"path": item.path, "sha256": item.sha256, "size_bytes": item.size_bytes}
             for item in self.workspace.file_seals()
@@ -3444,6 +3613,34 @@ class CFDEngineeringAgent:
             "check_mesh_log_sha256": (
                 state.mesh_evidence.raw_log_sha256 if state.mesh_evidence else None
             ),
+        }
+        assumption_policy = {
+            "authorized": bool(state.user_request.exploratory_completion_authorized),
+            "interaction_mode": state.user_request.interaction_mode,
+            "provenance_for_selected_missing_values": "engineering_default",
+            "allowed_when_authorized": [
+                "representative geometry dimensions",
+                "ordinary material properties",
+                "inlet/initial temperatures",
+                "representative flow rate or velocity",
+                "representative heat-generation magnitude",
+                "heated-region extent",
+                "simulation duration and ordinary numerical controls",
+            ],
+            "forbidden": [
+                "overriding a confirmed user fact",
+                "claiming an engineering default was supplied by the user",
+                "inventing tool/version-specific capability or syntax evidence",
+            ],
+        }
+        retrieval_policy = {
+            "available": phase not in self._evidence_retrieval_disabled
+            and self._retrieval_cycles.get(phase, 0) < (
+                self.policy.max_runtime_retrieval_cycles
+                if phase == "runtime_repair"
+                else self.policy.max_prepare_retrieval_cycles
+            ),
+            "disabled_reason": self._evidence_retrieval_disabled.get(phase),
         }
 
         # Delta mode is only safe when the backend can chain the previous response.
@@ -3499,6 +3696,8 @@ class CFDEngineeringAgent:
                 "available_evidence": evidence_records[-20:],
                 "evidence_gap_status": self._evidence_gap_status("runtime_repair"),
                 "bindings": bindings,
+                "engineering_assumption_policy": assumption_policy,
+                "evidence_retrieval_policy": retrieval_policy,
                 "budget": budget,
             }
             instruction = (
@@ -3506,8 +3705,9 @@ class CFDEngineeringAgent:
                 "Treat case_file_contract_scan as deterministic evidence: when it reports multiple "
                 "invalid solve inputs, repair the whole systematic class of file-contract defects "
                 "in one cycle rather than waiting for foamRun to fail on each file. "
-                "Prefer repair_runtime_case. Use gather_evidence only for an explicit missing "
-                "tool/version fact that the supplied files and native diagnostic cannot resolve:\n"
+                "Prefer repair_runtime_case. Use gather_evidence only when evidence_retrieval_policy.available "
+                "is true and an explicit missing tool/version fact cannot be resolved from the supplied files/native diagnostic. "
+                "If retrieval is unavailable, use existing evidence or block once with the correct block_kind:\n"
             )
         elif use_delta:
             payload = {
@@ -3551,6 +3751,8 @@ class CFDEngineeringAgent:
                     )
                 ),
                 "bindings": bindings,
+                "engineering_assumption_policy": assumption_policy,
+                "evidence_retrieval_policy": retrieval_policy,
                 "current_case_files": case_files,
                 "recent_observations": self._recent_observations_for_model(state),
                 "available_evidence": evidence_records,
@@ -3600,6 +3802,8 @@ class CFDEngineeringAgent:
                 "confirmed_intake": confirmed_intake_definition(state),
                 "intake_sha256": state.intake_digest,
                 "exploratory_assumptions_authorized": state.user_request.exploratory_completion_authorized,
+                "engineering_assumption_policy": assumption_policy,
+                "evidence_retrieval_policy": retrieval_policy,
                 "environment_hint": self.tools.environment_snapshot(),
                 "capability_graph_hint": self.catalog.summary(),
                 "preloaded_capability_providers": (
@@ -3661,12 +3865,15 @@ class CFDEngineeringAgent:
                     "Choose the next engineering action. Prefer execute_case_plan when ready. If an "
                     "external tool/version fact is genuinely missing, declare one or more explicit gaps "
                     "in a single gather_evidence batch; engineering-choice unknowns are assumptions, not "
-                    "retrieval gaps:\n"
+                    "retrieval gaps. When engineering_assumption_policy.authorized is true, choose reasonable "
+                    "representative missing values and record every concrete choice in plan.engineering_defaults "
+                    "instead of blocking merely because the user delegated those details:\n"
                 )
             elif contract_phase == "prepare_decide":
                 instruction = (
-                    "The bounded retrieval window is closed. Use the accumulated evidence to return "
-                    "execute_case_plan, or block if faithful implementation is impossible:\n"
+                    "The bounded retrieval window is closed. Use the accumulated evidence and any authorized "
+                    "engineering defaults to return execute_case_plan. Block only when the physical objective or a "
+                    "tool/version requirement truly cannot be implemented without unsupported claims:\n"
                 )
             elif contract_phase == "replan":
                 instruction = (
@@ -3791,6 +3998,25 @@ class CFDEngineeringAgent:
             )
         return turn
 
+    def _validate_engineering_defaults(
+        self,
+        plan: EngineeringPlan,
+        state: CFDState,
+    ) -> list[str]:
+        failures: list[str] = []
+        if plan.engineering_defaults and not state.user_request.exploratory_completion_authorized:
+            failures.append(
+                "Engineering defaults were supplied even though exploratory completion is not authorized."
+            )
+        registry = self._observed_evidence_registry(state)
+        for default in plan.engineering_defaults:
+            for evidence_id in default.evidence_ids:
+                if evidence_id not in registry:
+                    failures.append(
+                        f"Engineering default {default.parameter!r} references unobserved evidence ID {evidence_id}."
+                    )
+        return failures
+
     def _validate_observed_provenance(
         self,
         plan: EngineeringPlan,
@@ -3843,6 +4069,68 @@ class CFDEngineeringAgent:
                 )
         return failures
 
+    def _evidence_details_for_model(self, state: CFDState) -> dict[str, object]:
+        """Build bounded evidence details from the structured evidence store.
+
+        The durable payload never rides inside EngineeringEvent.output_excerpt.  This
+        projection exposes only the evidence item relevant to each canonical ID.
+        """
+
+        details: dict[str, object] = {}
+        for record in state.engineering_evidence_records:
+            payload = record.payload
+            if record.action_type == "gather_evidence" and isinstance(payload, dict):
+                for gap in payload.get("gaps", []) or []:
+                    if not isinstance(gap, dict):
+                        continue
+                    ids = list(gap.get("new_evidence_ids", []) or [])
+                    items = list(gap.get("new_evidence", []) or [])
+                    for evidence_id, item in zip(ids, items):
+                        if isinstance(evidence_id, str):
+                            details[evidence_id] = item
+            elif record.action_type == "search_capabilities" and isinstance(payload, list):
+                for item in payload:
+                    if not isinstance(item, dict) or not item.get("provider_id"):
+                        continue
+                    evidence_id = canonical_engineering_evidence_id(
+                        "capability", str(item["provider_id"])
+                    )
+                    details[evidence_id] = item
+            elif record.action_type == "search_references" and isinstance(payload, list):
+                for item in payload:
+                    if not isinstance(item, dict) or not item.get("reference"):
+                        continue
+                    evidence_id = canonical_engineering_evidence_id(
+                        "openfoam_reference", str(item["reference"])
+                    )
+                    details[evidence_id] = item
+            elif record.action_type == "read_reference" and isinstance(payload, dict):
+                reference = str(payload.get("reference", ""))
+                if reference:
+                    evidence_id = canonical_engineering_evidence_id(
+                        "openfoam_reference", reference
+                    )
+                    details[evidence_id] = {
+                        "reference": reference,
+                        "content_excerpt": compact_text(str(payload.get("content", "")), 2200),
+                    }
+        return details
+
+    def _available_evidence_for_model(self, state: CFDState) -> list[dict[str, object]]:
+        registry = self._observed_evidence_registry(state)
+        details = self._evidence_details_for_model(state)
+        records: list[dict[str, object]] = []
+        for evidence in registry.values():
+            item = evidence.model_dump(mode="json")
+            detail = details.get(evidence.evidence_id)
+            if detail is not None:
+                # Bound each structured detail independently; the model still gets the
+                # canonical evidence descriptor even when verbose payload is compacted.
+                encoded = json.dumps(detail, ensure_ascii=False, separators=(",", ":"), default=str)
+                item["detail"] = json.loads(compact_text(encoded, 2600)) if len(encoded) <= 2600 else compact_text(encoded, 2600)
+            records.append(item)
+        return records
+
     def _observed_evidence_registry(
         self,
         state: CFDState,
@@ -3868,6 +4156,11 @@ class CFDEngineeringAgent:
                 )
                 registry[evidence.evidence_id] = evidence
 
+        for record in state.engineering_evidence_records:
+            for item in record.observed_evidence:
+                registry[item.evidence_id] = item
+
+        # Backward compatibility for states created before the structured evidence store.
         for event in state.engineering_events:
             if not event.success:
                 continue
@@ -3877,33 +4170,21 @@ class CFDEngineeringAgent:
 
     def _cumulative_provenance_summary(self, state: CFDState) -> dict[str, object]:
         successful = [event for event in state.engineering_events if event.success]
-        provider_ids: set[str] = set()
-        reference_hints: set[str] = set()
-        for event in successful:
-            if event.action_type == "search_capabilities":
-                try:
-                    payload = json.loads(event.output_excerpt)
-                except (TypeError, json.JSONDecodeError):
-                    payload = []
-                if isinstance(payload, list):
-                    for item in payload:
-                        if isinstance(item, dict) and isinstance(item.get("provider_id"), str):
-                            provider_ids.add(item["provider_id"])
-            elif event.action_type in {"search_references", "read_reference"}:
-                # Keep only compact hints; the deterministic gate still checks the
-                # original full event history rather than trusting this summary.
-                if event.summary:
-                    reference_hints.add(self._redact_local_paths(event.summary)[:300])
-
         registry = self._observed_evidence_registry(state)
-        provider_ids.update(
+        provider_ids = sorted(
             item.reference for item in registry.values() if item.kind == "capability"
+        )
+        reference_hints = sorted(
+            self._redact_local_paths(item.summary)[:300]
+            for item in registry.values()
+            if item.kind == "openfoam_reference"
         )
         return {
             "successful_action_types": sorted({event.action_type for event in successful}),
-            "observed_capability_provider_ids": sorted(provider_ids),
-            "reference_observation_summaries": sorted(reference_hints)[-12:],
+            "observed_capability_provider_ids": provider_ids,
+            "reference_observation_summaries": reference_hints[-12:],
             "canonical_evidence_ids": list(registry)[-40:],
+            "evidence_record_refs": [item.record_id for item in state.engineering_evidence_records[-12:]],
             "mesh_evidence_passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
         }
 
@@ -4092,6 +4373,7 @@ class CFDEngineeringAgent:
         summary: str,
         output: str = "",
         *,
+        payload_ref: str | None = None,
         artifact_sha256: str | None = None,
         native_command_executed: bool = False,
         mesh_command_executed: bool = False,
@@ -4099,15 +4381,19 @@ class CFDEngineeringAgent:
         failure_scope: str | None = None,
         observed_evidence: list[ObservedEngineeringEvidence] | None = None,
     ) -> EngineeringEvent:
-        if len(output) > self.policy.max_observation_chars:
-            output = output[-self.policy.max_observation_chars:]
-            output = "... [truncated]\n" + output
+        # EngineeringEvent is a bounded progress/audit projection, never the durable
+        # storage location for large tool payloads. compact_text accounts for its own
+        # marker, avoiding the old 12000 + truncation-marker overflow.
+        output_limit = min(self.policy.max_observation_chars, 12_000)
+        summary = compact_text(str(summary), 4000)
+        output = compact_text(str(output), output_limit) if output else ""
         return EngineeringEvent(
             step=step,
             action_type=action_type,
             success=success,
             summary=summary,
             output_excerpt=output,
+            payload_ref=payload_ref,
             artifact_sha256=artifact_sha256,
             native_command_executed=native_command_executed,
             mesh_command_executed=mesh_command_executed,

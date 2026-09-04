@@ -1,3 +1,7 @@
+
+## v3.2.0 — Engineering evidence / assumption contract
+
+Structured evidence storage is separated from event logging, delegated engineering defaults receive explicit provenance, and repeated evidence-infrastructure failures deterministically close retrieval instead of consuming LLM turns. See `V3_2_CHANGES.md`.
 # OpenFOAM Agent v3.0.0 changes
 
 ## Semantic PreSolve foundation

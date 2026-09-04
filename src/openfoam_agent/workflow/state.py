@@ -6,6 +6,7 @@ from openfoam_agent.schemas.engineering import (
     CaseSeal,
     EngineeringBudgetExtension,
     EngineeringEvent,
+    EngineeringEvidenceRecord,
     EngineeringPlan,
     MeshEvidence,
 )
@@ -31,6 +32,7 @@ class CFDState(BaseModel):
 
     engineering_plan: EngineeringPlan | None = None
     engineering_events: list[EngineeringEvent] = Field(default_factory=list)
+    engineering_evidence_records: list[EngineeringEvidenceRecord] = Field(default_factory=list)
     engineering_budget_extensions: list[EngineeringBudgetExtension] = Field(default_factory=list)
     engineering_round_start_index: int = Field(default=0, ge=0)
     case_seal: CaseSeal | None = None

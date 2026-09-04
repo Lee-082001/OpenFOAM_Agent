@@ -61,6 +61,7 @@ def compact_event_for_model(
         ),
     }
     for key in (
+        "payload_ref",
         "artifact_sha256",
         "artifact_path",
         "native_command_executed",
