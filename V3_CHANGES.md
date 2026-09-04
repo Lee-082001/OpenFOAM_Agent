@@ -40,3 +40,12 @@ Full suite: **239 passed**.
 ## v3.0.1 — structured-output backend compatibility
 
 v3.0.1 adds a backend-specific Structured Schema Compiler between canonical Pydantic contracts and CLI transports. Claude receives tuple schemas without `prefixItems`; Codex receives OpenAI-strict object schemas with all properties required, `additionalProperties: false`, and transport-inapplicable defaults removed. Final output remains validated by the original Pydantic model. See `V3_0_1_CHANGES.md`.
+
+
+## v3.0.2 — canonical FoamFile contract and solve-input header integrity
+
+v3.0.2 closes the gap between dictionary-syntax acceptance and OpenFOAM `regIOobject` readability. Generic typed files and `blockMeshDict` now share one canonical `FoamFile` header renderer. Header `object` and `location` are derived from the case path, text serialization owns `format ascii`/`version 2.0`, and initial fields use a proven field class from `internalField` or an explicit bounded `foam_class` when the shape is indeterminate. Matching legacy `FoamFile.*` typed entries are consumed as compatibility metadata; conflicting object/location/class metadata is rejected.
+
+The complete-case transactional preflight now validates solve-critical raw/typed artifacts before the first workspace mutation. `validate_dictionary` checks the IOobject-facing header before calling `foamDictionary`, and PreSolve checks header presence, required metadata, object/path consistency, system `class dictionary`, field-class validity, and unambiguous `internalField` class consistency. A runtime-repair context also includes a deterministic batch scan of core system files, current initial fields, and Agent-declared required solve inputs so systematic header defects are repaired together.
+
+Regression suite: **252 passed**. See `V3_0_2_CHANGES.md`.

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from openfoam_agent.schemas.engineering import EngineeringPlan
+from openfoam_agent.tools.foam_file import validate_foam_file_header
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.workspace import CaseWorkspace
 from openfoam_agent.verification.foam_semantics import (
@@ -30,6 +31,7 @@ class PreSolveValidationResult:
     mesh_patch_types: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     boundary_resolutions: dict[str, dict[str, str]] = field(default_factory=dict)
+    file_header_classes: dict[str, str] = field(default_factory=dict)
 
 
 class PreSolveCompletenessGate:
@@ -67,16 +69,27 @@ class PreSolveCompletenessGate:
                 "EngineeringPlan.required_case_files must declare the solver-required initial field files under 0/."
             )
 
+        file_header_classes: dict[str, str] = {}
         for relative in required:
             path = self.workspace.resolve_case_path(relative)
             if not path.is_file():
                 failures.append(f"Required solve input is missing: {relative}")
                 continue
             if self._should_dictionary_validate(path):
-                result = self.tools.foam_dictionary_validate(path, cwd=self.workspace.case_dir)
-                if not result.success:
-                    excerpt = "\n".join(part for part in (result.stdout, result.stderr) if part)[-1200:]
-                    failures.append(f"foamDictionary rejected required solve input {relative}: {excerpt}")
+                text = path.read_text(encoding="utf-8", errors="replace")
+                header = validate_foam_file_header(
+                    relative,
+                    text,
+                    expected_class=("dictionary" if relative.startswith("system/") else None),
+                )
+                file_header_classes[relative] = header.header.class_name
+                failures.extend(header.failures)
+                warnings.extend(header.warnings)
+                if header.valid:
+                    result = self.tools.foam_dictionary_validate(path, cwd=self.workspace.case_dir)
+                    if not result.success:
+                        excerpt = "\n".join(part for part in (result.stdout, result.stderr) if part)[-1200:]
+                        failures.append(f"foamDictionary rejected required solve input {relative}: {excerpt}")
 
         boundary_path = self.workspace.resolve_case_path("constant/polyMesh/boundary")
         mesh = None
@@ -159,6 +172,7 @@ class PreSolveCompletenessGate:
             mesh_patch_types=mesh_patch_types,
             warnings=warnings,
             boundary_resolutions=boundary_resolutions,
+            file_header_classes=file_header_classes,
         )
 
     @staticmethod

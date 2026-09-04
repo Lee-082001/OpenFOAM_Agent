@@ -8,6 +8,12 @@ from openfoam_agent.schemas.engineering import (
     TypedBlockMeshFile,
     TypedFoamDictionaryFile,
 )
+from openfoam_agent.tools.foam_file import (
+    FoamFileContract,
+    FoamFileContractError,
+    render_foam_file_header,
+    resolve_foam_file_contract,
+)
 
 
 class FoamSerializationError(ValueError):
@@ -23,14 +29,23 @@ def serialize_foam_dictionary(spec: TypedFoamDictionaryFile) -> str:
     ``Gauss linear``); dictionary nesting is represented by ``path`` components.
     """
 
+    try:
+        contract, body_entries = resolve_foam_file_contract(
+            spec.path,
+            entries=spec.entries,
+            explicit_class=spec.foam_class,
+        )
+    except FoamFileContractError as exc:
+        raise FoamSerializationError(str(exc)) from exc
+
     root: OrderedDict[str, object] = OrderedDict()
-    entries = _normalize_entries(spec.entries)
+    entries = _normalize_entries(body_entries)
     for entry in entries:
         _insert(root, entry)
     lines: list[str] = []
     _render_mapping(root, lines, indent=0)
-    text = "\n".join(lines).rstrip() + "\n"
-    return text
+    body = "\n".join(lines).rstrip()
+    return render_foam_file_header(contract) + "\n" + body + "\n"
 
 
 _STRUCTURAL_CONTAINER_MARKERS = frozenset({"{}", "{ }", "{\n}", "block", "dictionary"})
@@ -125,13 +140,16 @@ def serialize_block_mesh(spec: TypedBlockMeshFile) -> str:
     def num(value: float) -> str:
         return format(float(value), ".16g")
 
+    header = render_foam_file_header(
+        FoamFileContract(
+            path=spec.path,
+            class_name="dictionary",
+            object_name="blockMeshDict",
+            location="system",
+        )
+    ).rstrip("\n")
     lines = [
-        "FoamFile",
-        "{",
-        "    format ascii;",
-        "    class dictionary;",
-        "    object blockMeshDict;",
-        "}",
+        header,
         "",
         f"{spec.scale_keyword} {num(spec.scale)};",
         "",

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-from conftest import FakeOpenFOAMTools, ScriptedLLM, control_dict, make_plan, make_state, mesh_ok_log, tool_result
+from conftest import FakeOpenFOAMTools, ScriptedLLM, control_dict, foam_header, make_plan, make_state, mesh_ok_log, tool_result
 from openfoam_agent.cli import _build_llm, _validate_args, build_parser
 from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
 from openfoam_agent.llm.codex_client import CodexCLIStatus, CodexLLM, check_codex_cli
@@ -33,7 +33,16 @@ BOUNDARY = '''FoamFile {}\n1\n(\nfrontAndBack\n{\n    type empty;\n}\n)\n'''
 
 
 def _field(name: str, patch_type: str) -> str:
-    return f'''FoamFile {{ object {name}; }}\ndimensions [0 0 0 0 0 0 0];\ninternalField uniform 0;\nboundaryField\n{{\n    frontAndBack\n    {{\n        type {patch_type};\n    }}\n}}\n'''
+    return foam_header(f"0/{name}", "volScalarField") + f"""dimensions [0 0 0 0 0 0 0];
+internalField uniform 0;
+boundaryField
+{{
+    frontAndBack
+    {{
+        type {patch_type};
+    }}
+}}
+"""
 
 
 def _prepared_runtime_agent(tmp_path, graph_path, tools, repair_actions):
@@ -109,8 +118,8 @@ def test_presolve_rejects_mesh_field_constraint_patch_mismatch(tmp_path):
     boundary.parent.mkdir(parents=True, exist_ok=True)
     boundary.write_text(BOUNDARY, encoding="utf-8")
     workspace.write_text("system/controlDict", control_dict())
-    workspace.write_text("system/fvSchemes", "FoamFile {}\nddtSchemes {}\n")
-    workspace.write_text("system/fvSolution", "FoamFile {}\nsolvers {}\n")
+    workspace.write_text("system/fvSchemes", foam_header("system/fvSchemes") + "ddtSchemes {}\n")
+    workspace.write_text("system/fvSolution", foam_header("system/fvSolution") + "solvers {}\n")
     workspace.write_text("0/U", _field("U", "empty"))
     workspace.write_text("0/p", _field("p", "patch"))
     state = make_state()

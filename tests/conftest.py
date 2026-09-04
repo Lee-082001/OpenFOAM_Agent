@@ -101,8 +101,24 @@ def make_plan(intake: CFDIntakeSpec, *, solver: str = "incompressibleFluid") -> 
     )
 
 
+def foam_header(path: str, class_name: str = "dictionary") -> str:
+    location, object_name = path.rsplit("/", 1)
+    return (
+        "FoamFile\n"
+        "{\n"
+        "    version 2.0;\n"
+        "    format ascii;\n"
+        f"    class {class_name};\n"
+        f'    location "{location}";\n'
+        f"    object {object_name};\n"
+        "}\n"
+    )
+
+
 def control_dict(solver: str = "incompressibleFluid") -> str:
-    return f"solver {solver};\nstartFrom startTime;\nstartTime 0;\nendTime 10;\ndeltaT 0.01;\n"
+    return foam_header("system/controlDict") + (
+        f"solver {solver};\nstartFrom startTime;\nstartTime 0;\nendTime 10;\ndeltaT 0.01;\n"
+    )
 
 
 def mesh_ok_log(cells: int = 1200) -> str:

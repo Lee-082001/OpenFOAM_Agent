@@ -18,6 +18,26 @@ Parsing preserves raw key/token form and dictionary order instead of collapsing 
 Coverage validation and mesh/field constraint validation consume the same effective resolution. This prevents validator-induced semantic drift while preserving the authority invariant: the Agent chooses CFD design, the semantic layer describes what the authored OpenFOAM case means, validators test deterministic consistency, and gates decide execution permission.
 
 
+## v3.0.2 case-file serialization contract
+
+OpenFOAM dictionary syntax and OpenFOAM IOobject readability are separate validation layers. `foamDictionary -keywords` can accept content that later native readers reject because the file does not expose a usable `FoamFile` header. v3.0.2 therefore introduces a shared case-file contract in `tools/foam_file.py`:
+
+```text
+Agent-owned entries / geometry
+        -> deterministic FoamFile contract resolver
+        -> canonical header renderer
+        -> body serializer
+        -> transactional bundle preflight
+        -> native dictionary check
+        -> PreSolve header + semantic validation
+        -> CaseSeal / solve approval
+```
+
+For typed files, Python owns `version`, `format`, `location`, and `object`; it defaults ordinary typed system/constant files to `class dictionary`. Initial fields under `0/` infer `volScalarField`, `volVectorField`, `volSphericalTensorField`, `volSymmTensorField`, or `volTensorField` only when `internalField` makes the shape unambiguous. Otherwise the Agent supplies `foam_class`, which Python validates as file-structure metadata rather than treating it as a CFD design decision. `blockMeshDict` uses the same header renderer.
+
+Raw case files remain Agent-authored, but complete-case preflight and PreSolve independently validate their headers. This avoids silently rewriting arbitrary raw content while still preventing a malformed solve-ready case from being sealed. Runtime repair receives a batch header-contract scan so one systematic authoring defect cannot consume the retry budget as a sequence of `controlDict -> fvSchemes -> fvSolution -> p -> U` failures.
+
+
 ## v2.19 model-transport and v2.18 runtime/boundary invariants
 
 `RUNTIME_REPAIR` is an internal transient state, not a top-level workflow destination. Every runtime-repair exit carries a `RuntimeRepairDecision`: `RETRY_SOLVER`, `NEEDS_USER_REVIEW`, `BLOCKED`, or `STRATEGY_REVISION`. The Engineering Agent closes the transient state before returning; RuntimeOrchestrator rejects a retry that does not restore `SIMULATION`, and a defensive top-level branch converts any escaped `RUNTIME_REPAIR` into `ENGINEERING_BLOCKED` with an internal-invariant diagnostic. This prevents an OpenFOAM-local repair problem from being masked by a generic state-machine handler failure.

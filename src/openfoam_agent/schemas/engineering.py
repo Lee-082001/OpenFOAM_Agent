@@ -542,9 +542,22 @@ class FoamDictionaryEntry(_EngineeringModel):
 
 
 class TypedFoamDictionaryFile(_EngineeringModel):
-    """Compact dictionary representation serialized by deterministic Python."""
+    """Compact OpenFOAM file representation serialized by deterministic Python.
+
+    ``foam_class`` is transport metadata, not a CFD engineering choice. Ordinary
+    system/constant dictionaries default to ``dictionary``. Initial fields normally
+    infer their class from ``internalField``; set ``foam_class`` only when that shape
+    is not statically unambiguous. Python always derives ``object`` and ``location``
+    from ``path`` and owns the complete ``FoamFile`` header.
+    """
 
     path: str = Field(min_length=1, max_length=240)
+    foam_class: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        pattern=r"^[A-Za-z][A-Za-z0-9_]*$",
+    )
     entries: list[FoamDictionaryEntry] = Field(min_length=1, max_length=300)
 
     @model_validator(mode="after")

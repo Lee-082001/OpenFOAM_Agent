@@ -11,7 +11,7 @@ from openfoam_agent.verification.foam_semantics import (
 from openfoam_agent.verification.presolve import PreSolveCompletenessGate
 from openfoam_agent.tools.workspace import CaseWorkspace
 
-from conftest import FakeOpenFOAMTools, control_dict, make_plan, make_state
+from conftest import FakeOpenFOAMTools, control_dict, foam_header, make_plan, make_state
 
 
 MESH = r'''FoamFile {}
@@ -35,14 +35,13 @@ MESH = r'''FoamFile {}
 
 
 def field(boundary_body: str) -> str:
-    return f'''FoamFile {{ object U; }}
-dimensions [0 1 -1 0 0 0 0];
+    return foam_header("0/U", "volVectorField") + f"""dimensions [0 1 -1 0 0 0 0];
 internalField uniform (0 0 0);
 boundaryField
 {{
 {boundary_body}
 }}
-'''
+"""
 
 
 def test_mesh_ir_preserves_patch_type_groups_and_order():
@@ -168,8 +167,8 @@ def test_presolve_uses_semantic_resolution_for_coverage_and_constraints(tmp_path
     boundary.parent.mkdir(parents=True, exist_ok=True)
     boundary.write_text(MESH, encoding="utf-8")
     workspace.write_text("system/controlDict", control_dict())
-    workspace.write_text("system/fvSchemes", "FoamFile {}\nddtSchemes {}\n")
-    workspace.write_text("system/fvSolution", "FoamFile {}\nsolvers {}\n")
+    workspace.write_text("system/fvSchemes", foam_header("system/fvSchemes") + "ddtSchemes {}\n")
+    workspace.write_text("system/fvSolution", foam_header("system/fvSolution") + "solvers {}\n")
     workspace.write_text(
         "0/U",
         field(r'''    inlet { type fixedValue; }
@@ -192,8 +191,8 @@ def test_presolve_reports_indeterminate_as_warning_not_false_missing(tmp_path):
     boundary.parent.mkdir(parents=True, exist_ok=True)
     boundary.write_text("FoamFile {}\n1\n(\nobstacle { type wall; }\n)\n", encoding="utf-8")
     workspace.write_text("system/controlDict", control_dict())
-    workspace.write_text("system/fvSchemes", "FoamFile {}\nddtSchemes {}\n")
-    workspace.write_text("system/fvSolution", "FoamFile {}\nsolvers {}\n")
+    workspace.write_text("system/fvSchemes", foam_header("system/fvSchemes") + "ddtSchemes {}\n")
+    workspace.write_text("system/fvSolution", foam_header("system/fvSolution") + "solvers {}\n")
     workspace.write_text("0/U", field("    $obstacleBC;"))
     state = make_state()
     plan = make_plan(state.intake).model_copy(update={"required_case_files": ["0/U"]})

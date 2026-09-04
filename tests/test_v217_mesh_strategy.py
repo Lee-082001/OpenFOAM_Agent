@@ -20,7 +20,7 @@ from openfoam_agent.tools.foam_serializer import serialize_block_mesh
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.workflow.states import State
 
-from conftest import FakeOpenFOAMTools, make_plan, make_state, mesh_ok_log, tool_result
+from conftest import FakeOpenFOAMTools, foam_header, make_plan, make_state, mesh_ok_log, tool_result
 
 
 class ScriptedLLM:
@@ -82,11 +82,11 @@ def _plan_with_snappy(state) -> ExecuteCasePlanAction:
         type="execute_case_plan",
         goal="2D mesh strategy test",
         files=[
-            CaseBundleFile(path="0/U", content="dimensions [0 1 -1 0 0 0 0];\ninternalField uniform (1 0 0);\nboundaryField\n{\n    inlet { type fixedValue; value uniform (1 0 0); }\n}\n"),
-            CaseBundleFile(path="system/controlDict", content="solver incompressibleFluid;\n"),
-            CaseBundleFile(path="system/fvSchemes", content="ddtSchemes { default Euler; }\n"),
-            CaseBundleFile(path="system/fvSolution", content="PIMPLE { nCorrectors 2; }\n"),
-            CaseBundleFile(path="system/snappyHexMeshDict", content="FoamFile { object snappyHexMeshDict; }\n"),
+            CaseBundleFile(path="0/U", content=foam_header("0/U", "volVectorField") + "dimensions [0 1 -1 0 0 0 0];\ninternalField uniform (1 0 0);\nboundaryField\n{\n    inlet { type fixedValue; value uniform (1 0 0); }\n}\n"),
+            CaseBundleFile(path="system/controlDict", content=foam_header("system/controlDict") + "solver incompressibleFluid;\n"),
+            CaseBundleFile(path="system/fvSchemes", content=foam_header("system/fvSchemes") + "ddtSchemes { default Euler; }\n"),
+            CaseBundleFile(path="system/fvSolution", content=foam_header("system/fvSolution") + "PIMPLE { nCorrectors 2; }\n"),
+            CaseBundleFile(path="system/snappyHexMeshDict", content=foam_header("system/snappyHexMeshDict")),
         ],
         block_mesh=_block_mesh(),
         validate_dictionaries=["system/blockMeshDict", "system/snappyHexMeshDict", "system/controlDict", "system/fvSchemes", "system/fvSolution", "0/U"],

@@ -8,6 +8,7 @@ from conftest import (
     FakeOpenFOAMTools,
     ScriptedLLM,
     control_dict,
+    foam_header,
     make_plan,
     make_state,
     mesh_ok_log,
@@ -16,12 +17,11 @@ from conftest import (
 
 
 def _solver_dict(name: str) -> str:
-    return f"FoamFile {{ object {name}; }}\n"
+    return foam_header(f"system/{name}")
 
 
 def _field_u() -> str:
-    return """FoamFile { object U; }
-dimensions [0 1 -1 0 0 0 0];
+    return foam_header("0/U", "volVectorField") + """dimensions [0 1 -1 0 0 0 0];
 internalField uniform (1 0 0);
 boundaryField
 {
@@ -51,8 +51,10 @@ outlet
 """
 
 
-def _full_execution_plan(state, *, block_mesh_text: str = "FoamFile { object blockMeshDict; }\n"):
+def _full_execution_plan(state, *, block_mesh_text: str | None = None):
     plan = make_plan(state.intake).model_copy(update={"required_case_files": ["0/U"]})
+    if block_mesh_text is None:
+        block_mesh_text = foam_header("system/blockMeshDict")
     return ExecuteCasePlanAction(
         type="execute_case_plan",
         goal="Build, validate, mesh, and seal the complete exploratory case",
@@ -120,7 +122,7 @@ def test_execute_case_plan_reaches_solve_ready_in_one_llm_turn(tmp_path, graph_p
 
 def test_execute_case_plan_failure_returns_to_llm_then_repairs(tmp_path, graph_path):
     state = make_state()
-    first = _full_execution_plan(state, block_mesh_text="FoamFile { object blockMeshDict; }\n// bad topology\n")
+    first = _full_execution_plan(state, block_mesh_text=foam_header("system/blockMeshDict") + "// bad topology\n")
     plan = first.plan
     repair = ExecuteCasePlanAction(
         type="execute_case_plan",
@@ -128,7 +130,7 @@ def test_execute_case_plan_failure_returns_to_llm_then_repairs(tmp_path, graph_p
         files=[
             CaseBundleFile(
                 path="system/blockMeshDict",
-                content="FoamFile { object blockMeshDict; }\n// corrected topology\n",
+                content=foam_header("system/blockMeshDict") + "// corrected topology\n",
             )
         ],
         validate_dictionaries=["system/blockMeshDict"],

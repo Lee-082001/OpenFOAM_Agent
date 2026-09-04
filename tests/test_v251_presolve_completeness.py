@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from conftest import FakeOpenFOAMTools, ScriptedLLM, make_plan, make_state, mesh_ok_log, tool_result, control_dict
+from conftest import FakeOpenFOAMTools, ScriptedLLM, make_plan, make_state, mesh_ok_log, tool_result, control_dict, foam_header
 from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
 from openfoam_agent.schemas.common import ToolResult
 from openfoam_agent.schemas.engineering import FinishPreviewAction, RunMeshCommandAction, SearchCapabilitiesAction, WriteCaseFileAction
@@ -20,7 +20,13 @@ def field(name: str, *, omit: str | None = None) -> str:
         for p in patches
         if p != omit
     )
-    return f'''FoamFile {{ object {name}; }}\ndimensions [0 0 0 0 0 0 0];\ninternalField uniform 0;\nboundaryField\n{{\n{entries}\n}}\n'''
+    return foam_header(f"0/{name}", "volScalarField") + f"""dimensions [0 0 0 0 0 0 0];
+internalField uniform 0;
+boundaryField
+{{
+{entries}
+}}
+"""
 
 
 def _seed_mesh(workspace: CaseWorkspace) -> None:
@@ -33,8 +39,8 @@ def test_presolve_detects_missing_required_file_and_patch_coverage(tmp_path):
     workspace = CaseWorkspace(tmp_path)
     _seed_mesh(workspace)
     workspace.write_text("system/controlDict", control_dict())
-    workspace.write_text("system/fvSchemes", "FoamFile {}\nddtSchemes {}\n")
-    workspace.write_text("system/fvSolution", "FoamFile {}\nsolvers {}\n")
+    workspace.write_text("system/fvSchemes", foam_header("system/fvSchemes") + "ddtSchemes {}\n")
+    workspace.write_text("system/fvSolution", foam_header("system/fvSolution") + "solvers {}\n")
     workspace.write_text("0/U", field("U", omit="farField"))
     state = make_state()
     plan = make_plan(state.intake).model_copy(update={"required_case_files": ["0/U", "0/p"]})
@@ -49,8 +55,8 @@ def test_presolve_passes_complete_declared_case(tmp_path):
     workspace = CaseWorkspace(tmp_path)
     _seed_mesh(workspace)
     workspace.write_text("system/controlDict", control_dict())
-    workspace.write_text("system/fvSchemes", "FoamFile {}\nddtSchemes {}\n")
-    workspace.write_text("system/fvSolution", "FoamFile {}\nsolvers {}\n")
+    workspace.write_text("system/fvSchemes", foam_header("system/fvSchemes") + "ddtSchemes {}\n")
+    workspace.write_text("system/fvSolution", foam_header("system/fvSolution") + "solvers {}\n")
     workspace.write_text("0/U", field("U"))
     workspace.write_text("0/p", field("p"))
     state = make_state()
@@ -66,8 +72,8 @@ def test_cli_policy_style_engineering_reaches_solve_ready_only_after_presolve(tm
     actions = [
         SearchCapabilitiesAction(type="search_capabilities", query="incompressibleFluid", rationale="Observe provider."),
         WriteCaseFileAction(type="write_case_file", path="system/controlDict", content=control_dict(), rationale="control"),
-        WriteCaseFileAction(type="write_case_file", path="system/fvSchemes", content="FoamFile {}\nddtSchemes {}\n", rationale="schemes"),
-        WriteCaseFileAction(type="write_case_file", path="system/fvSolution", content="FoamFile {}\nsolvers {}\n", rationale="solution"),
+        WriteCaseFileAction(type="write_case_file", path="system/fvSchemes", content=foam_header("system/fvSchemes") + "ddtSchemes {}\n", rationale="schemes"),
+        WriteCaseFileAction(type="write_case_file", path="system/fvSolution", content=foam_header("system/fvSolution") + "solvers {}\n", rationale="solution"),
         WriteCaseFileAction(type="write_case_file", path="0/U", content=field("U"), rationale="U"),
         WriteCaseFileAction(type="write_case_file", path="0/p", content=field("p"), rationale="p"),
         RunMeshCommandAction(type="run_mesh_command", command="checkMesh", rationale="mesh"),

@@ -1,6 +1,9 @@
-# OpenFOAM Agent v3.0.1
+# OpenFOAM Agent v3.0.2
 
 
+
+
+> **v3.0.2 OpenFOAM case-file contract:** deterministic serializers now own complete `FoamFile` headers (`version`, `format`, `class`, path-derived `location`, path-derived `object`). Initial-field class is inferred from an unambiguous `internalField` shape or supplied explicitly as `foam_class`. Complete case bundles and PreSolve validate IOobject-facing headers before native execution, and runtime repair receives one batch scan of systematic header defects instead of discovering them one `foamRun` attempt at a time.
 
 > **v3.0.1 backend compatibility:** Claude and Codex structured-output schemas are now compiled per backend. Claude fixed tuples no longer emit unsupported `prefixItems`; Codex strict schemas explicitly require every property and remove transport-only defaults while retaining final Pydantic validation.
 

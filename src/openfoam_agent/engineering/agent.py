@@ -75,6 +75,7 @@ from openfoam_agent.schemas.engineering import (
 )
 from openfoam_agent.tools.capability_catalog import CapabilityCatalog
 from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
+from openfoam_agent.tools.foam_file import validate_foam_file_header
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.foam_serializer import (
     FoamSerializationError,
@@ -578,6 +579,7 @@ class CFDEngineeringAgent:
                 {
                     "path": item.path,
                     "kind": "typed_dictionary",
+                    "foam_class": item.foam_class,
                     "entries": len(item.entries),
                 }
             )
@@ -586,6 +588,7 @@ class CFDEngineeringAgent:
                     {
                         "path": item.path,
                         "kind": "typed_dictionary",
+                        "foam_class": item.foam_class,
                         "entries": [entry.model_dump(mode="json") for entry in item.entries],
                     }
                 )
@@ -807,6 +810,34 @@ class CFDEngineeringAgent:
         # repair cascade.
         candidate_bundle = {path: content for path, content in rendered_files}
         bundle_failures = self.workspace.validate_candidate_bundle(candidate_bundle)
+
+        # v3.0.2: solve-critical OpenFOAM files must satisfy the IOobject-facing
+        # FoamFile contract before *any* candidate file is committed. This closes the
+        # gap where foamDictionary accepted headerless content and blockMesh/foamRun
+        # discovered the malformed header later, one file at a time.
+        header_targets = list(dict.fromkeys([
+            "system/controlDict",
+            "system/fvSchemes",
+            "system/fvSolution",
+            *execution.required_case_files,
+            *execution.validate_dictionaries,
+        ]))
+        for path in header_targets:
+            content = candidate_bundle.get(path)
+            if content is None:
+                continue
+            suffix = Path(path).suffix.lower()
+            if suffix in {".stl", ".obj", ".off", ".vtk", ".csv", ".dat", ".emesh"}:
+                continue
+            header = validate_foam_file_header(
+                path,
+                content,
+                expected_class=("dictionary" if path.startswith("system/") else None),
+            )
+            bundle_failures.extend(
+                f"{path}: {failure}" for failure in header.failures
+            )
+
         if bundle_failures:
             event = self._event(
                 llm_step,
@@ -2373,6 +2404,57 @@ class CFDEngineeringAgent:
             observed_evidence=[observed_by_id[eid] for eid in sorted(new_observed_ids) if eid in observed_by_id],
         )
 
+    def _runtime_case_file_contract_scan(self, state: CFDState) -> dict[str, object]:
+        """Scan solve-critical text files for systematic FoamFile contract failures.
+
+        This is intentionally deterministic and batch-oriented. A runtime failure in one
+        IOobject must not force the LLM to discover the same missing-header defect one file
+        per foamRun attempt. Core system files, every current initial field, and every
+        Agent-declared required solve input are scanned together.
+        """
+
+        seals = {item.path: item for item in self.workspace.file_seals()}
+        candidates: list[str] = ["system/controlDict", "system/fvSchemes", "system/fvSolution"]
+        if state.engineering_plan is not None:
+            candidates.extend(state.engineering_plan.required_case_files)
+        candidates.extend(path for path in seals if path.startswith("0/"))
+        candidates.extend(path for path in seals if path.startswith("system/"))
+
+        invalid: list[dict[str, object]] = []
+        checked: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for path in candidates:
+            if path in seen or path not in seals:
+                continue
+            seen.add(path)
+            suffix = Path(path).suffix.lower()
+            if suffix in {".stl", ".obj", ".off", ".vtk", ".csv", ".dat", ".emesh"}:
+                continue
+            try:
+                text = self.workspace.read_text(path)
+            except (OSError, WorkspaceSafetyError):
+                continue
+            result = validate_foam_file_header(
+                path,
+                text,
+                expected_class=("dictionary" if path.startswith("system/") else None),
+            )
+            record = {
+                "path": path,
+                "class": result.header.class_name or None,
+                "object": result.header.object_name or None,
+                "valid": result.valid,
+            }
+            checked.append(record)
+            if not result.valid:
+                invalid.append({**record, "failures": list(result.failures)})
+
+        return {
+            "checked_count": len(checked),
+            "invalid_count": len(invalid),
+            "invalid": invalid[:20],
+        }
+
     def _runtime_relevant_case_files(self, state: CFDState, runtime_log: str | None) -> list[dict[str, object]]:
         """Return a bounded, failure-focused case slice for runtime repair."""
         seals = {item.path: item for item in self.workspace.file_seals()}
@@ -2646,14 +2728,28 @@ class CFDEngineeringAgent:
                         step,
                         action.type,
                         False,
-                        "Native execution is disabled; foamDictionary was not run.",
+                        "Native execution is disabled; OpenFOAM file/header validation was not run.",
                     )
                 target = self.workspace.resolve_case_path(action.path, must_exist=True)
+                text = target.read_text(encoding="utf-8", errors="replace")
+                header = validate_foam_file_header(
+                    action.path,
+                    text,
+                    expected_class=("dictionary" if action.path.startswith("system/") else None),
+                )
+                if not header.valid:
+                    return self._event(
+                        step,
+                        action.type,
+                        False,
+                        f"OpenFOAM file header rejected {action.path} before foamDictionary.",
+                        header.render(),
+                    )
                 result = self.tools.foam_dictionary_validate(target, cwd=self.workspace.case_dir)
                 output = _tool_output(result)
                 self.workspace.write_log(f"{step:03d}.foamDictionary.log", output)
                 event_output = output
-                summary = f"foamDictionary {'accepted' if result.success else 'rejected'} {action.path}."
+                summary = f"FoamFile header and foamDictionary accepted {action.path}."
                 if not result.success:
                     diagnostic = diagnose_openfoam_failure(result, command_name="foamDictionary")
                     event_output = diagnostic.render()
@@ -3114,6 +3210,7 @@ class CFDEngineeringAgent:
                     if state.engineering_plan is not None else None
                 ),
                 "native_failure": self._redact_local_paths(runtime_log[-6000:]) if runtime_log else None,
+                "case_file_contract_scan": self._runtime_case_file_contract_scan(state),
                 "relevant_case_files": self._runtime_relevant_case_files(state, runtime_log),
                 "mesh_evidence": {
                     "passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
@@ -3130,6 +3227,9 @@ class CFDEngineeringAgent:
             }
             instruction = (
                 "Repair the actual runtime failure from this bounded diagnostic/file slice. "
+                "Treat case_file_contract_scan as deterministic evidence: when it reports multiple "
+                "invalid solve inputs, repair the whole systematic class of file-contract defects "
+                "in one cycle rather than waiting for foamRun to fail on each file. "
                 "Prefer repair_runtime_case. Use gather_evidence only for an explicit missing "
                 "tool/version fact that the supplied files and native diagnostic cannot resolve:\n"
             )

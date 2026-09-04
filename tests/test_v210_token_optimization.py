@@ -52,7 +52,7 @@ from openfoam_agent.tools.foam_serializer import serialize_foam_dictionary
 from openfoam_agent.tools.parsers import parse_runtime_log
 from openfoam_agent.workflow.states import State
 
-from conftest import FakeOpenFOAMTools, control_dict, make_plan, make_state, mesh_ok_log, tool_result
+from conftest import FakeOpenFOAMTools, control_dict, foam_header, make_plan, make_state, mesh_ok_log, tool_result
 
 
 class FlexibleScriptedLLM:
@@ -108,8 +108,14 @@ outlet
 
 
 def _typed(path: str, entries: list[tuple[list[str], str]]) -> TypedFoamDictionaryFile:
+    foam_class = None
+    if path == "0/U":
+        foam_class = "volVectorField"
+    elif path.startswith("0/"):
+        foam_class = "volScalarField"
     return TypedFoamDictionaryFile(
         path=path,
+        foam_class=foam_class,
         entries=[FoamDictionaryEntry(path=".".join(key), value=value) for key, value in entries],
     )
 
@@ -122,7 +128,7 @@ def _compact_plan(state, *, bad_mesh: bool = False) -> ExecuteCasePlanAction:
         files=[
             CaseBundleFile(
                 path="system/blockMeshDict",
-                content="FoamFile { object blockMeshDict; }\n" + ("// bad topology\n" if bad_mesh else ""),
+                content=foam_header("system/blockMeshDict") + ("// bad topology\n" if bad_mesh else ""),
             )
         ],
         typed_dictionaries=[
@@ -270,8 +276,8 @@ def test_postprocessing_execution_plan_finishes_in_one_llm_turn(tmp_path):
 
     workspace = CaseWorkspace(tmp_path)
     workspace.write_text("system/controlDict", control_dict())
-    workspace.write_text("system/fvSchemes", "FoamFile { object fvSchemes; }\n")
-    workspace.write_text("system/fvSolution", "FoamFile { object fvSolution; }\n")
+    workspace.write_text("system/fvSchemes", foam_header("system/fvSchemes"))
+    workspace.write_text("system/fvSolution", foam_header("system/fvSolution"))
     state.engineering_plan = plan
     state.case_seal = workspace.seal(plan)
     state.case_dir = str(workspace.case_dir)
