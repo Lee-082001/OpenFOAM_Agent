@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from openfoam_agent.schemas.common import ToolResult
+from openfoam_agent.tools.installation import OpenFOAMInstallationDiscovery
 
 
 class UnsafeCommandError(RuntimeError):
@@ -21,14 +22,16 @@ class SafeRunner:
     """Execute only trusted OpenFOAM utilities inside an optional workspace root.
 
     Security properties:
-    - only fixed executable names are allowlisted;
+    - executable names are discovered from the sourced, trusted OpenFOAM installation;
     - the resolved executable must live under a trusted OpenFOAM installation root;
     - subprocesses receive a reduced OpenFOAM/runtime environment, not the parent
       process environment (so API keys/tokens are not inherited);
     - cwd is confined to the configured workspace.
     """
 
-    DEFAULT_ALLOWED = {
+    # Backward-compatible alias for offline/unit-test environments only. It is never
+    # the authority when a sourced Foundation 13/14 installation is discovered.
+    OFFLINE_FALLBACK_ALLOWED = {
         "blockMesh",
         "surfaceFeatureExtract",
         "surfaceCheck",
@@ -39,6 +42,7 @@ class SafeRunner:
         "foamPostProcess",
         "foamDictionary",
     }
+    DEFAULT_ALLOWED = OFFLINE_FALLBACK_ALLOWED
     _SAFE_ENV_EXACT = {
         "HOME",
         "USER",
@@ -76,6 +80,11 @@ class SafeRunner:
         "FOAM_ETC",
         "FOAM_SRC",
         "FOAM_TUTORIALS",
+        "FOAM_APPBIN",
+        "FOAM_MODULES",
+        "FOAM_SOLVERS",
+        "FOAM_UTILITIES",
+        "FOAM_APP",
     }
     _SYSTEM_PATH_ROOTS = tuple(Path(item) for item in ("/usr/bin", "/bin"))
     _SYSTEM_LIBRARY_ROOTS = tuple(
@@ -91,9 +100,6 @@ class SafeRunner:
         trusted_executable_roots: Sequence[str | Path] | None = None,
         base_env: Mapping[str, str] | None = None,
     ) -> None:
-        self.allowed_commands = set(
-            self.DEFAULT_ALLOWED if allowed_commands is None else allowed_commands
-        )
         self.workspace_root = (
             Path(workspace_root).expanduser().resolve() if workspace_root else None
         )
@@ -102,6 +108,18 @@ class SafeRunner:
         self.trusted_executable_roots = self._resolve_trusted_roots(
             trusted_executable_roots
         )
+        self.installation = OpenFOAMInstallationDiscovery(
+            base_env=self._base_env,
+            trusted_roots=self.trusted_executable_roots,
+        ).discover()
+        if allowed_commands is None:
+            discovered = self.installation.executable_names
+            # Offline/unit-test environments may not have a sourced installation. Keep the
+            # historical minimum only as a non-native compatibility fallback; once a trusted
+            # installation is present, the installation itself is the command authority.
+            self.allowed_commands = set(discovered or self.OFFLINE_FALLBACK_ALLOWED)
+        else:
+            self.allowed_commands = set(allowed_commands)
 
     def run(
         self,
@@ -128,6 +146,7 @@ class SafeRunner:
             raise UnsafeCommandError(f"Command is not allowlisted: {exe}")
 
         resolved_cwd = self._validate_cwd(cwd)
+        self._validate_arguments(command[1:], resolved_cwd)
         env = self.sanitized_environment()
         executable = self.resolve_trusted_executable(exe, env=env)
         actual_command = [str(executable), *command[1:]]
@@ -284,6 +303,30 @@ class SafeRunner:
         ):
             raise UnsafeCommandError(f"Command cwd escapes workspace: {resolved}")
         return resolved
+
+    def _validate_arguments(self, args: Sequence[str], cwd: Path | None) -> None:
+        """Reject generic arguments that can redirect a tool outside the workspace.
+
+        subprocess is always shell=False, so shell metacharacters have no special meaning.
+        The remaining risk is an OpenFOAM application's own path flags.  Python owns the case
+        working directory; callers may not override root/case paths, use parent traversal, or
+        pass absolute paths outside the workspace.
+        """
+        for raw in args:
+            if not isinstance(raw, str) or not raw or len(raw) > 1000:
+                raise UnsafeCommandError("Native OpenFOAM arguments must be bounded non-empty strings.")
+            if "\x00" in raw or "\n" in raw or "\r" in raw:
+                raise UnsafeCommandError("Native OpenFOAM arguments cannot contain control characters.")
+            candidate = Path(raw)
+            if ".." in candidate.parts:
+                raise UnsafeCommandError(f"Native OpenFOAM argument contains parent traversal: {raw}")
+            if candidate.is_absolute():
+                resolved = candidate.expanduser().resolve()
+                root = self.workspace_root or cwd
+                if root is None or not _is_within(resolved, root):
+                    raise UnsafeCommandError(
+                        f"Native OpenFOAM argument escapes the workspace: {raw}"
+                    )
 
     @staticmethod
     def _run_streaming(

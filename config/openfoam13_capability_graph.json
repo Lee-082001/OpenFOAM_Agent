@@ -5,21 +5,58 @@
   "openfoam_version": "13",
   "providers": [
     {
-      "id": "toolkit.finiteVolume",
-      "name": "finiteVolume",
-      "provider_type": "toolkit",
+      "id": "execution.foamMultiRun",
+      "name": "foamMultiRun",
+      "provider_type": "execution_driver",
       "capabilities": [
-        "operator.ddt.scalar",
-        "operator.div.scalar",
-        "operator.grad.scalar",
-        "operator.laplacian.scalar",
-        "operator.sp.scalar",
-        "operator.ddt.vector",
-        "operator.div.vector",
-        "operator.laplacian.vector",
-        "operator.ddt.tensor",
-        "operator.div.tensor",
-        "operator.laplacian.tensor"
+        "execution.driver.foamMultiRun",
+        "execution.multiregion",
+        "heat_transfer.conjugate",
+        "region.solver_assignment"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-solvers",
+          "note": "Documents the foamMultiRun solver application."
+        }
+      ],
+      "metadata": {
+        "runtime_driver": "foamMultiRun"
+      }
+    },
+    {
+      "id": "execution.foamRun",
+      "name": "foamRun",
+      "provider_type": "execution_driver",
+      "capabilities": [
+        "execution.driver.foamRun",
+        "execution.single_region",
+        "execution.solver_module"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-solvers",
+          "note": "Documents the foamRun solver application."
+        }
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "model.MRFZone",
+      "name": "MRFZone",
+      "provider_type": "model",
+      "capabilities": [
+        "model.frame.rotating"
       ],
       "openfoam_version": "13",
       "verified": true,
@@ -27,8 +64,28 @@
       "evidence": [
         {
           "kind": "source_code",
-          "reference": "https://cpp.openfoam.org/v13/namespaceFoam_1_1fvm.html",
-          "note": "OpenFOAM v14 implicit finite-volume operator namespace."
+          "reference": "https://cpp.openfoam.org/v13/MRFZone_8C_source.html",
+          "note": "OpenFOAM v14 multiple-reference-frame implementation."
+        }
+      ]
+    },
+    {
+      "id": "model.heatSource",
+      "name": "heatSource",
+      "provider_type": "fv_model",
+      "capabilities": [
+        "fvModel.heatSource",
+        "source.heat.volumetric",
+        "heat_generation.volumetric"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v13/classFoam_1_1fv_1_1heatSource.html",
+          "note": "OpenFOAM Foundation fv::heatSource runtime-selectable fvModel."
         }
       ]
     },
@@ -72,53 +129,100 @@
       ]
     },
     {
-      "id": "model.MRFZone",
-      "name": "MRFZone",
-      "provider_type": "model",
+      "id": "solver.XiFluid",
+      "name": "XiFluid",
+      "provider_type": "solver_module",
       "capabilities": [
-        "model.frame.rotating"
+        "solver.module.XiFluid"
       ],
       "openfoam_version": "13",
       "verified": true,
       "verification_level": "documented",
       "evidence": [
-        {
-          "kind": "source_code",
-          "reference": "https://cpp.openfoam.org/v13/MRFZone_8C_source.html",
-          "note": "OpenFOAM v14 multiple-reference-frame implementation."
-        }
-      ]
-    },
-    {
-      "id": "solver.incompressibleFluid",
-      "name": "incompressibleFluid",
-      "provider_type": "solver",
-      "capabilities": [
-        "flow.continuity.incompressible",
-        "flow.momentum.incompressible",
-        "algorithm.pressure_velocity",
-        "algorithm.mesh_motion",
-        "time.steady",
-        "time.transient"
-      ],
-      "openfoam_version": "13",
-      "verified": true,
-      "verification_level": "documented",
-      "evidence": [
-        {
-          "kind": "source_code",
-          "reference": "https://cpp.openfoam.org/v13/incompressibleFluid_8C_source.html",
-          "note": "OpenFOAM v14 run-time selectable incompressibleFluid module."
-        },
-        {
-          "kind": "source_code",
-          "reference": "https://cpp.openfoam.org/v13/incompressibleFluid_8H_source.html",
-          "note": "Class contract for PIMPLE control, public phi, and postSolve extension."
-        },
         {
           "kind": "user_guide",
           "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
-          "note": "Documents steady/transient flow and optional mesh motion/change."
+          "note": "Documents the XiFluid solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.compressibleMultiphaseVoF",
+      "name": "compressibleMultiphaseVoF",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.compressibleMultiphaseVoF",
+        "multiphase.vof"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the compressibleMultiphaseVoF solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.compressibleVoF",
+      "name": "compressibleVoF",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.compressibleVoF",
+        "multiphase.vof"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the compressibleVoF solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.film",
+      "name": "film",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.film"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the film solver module."
         }
       ],
       "extension_points": [
@@ -166,6 +270,606 @@
       "metadata": {
         "runtime_driver": "foamRun"
       }
+    },
+    {
+      "id": "solver.functions",
+      "name": "functions",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.functions"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the functions solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.incompressibleDenseParticleFluid",
+      "name": "incompressibleDenseParticleFluid",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.incompressibleDenseParticleFluid"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the incompressibleDenseParticleFluid solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.incompressibleDriftFlux",
+      "name": "incompressibleDriftFlux",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.incompressibleDriftFlux"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the incompressibleDriftFlux solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.incompressibleFluid",
+      "name": "incompressibleFluid",
+      "provider_type": "solver",
+      "capabilities": [
+        "flow.continuity.incompressible",
+        "flow.momentum.incompressible",
+        "algorithm.pressure_velocity",
+        "algorithm.mesh_motion",
+        "time.steady",
+        "time.transient"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v13/incompressibleFluid_8C_source.html",
+          "note": "OpenFOAM v14 run-time selectable incompressibleFluid module."
+        },
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v13/incompressibleFluid_8H_source.html",
+          "note": "Class contract for PIMPLE control, public phi, and postSolve extension."
+        },
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents steady/transient flow and optional mesh motion/change."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.incompressibleMultiphaseVoF",
+      "name": "incompressibleMultiphaseVoF",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.incompressibleMultiphaseVoF",
+        "multiphase.vof"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the incompressibleMultiphaseVoF solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.incompressibleVoF",
+      "name": "incompressibleVoF",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.incompressibleVoF",
+        "multiphase.vof"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the incompressibleVoF solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.isothermalFilm",
+      "name": "isothermalFilm",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.isothermalFilm"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the isothermalFilm solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.isothermalFluid",
+      "name": "isothermalFluid",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.isothermalFluid"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the isothermalFluid solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.movingMesh",
+      "name": "movingMesh",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.movingMesh"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the movingMesh solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.multicomponentFluid",
+      "name": "multicomponentFluid",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.multicomponentFluid"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the multicomponentFluid solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.multiphaseEuler",
+      "name": "multiphaseEuler",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.multiphaseEuler",
+        "multiphase.eulerian"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the multiphaseEuler solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.shockFluid",
+      "name": "shockFluid",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.shockFluid"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the shockFluid solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.solid",
+      "name": "solid",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.solid",
+        "heat_transfer.solid",
+        "equation.energy.solid",
+        "heat_transfer.conjugate"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the solid solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "solver.solidDisplacement",
+      "name": "solidDisplacement",
+      "provider_type": "solver_module",
+      "capabilities": [
+        "solver.module.solidDisplacement",
+        "solid_mechanics.linear_elastic"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/solvers-modules",
+          "note": "Documents the solidDisplacement solver module."
+        }
+      ],
+      "extension_points": [
+        "fvModel",
+        "custom_library",
+        "derived_solver_module"
+      ],
+      "metadata": {
+        "runtime_driver": "foamRun"
+      }
+    },
+    {
+      "id": "toolkit.finiteVolume",
+      "name": "finiteVolume",
+      "provider_type": "toolkit",
+      "capabilities": [
+        "operator.ddt.scalar",
+        "operator.div.scalar",
+        "operator.grad.scalar",
+        "operator.laplacian.scalar",
+        "operator.sp.scalar",
+        "operator.ddt.vector",
+        "operator.div.vector",
+        "operator.laplacian.vector",
+        "operator.ddt.tensor",
+        "operator.div.tensor",
+        "operator.laplacian.tensor"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "source_code",
+          "reference": "https://cpp.openfoam.org/v13/namespaceFoam_1_1fvm.html",
+          "note": "OpenFOAM v14 implicit finite-volume operator namespace."
+        }
+      ]
+    },
+    {
+      "id": "utility.blockMesh",
+      "name": "blockMesh",
+      "provider_type": "utility",
+      "capabilities": [
+        "utility.mesh.generation",
+        "mesh.block"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-utilities",
+          "note": "Documents the blockMesh utility."
+        }
+      ]
+    },
+    {
+      "id": "utility.checkMesh",
+      "name": "checkMesh",
+      "provider_type": "utility",
+      "capabilities": [
+        "utility.mesh.validation"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-utilities",
+          "note": "Documents the checkMesh utility."
+        }
+      ]
+    },
+    {
+      "id": "utility.createNonConformalCouples",
+      "name": "createNonConformalCouples",
+      "provider_type": "utility",
+      "capabilities": [
+        "utility.mesh.coupling",
+        "region.interface.ncc"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-utilities",
+          "note": "Documents the createNonConformalCouples utility."
+        }
+      ]
+    },
+    {
+      "id": "utility.createZones",
+      "name": "createZones",
+      "provider_type": "utility",
+      "capabilities": [
+        "utility.mesh.zones"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-utilities",
+          "note": "Documents the createZones utility."
+        }
+      ]
+    },
+    {
+      "id": "utility.extrudeToRegionMesh",
+      "name": "extrudeToRegionMesh",
+      "provider_type": "utility",
+      "capabilities": [
+        "utility.mesh.multiregion",
+        "region.mesh.extrude"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-utilities",
+          "note": "Documents the extrudeToRegionMesh utility."
+        }
+      ]
+    },
+    {
+      "id": "utility.foamDictionary",
+      "name": "foamDictionary",
+      "provider_type": "utility",
+      "capabilities": [
+        "utility.dictionary"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-utilities",
+          "note": "Documents the foamDictionary utility."
+        }
+      ]
+    },
+    {
+      "id": "utility.foamPostProcess",
+      "name": "foamPostProcess",
+      "provider_type": "utility",
+      "capabilities": [
+        "utility.postprocess"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-utilities",
+          "note": "Documents the foamPostProcess utility."
+        }
+      ]
+    },
+    {
+      "id": "utility.gmshToFoam",
+      "name": "gmshToFoam",
+      "provider_type": "utility",
+      "capabilities": [
+        "utility.mesh.convert",
+        "mesh.import.gmsh"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-utilities",
+          "note": "Documents the gmshToFoam utility."
+        }
+      ]
+    },
+    {
+      "id": "utility.snappyHexMesh",
+      "name": "snappyHexMesh",
+      "provider_type": "utility",
+      "capabilities": [
+        "utility.mesh.generation",
+        "mesh.snappy"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-utilities",
+          "note": "Documents the snappyHexMesh utility."
+        }
+      ]
+    },
+    {
+      "id": "utility.splitMeshRegions",
+      "name": "splitMeshRegions",
+      "provider_type": "utility",
+      "capabilities": [
+        "utility.mesh.multiregion",
+        "region.mesh.split"
+      ],
+      "openfoam_version": "13",
+      "verified": true,
+      "verification_level": "documented",
+      "evidence": [
+        {
+          "kind": "user_guide",
+          "reference": "https://doc.cfd.direct/openfoam/user-guide-v13/standard-utilities",
+          "note": "Documents the splitMeshRegions utility."
+        }
+      ]
     }
   ]
 }

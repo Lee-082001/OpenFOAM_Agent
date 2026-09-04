@@ -15,6 +15,7 @@ ImplementationStrategy = Literal[
 VerificationLevel = Literal[
     "unverified",
     "documented",
+    "installed",
     "runtime_tested",
     "numerically_validated",
 ]
@@ -22,7 +23,7 @@ VerificationLevel = Literal[
 class CapabilityEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["user_guide", "source_code", "runtime_test", "verification_report"]
+    kind: Literal["user_guide", "source_code", "installation_discovery", "runtime_test", "verification_report"]
     reference: str = Field(min_length=1)
     note: str = ""
 
@@ -37,7 +38,10 @@ class CapabilityProvider(BaseModel):
 
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
-    provider_type: Literal["solver", "generated_solver", "model", "toolkit"]
+    provider_type: Literal[
+        "solver", "solver_module", "solver_application", "execution_driver",
+        "generated_solver", "model", "fv_model", "utility", "toolkit"
+    ]
     capabilities: list[str] = Field(default_factory=list)
     openfoam_version: str = Field(min_length=1)
     verified: bool = False

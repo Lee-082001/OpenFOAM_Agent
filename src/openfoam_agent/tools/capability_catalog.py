@@ -4,17 +4,22 @@ import re
 from pathlib import Path
 
 from openfoam_agent.capabilities.graph import CapabilityGraph
+from openfoam_agent.schemas.capability import CapabilityEvidence, CapabilityProvider
+from openfoam_agent.schemas.installation import InstalledOpenFOAMIR
 
 
 class CapabilityCatalog:
-    """Read-only capability evidence for CFDEngineeringAgent.
+    """Read-only documented + installed capability evidence for CFDEngineeringAgent.
 
-    It deliberately has no coverage threshold, ranking policy, gap planner, or
-    solver-selection method. Search scores are only lexical retrieval scores.
+    Static v13/v14 graphs supply documented semantics. The sourced installation is
+    authoritative for executable availability and augments the graph with every trusted
+    application plus discovered/documented runtime-selectable components.
     """
 
-    def __init__(self, graph_path: str | Path):
+    def __init__(self, graph_path: str | Path, *, installation: InstalledOpenFOAMIR | None = None):
         self.graph = CapabilityGraph.from_json(graph_path)
+        self.installation = installation
+        self._installed = self._installed_providers(installation) if installation is not None else []
 
     def summary(self) -> dict[str, object]:
         return {
@@ -23,10 +28,18 @@ class CapabilityCatalog:
             "openfoam_distribution": self.graph.spec.openfoam_distribution,
             "openfoam_version": self.graph.spec.openfoam_version,
             "provider_count": len(self.graph.spec.providers),
+            "installed_provider_count": len(self._installed),
+            "installed_ir_fingerprint": self.installation.fingerprint if self.installation is not None else None,
         }
 
+    def all_providers(self) -> list[CapabilityProvider]:
+        merged: dict[str, CapabilityProvider] = {item.id: item for item in self.graph.spec.providers}
+        for item in self._installed:
+            merged.setdefault(item.id, item)
+        return [merged[key] for key in sorted(merged)]
+
     def provider(self, provider_id: str):
-        for provider in self.graph.spec.providers:
+        for provider in self.all_providers():
             if provider.id == provider_id:
                 return provider
         return None
@@ -38,7 +51,7 @@ class CapabilityCatalog:
             if len(token) > 1
         ]
         candidates: list[tuple[int, str, dict[str, object]]] = []
-        for provider in self.graph.spec.providers:
+        for provider in self.all_providers():
             haystack = " ".join(
                 [provider.id, provider.name, provider.provider_type, *provider.capabilities]
             ).casefold()
@@ -70,3 +83,74 @@ class CapabilityCatalog:
             )
         candidates.sort(key=lambda item: (-item[0], item[1]))
         return [item[2] for item in candidates[:limit]]
+
+    @staticmethod
+    def _installed_providers(installation: InstalledOpenFOAMIR) -> list[CapabilityProvider]:
+        if installation.version is None:
+            return []
+        evidence = [
+            CapabilityEvidence(
+                kind="installation_discovery",
+                reference=f"installed:foundation:{installation.version}",
+                note="Discovered from the sourced trusted OpenFOAM installation.",
+            )
+        ]
+        providers: list[CapabilityProvider] = []
+        for item in installation.executables:
+            if item.category == "execution_driver":
+                provider_type = "execution_driver"
+                capabilities = [f"execution.driver.{item.name}"]
+                if item.name == "foamMultiRun":
+                    capabilities += ["execution.multiregion", "heat_transfer.conjugate"]
+                elif item.name == "foamRun":
+                    capabilities += ["execution.single_region", "execution.solver_module"]
+            elif item.category == "solver_application":
+                provider_type = "solver_application"
+                capabilities = [f"solver.application.{item.name}"]
+            else:
+                provider_type = "utility"
+                capabilities = [f"utility.{item.name}", f"application.{item.name}"]
+            providers.append(
+                CapabilityProvider(
+                    id=f"installed.application.{item.name}",
+                    name=item.name,
+                    provider_type=provider_type,
+                    capabilities=capabilities,
+                    openfoam_version=installation.version,
+                    verified=True,
+                    verification_level="installed",
+                    evidence=evidence,
+                )
+            )
+        for item in installation.components:
+            if item.category == "solver_module":
+                ptype = "solver_module"
+                capabilities = [f"solver.module.{item.name}"]
+                if item.name == "solid":
+                    capabilities += ["heat_transfer.solid", "equation.energy.solid", "heat_transfer.conjugate"]
+                elif item.name == "fluid":
+                    capabilities += ["heat_transfer.fluid", "equation.energy.temperature", "heat_transfer.conjugate"]
+                elif item.name == "incompressibleFluid":
+                    capabilities += ["flow.incompressible"]
+                provider_id = f"installed.solver_module.{item.name}"
+            elif item.category == "fv_model":
+                ptype = "fv_model"
+                capabilities = [f"fvModel.{item.name}"]
+                if item.name == "heatSource":
+                    capabilities += ["source.heat.volumetric", "heat_generation.volumetric"]
+                provider_id = f"installed.fv_model.{item.name}"
+            else:
+                continue
+            providers.append(
+                CapabilityProvider(
+                    id=provider_id,
+                    name=item.name,
+                    provider_type=ptype,
+                    capabilities=capabilities,
+                    openfoam_version=installation.version,
+                    verified=True,
+                    verification_level="installed",
+                    evidence=evidence,
+                )
+            )
+        return providers

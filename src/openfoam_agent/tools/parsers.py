@@ -29,7 +29,9 @@ NON_FINITE_RE = re.compile(
 )
 
 
-def parse_runtime_log(text: str, *, return_code: int) -> SimulationResult:
+def parse_runtime_log(
+    text: str, *, return_code: int, runtime_driver: str = "foamRun"
+) -> SimulationResult:
     current_time = 0.0
     times: list[float] = []
     residuals: list[ResidualSample] = []
@@ -90,7 +92,7 @@ def parse_runtime_log(text: str, *, return_code: int) -> SimulationResult:
     non_finite = NON_FINITE_RE.search(filtered) is not None
     failures: list[str] = []
     if return_code != 0:
-        failures.append(f"foamRun returned non-zero status {return_code}.")
+        failures.append(f"{runtime_driver} returned non-zero status {return_code}.")
     if not end_marker:
         failures.append("OpenFOAM End marker is missing.")
     if not times:

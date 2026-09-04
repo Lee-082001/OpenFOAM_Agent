@@ -318,6 +318,68 @@ class ConfirmedFactBinding(_EngineeringModel):
         return [*(f"case:{path}" for path in self.case_files), *(f"plan:{field}" for field in self.plan_fields)]
 
 
+class RegionSolverAssignment(_EngineeringModel):
+    region: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$", max_length=120)
+    solver_module: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_]*$", max_length=120)
+    provider_id: str = Field(min_length=1, max_length=240)
+
+
+class OpenFOAMExecutionSpec(_EngineeringModel):
+    """Agent-selected native execution topology for Foundation v13/v14.
+
+    Python does not choose the driver or modules. It verifies that the selected
+    executable is present in the sourced trusted installation and that the case
+    declares the matching solver/regionSolvers semantics.
+    """
+
+    driver: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.+-]*$", max_length=160)
+    driver_provider_id: str = Field(min_length=1, max_length=240)
+    solver_module: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]*$", max_length=120)
+    solver_provider_id: str | None = Field(default=None, max_length=240)
+    regions: list[RegionSolverAssignment] = Field(default_factory=list, max_length=64)
+    arguments: list[str] = Field(default_factory=list, max_length=24)
+
+    @model_validator(mode="after")
+    def validate_execution_topology(self) -> Self:
+        if self.driver == "foamRun":
+            if not self.solver_module or not self.solver_provider_id:
+                raise ValueError("foamRun execution requires solver_module and solver_provider_id.")
+            if self.regions:
+                raise ValueError("foamRun execution cannot declare region solver assignments.")
+        elif self.driver == "foamMultiRun":
+            if self.solver_module is not None or self.solver_provider_id is not None:
+                raise ValueError("foamMultiRun uses region solver assignments, not one solver_module.")
+            if not self.regions:
+                raise ValueError("foamMultiRun execution requires at least one region solver assignment.")
+        elif self.regions or self.solver_module is not None or self.solver_provider_id is not None:
+            raise ValueError("Direct solver applications cannot declare modular solver fields.")
+        region_names = [item.region for item in self.regions]
+        if len(region_names) != len(set(region_names)):
+            raise ValueError("Execution spec contains duplicate region names.")
+        for arg in self.arguments:
+            if not arg or len(arg) > 1000 or "\x00" in arg or "\n" in arg or "\r" in arg:
+                raise ValueError("Execution arguments must be bounded single-line strings.")
+        return self
+
+
+class NativeOpenFOAMCommand(_EngineeringModel):
+    """One discovered OpenFOAM application invocation inside the case workspace."""
+
+    command: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.+-]*$", max_length=160)
+    arguments: list[str] = Field(default_factory=list, max_length=24)
+    role: Literal["preprocess", "mesh", "mesh_validation", "initialization", "utility"] = "utility"
+    rationale: str = Field(default="", max_length=240)
+
+    @model_validator(mode="after")
+    def validate_arguments(self) -> Self:
+        for arg in self.arguments:
+            if not arg or len(arg) > 1000 or "\x00" in arg or "\n" in arg or "\r" in arg:
+                raise ValueError("Native command arguments must be bounded single-line strings.")
+            if ".." in re.split(r"[/\\]+", arg):
+                raise ValueError("Native command arguments cannot contain parent traversal.")
+        return self
+
+
 class EngineeringPlan(_EngineeringModel):
     """Agent-owned CFD engineering decisions.
 
@@ -329,8 +391,9 @@ class EngineeringPlan(_EngineeringModel):
 
     schema_version: Literal["2.0"] = "2.0"
     case_name: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$", max_length=80)
-    solver: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_]*$", max_length=120)
-    solver_provider_id: str = Field(min_length=1, max_length=200)
+    solver: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.+-]*$", max_length=160)
+    solver_provider_id: str = Field(min_length=1, max_length=240)
+    execution: OpenFOAMExecutionSpec | None = None
     openfoam_distribution: Literal["foundation"] = "foundation"
     openfoam_version: str = Field(pattern=r"^(?:13|14)$")
     problem_interpretation: str = Field(min_length=1, max_length=4000)
@@ -377,6 +440,22 @@ class EngineeringPlan(_EngineeringModel):
         default_parameters = [item.parameter.casefold() for item in self.engineering_defaults]
         if len(default_parameters) != len(set(default_parameters)):
             raise ValueError("Engineering plan contains duplicate engineering-default parameters.")
+        if self.execution is not None:
+            if self.execution.driver == "foamRun":
+                if self.solver != self.execution.solver_module:
+                    raise ValueError("EngineeringPlan.solver must mirror the foamRun solver_module.")
+                if self.solver_provider_id != self.execution.solver_provider_id:
+                    raise ValueError("EngineeringPlan.solver_provider_id must mirror the foamRun solver provider.")
+            elif self.execution.driver == "foamMultiRun":
+                if self.solver != "foamMultiRun":
+                    raise ValueError("EngineeringPlan.solver must be foamMultiRun for multi-region execution.")
+                if self.solver_provider_id != self.execution.driver_provider_id:
+                    raise ValueError("EngineeringPlan.solver_provider_id must mirror the foamMultiRun driver provider.")
+            else:
+                if self.solver != self.execution.driver:
+                    raise ValueError("EngineeringPlan.solver must mirror a direct solver application driver.")
+                if self.solver_provider_id != self.execution.driver_provider_id:
+                    raise ValueError("EngineeringPlan.solver_provider_id must mirror the direct driver provider.")
         return self
 
     def digest(self) -> str:
@@ -738,6 +817,11 @@ class RunMeshCommandAction(_EngineeringModel):
     rationale: str = Field(default="", max_length=200)
 
 
+class RunNativeOpenFOAMAction(_EngineeringModel):
+    type: Literal["run_openfoam_command"]
+    invocation: NativeOpenFOAMCommand
+
+
 class ValidatePreSolveAction(_EngineeringModel):
     """Run deterministic solver-input completeness checks for Agent-declared files.
 
@@ -794,6 +878,7 @@ EngineeringSequenceMemberAction = (
     | ValidateDictionaryAction
     | SurfaceCheckAction
     | RunMeshCommandAction
+    | RunNativeOpenFOAMAction
     | ValidatePreSolveAction
     | FinishPreviewAction
     | RetrySolverAction
@@ -818,13 +903,8 @@ class ExecuteCasePlanAction(_EngineeringModel):
     block_mesh: TypedBlockMeshFile | None = None
     validate_dictionaries: list[str] = Field(default_factory=list, max_length=40)
     surface_checks: list[str] = Field(default_factory=list, max_length=16)
-    mesh_commands: list[Literal[
-        "blockMesh",
-        "surfaceFeatureExtract",
-        "snappyHexMesh",
-        "createPatch",
-        "checkMesh",
-    ]] = Field(min_length=1, max_length=8)
+    mesh_commands: list[str] = Field(default_factory=list, max_length=12)
+    native_pipeline: list[NativeOpenFOAMCommand] = Field(default_factory=list, max_length=20)
     required_case_files: list[str] = Field(min_length=1, max_length=80)
     plan: EngineeringPlan
     rationale: str = Field(default="", max_length=200)
@@ -852,10 +932,18 @@ class ExecuteCasePlanAction(_EngineeringModel):
 
         if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
             raise ValueError("Use block_mesh for system/blockMeshDict; generic typed dictionaries cannot represent blockMesh list syntax safely.")
-        if self.mesh_commands[-1] != "checkMesh":
-            raise ValueError("execute_case_plan mesh_commands must end with checkMesh.")
-        if self.mesh_commands.count("checkMesh") != 1:
-            raise ValueError("execute_case_plan must contain exactly one checkMesh command.")
+        for command in self.mesh_commands:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+-]*", command):
+                raise ValueError(f"Unsafe mesh command identifier: {command}")
+        if self.native_pipeline and self.mesh_commands:
+            raise ValueError("Use either native_pipeline or legacy mesh_commands, not both.")
+        if not self.native_pipeline and not self.mesh_commands:
+            raise ValueError("execute_case_plan requires a native validation pipeline.")
+        pipeline_names = [item.command for item in self.native_pipeline] if self.native_pipeline else list(self.mesh_commands)
+        if pipeline_names.count("checkMesh") != 1:
+            raise ValueError("execute_case_plan requires exactly one checkMesh validation command.")
+        if pipeline_names[-1] != "checkMesh":
+            raise ValueError("execute_case_plan native pipeline must end with checkMesh.")
         if set(self.required_case_files) != set(self.plan.required_case_files):
             raise ValueError(
                 "execute_case_plan required_case_files must exactly match plan.required_case_files."
@@ -891,9 +979,8 @@ class RepairCasePlanAction(_EngineeringModel):
     typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=12)
     validate_dictionaries: list[str] = Field(default_factory=list, max_length=24)
     surface_checks: list[str] = Field(default_factory=list, max_length=12)
-    mesh_commands: list[Literal[
-        "blockMesh", "surfaceFeatureExtract", "snappyHexMesh", "createPatch", "checkMesh"
-    ]] = Field(default_factory=list, max_length=8)
+    mesh_commands: list[str] = Field(default_factory=list, max_length=12)
+    native_pipeline: list[NativeOpenFOAMCommand] = Field(default_factory=list, max_length=16)
     validate_pre_solve: bool = True
     retry_solver: bool = False
     updated_plan: EngineeringPlan | None = None
@@ -919,8 +1006,14 @@ class RepairCasePlanAction(_EngineeringModel):
             raise ValueError("repair_case_plan cannot patch and replace the same file in one turn.")
         if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
             raise ValueError("Use block_mesh for system/blockMeshDict repairs.")
-        if self.mesh_commands and self.mesh_commands.count("checkMesh") > 1:
+        if self.native_pipeline and self.mesh_commands:
+            raise ValueError("repair_case_plan must use native_pipeline or mesh_commands, not both.")
+        commands = [item.command for item in self.native_pipeline] if self.native_pipeline else list(self.mesh_commands)
+        if commands.count("checkMesh") > 1:
             raise ValueError("repair_case_plan may run checkMesh at most once.")
+        for command in commands:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+-]*", command):
+                raise ValueError(f"Unsafe repair command identifier: {command}")
         return self
 
 
@@ -938,9 +1031,8 @@ class RuntimeCaseRepairAction(_EngineeringModel):
     typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=8)
     validate_dictionaries: list[str] = Field(default_factory=list, max_length=16)
     surface_checks: list[str] = Field(default_factory=list, max_length=8)
-    mesh_commands: list[Literal[
-        "blockMesh", "surfaceFeatureExtract", "snappyHexMesh", "createPatch", "checkMesh"
-    ]] = Field(default_factory=list, max_length=6)
+    mesh_commands: list[str] = Field(default_factory=list, max_length=10)
+    native_pipeline: list[NativeOpenFOAMCommand] = Field(default_factory=list, max_length=12)
     validate_pre_solve: bool = True
     retry_solver: bool = True
 
@@ -955,7 +1047,10 @@ class RuntimeCaseRepairAction(_EngineeringModel):
         )
         if len(paths) != len(set(paths)):
             raise ValueError("repair_runtime_case may represent each file in only one repair mode per turn.")
-        if self.mesh_commands.count("checkMesh") > 1:
+        if self.native_pipeline and self.mesh_commands:
+            raise ValueError("repair_runtime_case must use native_pipeline or mesh_commands, not both.")
+        commands = [item.command for item in self.native_pipeline] if self.native_pipeline else list(self.mesh_commands)
+        if commands.count("checkMesh") > 1:
             raise ValueError("repair_runtime_case may run checkMesh at most once.")
         return self
 
@@ -1031,7 +1126,8 @@ class StrategyRevisionAction(_EngineeringModel):
     drop_paths: list[str] = Field(default_factory=list, max_length=16)
     validate_dictionaries: list[str] = Field(default_factory=list, max_length=24)
     surface_checks: list[str] = Field(default_factory=list, max_length=12)
-    mesh_commands: list[Literal["blockMesh", "surfaceFeatureExtract", "snappyHexMesh", "createPatch", "checkMesh"]] = Field(min_length=1, max_length=8)
+    mesh_commands: list[str] = Field(default_factory=list, max_length=12)
+    native_pipeline: list[NativeOpenFOAMCommand] = Field(default_factory=list, max_length=20)
     validate_pre_solve: bool = True
     updated_plan: EngineeringPlan | None = None
 
@@ -1047,8 +1143,11 @@ class StrategyRevisionAction(_EngineeringModel):
         for path in self.drop_paths:
             if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
                 raise ValueError(f"Unsafe strategy drop path: {path}")
-        if self.mesh_commands[-1] != "checkMesh" or self.mesh_commands.count("checkMesh") != 1:
-            raise ValueError("revise_mesh_strategy mesh_commands must end with exactly one checkMesh.")
+        if self.native_pipeline and self.mesh_commands:
+            raise ValueError("revise_mesh_strategy must use native_pipeline or mesh_commands, not both.")
+        commands = [item.command for item in self.native_pipeline] if self.native_pipeline else list(self.mesh_commands)
+        if not commands or commands[-1] != "checkMesh" or commands.count("checkMesh") != 1:
+            raise ValueError("revise_mesh_strategy native pipeline must end with exactly one checkMesh.")
         if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
             raise ValueError("Use block_mesh for system/blockMeshDict in strategy revisions.")
         return self
@@ -1164,6 +1263,7 @@ EngineeringAction = (
     | ValidateDictionaryAction
     | SurfaceCheckAction
     | RunMeshCommandAction
+    | RunNativeOpenFOAMAction
     | ValidatePreSolveAction
     | FinishPreviewAction
     | RetrySolverAction

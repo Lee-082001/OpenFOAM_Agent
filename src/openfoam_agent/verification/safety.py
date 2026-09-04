@@ -11,6 +11,7 @@ from openfoam_agent.schemas.engineering import EngineeringPlan, MeshEvidence
 from openfoam_agent.schemas.intake import CFDIntakeSpec
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
+from openfoam_agent.verification.foam_semantics.parser import parse_named_dictionary_assignments
 
 
 _SOLVER_ENTRY = re.compile(r"(?m)^\s*solver\s+(?P<solver>[A-Za-z][A-Za-z0-9_]*)\s*;")
@@ -169,20 +170,44 @@ class DeterministicSafetyGate:
             )
 
         control_path = self.workspace.resolve_case_path("system/controlDict")
+        execution = plan.execution
+        driver = execution.driver if execution is not None else "foamRun"
+        runner = getattr(self.tools, "runner", None)
+        if detected and runner is not None:
+            driver_status = runner.executable_status(driver)
+            if not bool(driver_status.get("available")):
+                failures.append(
+                    f"Selected OpenFOAM execution driver {driver!r} is not available in the trusted sourced installation."
+                )
+
         if not control_path.is_file():
-            failures.append("system/controlDict is required for bounded foamRun execution.")
+            failures.append(f"system/controlDict is required for bounded {driver} execution.")
         else:
             control = control_path.read_text(encoding="utf-8", errors="replace")
-            match = _SOLVER_ENTRY.search(control)
-            if match is None:
-                failures.append(
-                    "system/controlDict must declare a solver entry so the approved "
-                    "EngineeringPlan can be checked against the runtime case."
-                )
-            elif match.group("solver") != plan.solver:
-                failures.append(
-                    "system/controlDict solver disagrees with the EngineeringPlan."
-                )
+            if execution is None or driver == "foamRun":
+                expected_solver = plan.solver if execution is None else execution.solver_module
+                match = _SOLVER_ENTRY.search(control)
+                if match is None:
+                    failures.append(
+                        "system/controlDict must declare a solver entry so the approved "
+                        "single-region execution can be checked against the runtime case."
+                    )
+                elif expected_solver is not None and match.group("solver") != expected_solver:
+                    failures.append("system/controlDict solver disagrees with the EngineeringPlan execution spec.")
+            elif driver == "foamMultiRun":
+                actual, complete = parse_named_dictionary_assignments(control, "regionSolvers")
+                expected = {item.region: item.solver_module for item in execution.regions}
+                if not actual:
+                    failures.append("system/controlDict must declare regionSolvers for foamMultiRun execution.")
+                elif not complete:
+                    failures.append(
+                        "system/controlDict regionSolvers contains dynamic/indeterminate entries; "
+                        "deterministic multi-region execution semantics could not be proven."
+                    )
+                elif actual != expected:
+                    failures.append(
+                        "system/controlDict regionSolvers disagrees with the EngineeringPlan execution spec."
+                    )
 
         return SafetyCheckResult(valid=not failures, failures=failures)
 

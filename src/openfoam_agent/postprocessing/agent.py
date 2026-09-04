@@ -260,7 +260,7 @@ class CFDPostProcessingAgent:
         )
         state.transition(
             State.RESULT_REVIEW_REQUIRED,
-            "foamRun completed and deterministic post-processing execution plan finished. Human result review is required.",
+            "OpenFOAM runtime completed and deterministic post-processing execution plan finished. Human result review is required.",
         )
         state.postprocessing_events.append(
             self._event(
@@ -418,7 +418,7 @@ class CFDPostProcessingAgent:
                 )
                 state.transition(
                     State.RESULT_REVIEW_REQUIRED,
-                    "foamRun completed and bounded post-processing evidence was collected. Human result review is required before completion.",
+                    "OpenFOAM runtime completed and bounded post-processing evidence was collected. Human result review is required before completion.",
                 )
                 return self._event(
                     step,
@@ -435,7 +435,7 @@ class CFDPostProcessingAgent:
                 )
                 state.transition(
                     State.RESULT_REVIEW_REQUIRED,
-                    "foamRun completed; post-processing stopped with limitations preserved. Human result review is required.",
+                    "OpenFOAM runtime completed; post-processing stopped with limitations preserved. Human result review is required.",
                 )
                 return self._event(step, action.type, True, action.reason), True
 
@@ -704,7 +704,7 @@ class CFDPostProcessingAgent:
         )
         state.transition(
             State.RESULT_REVIEW_REQUIRED,
-            "foamRun completed; bounded post-processing ended with partial evidence. Human result review is required.",
+            "OpenFOAM runtime completed; bounded post-processing ended with partial evidence. Human result review is required.",
         )
         self.progress.emit(
             ProgressEvent(

@@ -92,7 +92,7 @@ class CFDWorkflow:
                     else:
                         state.transition(
                             State.RESULT_REVIEW_REQUIRED,
-                            "foamRun completed; automatic post-processing was skipped. Human result review is required.",
+                            "OpenFOAM runtime completed; automatic post-processing was skipped. Human result review is required.",
                         )
                     if state.current_state == State.RESULT_REVIEW_REQUIRED:
                         state.mark_feedback_awaiting_review()

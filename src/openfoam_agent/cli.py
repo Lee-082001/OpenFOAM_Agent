@@ -50,10 +50,19 @@ def _resource_path(source_path: Path, installed_path: Path) -> Path:
     return source_path if source_path.exists() else installed_path
 
 
-DEFAULT_CAPABILITY_DB = _resource_path(
-    PROJECT_ROOT / "config" / "openfoam14_capability_graph.json",
-    INSTALLED_DATA_ROOT / "config" / "openfoam14_capability_graph.json",
-)
+DEFAULT_CAPABILITY_DBS = {
+    version: _resource_path(
+        PROJECT_ROOT / "config" / f"openfoam{version}_capability_graph.json",
+        INSTALLED_DATA_ROOT / "config" / f"openfoam{version}_capability_graph.json",
+    )
+    for version in ("13", "14")
+}
+
+def _default_capability_db() -> Path:
+    raw = os.environ.get("WM_PROJECT_VERSION", "").strip().lower().lstrip("v")
+    return DEFAULT_CAPABILITY_DBS.get(raw, DEFAULT_CAPABILITY_DBS["14"])
+
+DEFAULT_CAPABILITY_DB = _default_capability_db()
 DEFAULT_WORKSPACE = Path(tempfile.gettempdir()) / "openfoam-agent-v2"
 SUCCESS_STATES = {
     State.INTAKE_REVIEW_REQUIRED,
@@ -96,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--solve",
         action="store_true",
-        help="One-shot only: after a passing mesh gate, approve bounded foamRun execution.",
+        help="One-shot only: after a passing mesh gate, approve bounded OpenFOAM runtime execution.",
     )
     parser.add_argument(
         "--dry-run",
@@ -179,7 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=ProgressLevel.NORMAL.value,
         help=(
             "Live progress verbosity: quiet disables progress, normal shows major engineering/runtime/postprocess events, "
-            "verbose shows every agent action and raw foamRun output."
+            "verbose shows every agent action and raw OpenFOAM runtime output."
         ),
     )
     parser.add_argument(
@@ -231,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--runtime-repair-cycles",
         type=int,
         default=3,
-        help="Maximum autonomous foamRun failure-repair-retry cycles (default: 3).",
+        help="Maximum autonomous OpenFOAM runtime failure-repair-retry cycles (default: 3).",
     )
     parser.add_argument(
         "--runtime-repair-steps",
@@ -260,7 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-postprocess",
         action="store_true",
-        help="Stop at successful foamRun instead of launching the automatic post-processing agent.",
+        help="Stop at successful OpenFOAM runtime instead of launching the automatic post-processing agent.",
     )
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--output", type=Path)
@@ -734,7 +743,7 @@ def _limitations(state: CFDState) -> list[str]:
     if state.current_state == State.MESH_READY:
         out.append("checkMesh passed, but pre-solve completeness validation has not yet produced a solve-ready seal.")
     if state.current_state == State.SOLVE_READY:
-        out.append("Pre-solve completeness validation passed; foamRun still requires explicit /solve approval.")
+        out.append("Pre-solve completeness validation passed; the selected OpenFOAM runtime still requires explicit /solve approval.")
     if state.current_state == State.ENGINEERING_BLOCKED:
         out.append("The autonomous engineering/retry budget ended without a safely executable result.")
     if state.current_state == State.RESULT_REVIEW_REQUIRED:
@@ -931,7 +940,7 @@ def _print_human_report(report: dict[str, Any]) -> None:
     if report["final_state"] == State.INTAKE_REVIEW_REQUIRED.value:
         print("next: /confirm in interactive mode, or --confirm-intake with --backend openai/ollama/codex/claude")
     if report["final_state"] == State.SOLVE_READY.value:
-        print("next: /solve to approve foamRun, or /feedback <observation> to revise the mesh/case")
+        print("next: /solve to approve the selected OpenFOAM runtime, or /feedback <observation> to revise the mesh/case")
     elif report["final_state"] == State.MESH_READY.value:
         print("next: pre-solve completeness validation is still required before /solve")
     if report["final_state"] == State.RESULT_REVIEW_REQUIRED.value:
@@ -1031,7 +1040,7 @@ def _print_interactive_help() -> None:
     print("- /show                 누적 요청과 승인 정책 표시")
     print("- /details              현재 CFDIntakeSpec JSON")
     print("- /confirm              intake 확정 + bounded case/mesh engineering 승인")
-    print("- /solve                MESH_READY sealed case의 foamRun 승인")
+    print("- /solve                SOLVE_READY sealed case의 OpenFOAM runtime 승인")
     print("- /feedback <text>      mesh/result에 대한 human engineering feedback 제출")
     print("- /accept               RESULT_REVIEW_REQUIRED 결과를 최종 수락")
     print("- /reject               REVISION_READY proposal을 거절하고 이전 review 상태로 복귀")

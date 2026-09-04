@@ -61,3 +61,8 @@ v3.1.0 interprets `TypedBlockMeshFile` as a deterministic face-ownership graph b
 Pre-commit topology failures use a dedicated compact `CandidateBlockMeshRepairTurn` against the retained structured candidate. Native blockMesh failures use a dedicated `BlockMeshRepairTurn` against the exact structured mesh that generated the current file, eliminating whitespace-sensitive text patching as the primary mesh-topology repair path. Repeated blockMesh signatures normalize transient numeric labels before strategy escalation, and patch-based mesh mutations now count toward repair-cycle budgets.
 
 Regression suite: **261 passed**. See `V3_1_CHANGES.md`.
+
+
+## v3.3.0 — Native OpenFOAM discovery and multi-region execution contract
+
+A sourced Foundation 13/14 installation is now the production command authority. All trusted installed applications are discovered dynamically, runtime-selectable modules/models are represented in `InstalledOpenFOAMIR`, and the capability catalog merges installed evidence with version-matched documented fallback graphs. `EngineeringPlan.execution` now represents single-region `foamRun`, multi-region `foamMultiRun` with `regionSolvers`, or a trusted direct solver application. `native_pipeline` can invoke any discovered Foundation utility while Python retains workspace, argument, executable provenance, budget and native-evidence gates. Both OF13 and OF14 capability profiles ship with the release and the CLI selects the default from `WM_PROJECT_VERSION`. See `V3_3_CHANGES.md`.

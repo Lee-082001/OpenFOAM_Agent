@@ -157,7 +157,7 @@ class PreSolveCompletenessGate:
                             "Boundary constraint-type mismatch in "
                             f"{relative} for patch {patch_name}: mesh={mesh_type}, field={field_type} "
                             f"(resolved via {via} {selector}). "
-                            "Constraint patches such as empty/wedge/symmetry/cyclic must match before foamRun."
+                            "Constraint patches such as empty/wedge/symmetry/cyclic must match before the selected OpenFOAM runtime."
                         )
                 if "internalField" not in text:
                     failures.append(f"Required initial field {relative} does not declare internalField.")

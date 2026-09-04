@@ -68,52 +68,66 @@ class OpenFOAMReferenceIndex:
         results: list[tuple[int, str, dict[str, object]]] = []
         inspected = 0
         for root_scope, root in selected:
-            for path in root.rglob("*"):
-                if inspected >= max_files:
-                    break
-                if not path.is_file() or path.is_symlink():
-                    continue
-                inspected += 1
-                try:
-                    resolved = path.resolve()
-                except OSError:
-                    continue
-                if not _is_within(resolved, root) or resolved == root:
-                    continue
-                relative = resolved.relative_to(root).as_posix()
-                name_haystack = relative.casefold()
-                name_score = sum(4 for token in query_tokens if token in name_haystack)
-                content_score = 0
-                snippet = ""
-                if name_score == 0 and resolved.stat().st_size <= 1_000_000:
+            try:
+                iterator = root.rglob("*")
+                for path in iterator:
+                    if inspected >= max_files:
+                        break
                     try:
-                        text = resolved.read_text(encoding="utf-8", errors="ignore")
+                        if not path.is_file() or path.is_symlink():
+                            continue
                     except OSError:
-                        text = ""
-                    lowered = text.casefold()
-                    content_score = sum(1 for token in query_tokens if token in lowered)
-                    if content_score:
-                        first = min(
-                            (lowered.find(token) for token in query_tokens if token in lowered),
-                            default=0,
+                        continue
+                    inspected += 1
+                    try:
+                        resolved = path.resolve()
+                    except OSError:
+                        continue
+                    if not _is_within(resolved, root) or resolved == root:
+                        continue
+                    relative = resolved.relative_to(root).as_posix()
+                    name_haystack = relative.casefold()
+                    name_score = sum(4 for token in query_tokens if token in name_haystack)
+                    content_score = 0
+                    snippet = ""
+                    text = ""
+                    try:
+                        size = resolved.stat().st_size
+                    except OSError:
+                        size = 1_000_001
+                    if name_score == 0 and size <= 1_000_000:
+                        try:
+                            text = resolved.read_text(encoding="utf-8", errors="ignore")
+                        except OSError:
+                            text = ""
+                        lowered = text.casefold()
+                        content_score = sum(1 for token in query_tokens if token in lowered)
+                        if content_score:
+                            first = min(
+                                (lowered.find(token) for token in query_tokens if token in lowered),
+                                default=0,
+                            )
+                            start_pos = max(0, first - 160)
+                            snippet = " ".join(text[start_pos:first + 500].split())[:700]
+                    score = name_score + content_score
+                    if score:
+                        reference = f"{root_scope}:{relative}"
+                        results.append(
+                            (
+                                score,
+                                reference,
+                                {
+                                    "reference": reference,
+                                    "scope": root_scope,
+                                    "path": relative,
+                                    "snippet": snippet,
+                                },
+                            )
                         )
-                        start = max(0, first - 160)
-                        snippet = " ".join(text[start:first + 500].split())[:700]
-                score = name_score + content_score
-                if score:
-                    reference = f"{root_scope}:{relative}"
-                    results.append(
-                        (
-                            score,
-                            reference,
-                            {
-                                "reference": reference,
-                                "scope": root_scope,
-                                "path": relative,
-                                "snippet": snippet,
-                            },
-                        )
-                    )
+            except OSError:
+                # One unreadable installed subtree must not disable all capability/reference
+                # retrieval. Other scopes remain usable and deterministic.
+                continue
             if inspected >= max_files:
                 break
         results.sort(key=lambda item: (-item[0], item[1]))

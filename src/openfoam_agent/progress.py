@@ -200,7 +200,7 @@ def _format_metric(value: object) -> str:
 
 
 class SolverProgressTracker:
-    """Parse a live foamRun stream into bounded progress events.
+    """Parse a live OpenFOAM solver-driver stream into bounded progress events.
 
     Normal mode is wall-clock throttled to avoid printing thousands of CFD time
     steps. Verbose mode emits every Time marker plus residual lines.
@@ -226,11 +226,13 @@ class SolverProgressTracker:
         attempt: int,
         attempt_limit: int,
         normal_interval_seconds: float = 1.0,
+        runtime_label: str = "foamRun",
     ) -> None:
         self.reporter = reporter
         self.attempt = attempt
         self.attempt_limit = attempt_limit
         self.normal_interval_seconds = normal_interval_seconds
+        self.runtime_label = runtime_label
         self.latest_co_mean: float | None = None
         self.latest_co_max: float | None = None
         self._last_normal_emit = 0.0
@@ -262,7 +264,7 @@ class SolverProgressTracker:
                 self.reporter.emit(
                     ProgressEvent(
                         phase="runtime",
-                        message="foamRun 진행",
+                        message=f"{self.runtime_label} 진행",
                         status="info",
                         importance=(
                             ProgressImportance.VERBOSE if verbose else ProgressImportance.NORMAL

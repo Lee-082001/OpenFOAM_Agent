@@ -267,7 +267,7 @@ It does not decide that a particular physical problem requires a particular solv
 
 ```text
 MESH_READY              current sealed case + current passing checkMesh
-EXECUTION_DONE          bounded foamRun evidence passed
+EXECUTION_DONE          bounded selected OpenFOAM runtime evidence passed
 RESULT_REVIEW_REQUIRED  result/post-processing evidence ready for review
 COMPLETE                human explicitly accepted the reviewed result
 ```
@@ -280,7 +280,7 @@ Long-running work emits observational `ProgressEvent` objects through a shared r
 
 The progress channel may expose only deterministic/action-level observations such as phase, bounded step number, action type, relative case file, allowlisted command, tool success/failure, `checkMesh` metrics, solver `Time`/Courant summaries, retry counts, and post-processing metrics already derived from native evidence. It must not expose the model `rationale`, hidden reasoning, API credentials, or new unredacted host-file contents.
 
-`CLIProgressReporter` writes to stderr. `quiet` drops events, `normal` filters low-value read/list actions and throttles solver time markers, and `verbose` renders all action events and enables raw `foamRun` stdout. Reporter/callback exceptions are observational failures only: `SafeRunner` catches output-callback exceptions so a renderer cannot terminate or alter a native OpenFOAM process.
+`CLIProgressReporter` writes to stderr. `quiet` drops events, `normal` filters low-value read/list actions and throttles solver time markers, and `verbose` renders all action events and enables raw selected-runtime stdout. Reporter/callback exceptions are observational failures only: `SafeRunner` catches output-callback exceptions so a renderer cannot terminate or alter a native OpenFOAM process.
 
 ## Token-aware remote working context (v2.4)
 
@@ -378,3 +378,28 @@ EngineeringEvent
 `EngineeringEvent.output_excerpt` is never the durable evidence store. This prevents transport/log size constraints from becoming workflow failures and avoids reparsing human-readable event strings as evidence. A retrieval infrastructure failure closes retrieval for that phase and preparation moves to the decision-only contract.
 
 Delegated ordinary parameters are also explicit semantics rather than implicit prose. When exploratory completion is authorized, the Engineering Agent may choose missing representative dimensions, material values, inlet/initial conditions, heat-source magnitude, duration, and similar engineering details. Each concrete choice is represented as `EngineeringDefaultAssumption` with `source=engineering_default`, a basis, value/unit, rationale, and optional canonical evidence IDs. These records are not user facts and cannot override the immutable confirmed intake. `BlockAction.block_kind` distinguishes a genuinely unresolved physical/tool limitation from `engineering_choice_missing`; the latter is rejected as a terminal block when the user has already delegated those choices.
+
+
+## v3.3 Native OpenFOAM installation and execution IR
+
+Production native authority is derived from a sourced OpenFOAM Foundation 13/14 installation rather than from a Python feature allowlist. `OpenFOAMInstallationDiscovery` scans executable entries only inside trusted installation roots and records sanitized names/categories in `InstalledOpenFOAMIR`; absolute host paths are never exposed to the model. `$FOAM_MODULES`, `$FOAM_SRC/fvModels`, and `$FOAM_SRC/functionObjects` contribute runtime-selectable component evidence when installed. Version-specific documented profiles are fallback evidence for source trees that are absent, not execution authority.
+
+```text
+sourced Foundation 13/14
+    -> trusted installation roots
+    -> InstalledOpenFOAMIR
+         executables[]
+         solver_modules[]
+         fv_models[]
+         function_objects[]
+    -> CapabilityCatalog (installed + documented evidence)
+    -> Engineering Agent chooses
+         ExecutionIR
+         NativeOpenFOAMPipeline[]
+    -> Python validates provenance/workspace/arguments
+    -> native process (shell=False)
+```
+
+`OpenFOAMExecutionSpec` supports three execution topologies: `foamRun` + one solver module, `foamMultiRun` + explicit region-to-module assignments, and a discovered direct solver application. For `foamMultiRun`, deterministic semantic parsing verifies that `system/controlDict.regionSolvers` exactly matches the selected regions/modules before sealing the case. Preprocessing and meshing are no longer constrained to a fixed `MESH_COMMANDS` enum: `native_pipeline` may use any executable discovered in the trusted installation. Specialized wrappers remain only for commands whose outputs require dedicated deterministic parsing (for example `checkMesh`), not as a feature allowlist.
+
+The trust boundary remains strict: dynamic discovery activates only for `WM_PROJECT=OpenFOAM` with `WM_PROJECT_VERSION` 13 or 14 and a trusted `WM_PROJECT_DIR`; executable paths are re-resolved under that root immediately before launch; shell execution is disabled; cwd is workspace-confined; case/root override arguments and parent traversal are rejected. User/site application bins are not implicitly trusted.

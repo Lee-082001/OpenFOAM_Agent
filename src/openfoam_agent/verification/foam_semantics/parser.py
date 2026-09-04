@@ -251,3 +251,54 @@ def _scan_to_statement_end(text: str, index: int, section_closing: str) -> int:
             return i
         i += 1
     return max(index, len(text) - 1)
+
+
+def parse_named_dictionary_assignments(text: str, name: str) -> tuple[dict[str, str], bool]:
+    """Parse literal scalar assignments from one named OpenFOAM dictionary.
+
+    This is intentionally a semantic projection, not a general-purpose parser. It is
+    used for contracts such as controlDict.regionSolvers where OpenFOAM itself expects
+    a dictionary of region -> solver words. Dynamic directives/expansions are reported
+    as incomplete rather than guessed.
+    """
+    clean = strip_comments(text)
+    brace = find_named_dictionary(clean, name)
+    if brace is None:
+        return {}, False
+    end = matching_delimiter(clean, brace, "{", "}")
+    if end is None:
+        return {}, False
+    body = clean[brace + 1 : end]
+    result: dict[str, str] = {}
+    complete = True
+    i = 0
+    while i < len(body):
+        i = _skip_ws(body, i)
+        if i >= len(body):
+            break
+        key, after_key = parse_key(body, i)
+        if key is None:
+            i = max(i + 1, after_key)
+            continue
+        if key.pattern_state != PatternState.LITERAL:
+            complete = False
+            i = _scan_to_statement_end(body, after_key, "}") + 1
+            continue
+        j = _skip_ws(body, after_key)
+        if j < len(body) and body[j] == "{":
+            complete = False
+            nested_end = matching_delimiter(body, j, "{", "}")
+            i = len(body) if nested_end is None else nested_end + 1
+            continue
+        semi = _scan_to_statement_end(body, j, "}")
+        raw_value = body[j:semi].strip()
+        if not raw_value or raw_value.startswith(("$", "#")):
+            complete = False
+        else:
+            value = raw_value.split()[0].strip('"\'')
+            if value:
+                result[key.value] = value
+            else:
+                complete = False
+        i = semi + 1
+    return result, complete

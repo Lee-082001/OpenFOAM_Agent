@@ -5,29 +5,28 @@ import re
 from pathlib import Path
 from typing import Callable
 
+from openfoam_agent.schemas.engineering import OpenFOAMExecutionSpec
+
 from .safe_runner import SafeRunner
 
 
 class OpenFOAMTools:
-    """Narrow wrappers around allowlisted, provenance-checked OpenFOAM commands."""
-
-    MESH_COMMANDS = (
-        "blockMesh",
-        "surfaceFeatureExtract",
-        "snappyHexMesh",
-        "createPatch",
-        "checkMesh",
-    )
+    """Trusted wrappers over a dynamically discovered Foundation v13/v14 installation."""
 
     def __init__(self, runner: SafeRunner | None = None):
         self.runner = runner or SafeRunner()
+
+    @property
+    def installed_openfoam(self):
+        return self.runner.installation
 
     @classmethod
     def for_workspace(cls, workspace_root: str | Path) -> "OpenFOAMTools":
         return cls(SafeRunner(workspace_root=workspace_root))
 
-    @staticmethod
-    def detected_foundation_version() -> str | None:
+    def detected_foundation_version(self) -> str | None:
+        if self.runner.installation.installation_configured and self.runner.installation.version:
+            return self.runner.installation.version
         value = os.environ.get("WM_PROJECT_VERSION", "").strip()
         matched = re.fullmatch(r"(?:v)?(13|14)", value, re.IGNORECASE)
         return matched.group(1) if matched else None
@@ -39,11 +38,16 @@ class OpenFOAMTools:
     def environment_snapshot(self) -> dict[str, object]:
         # Deliberately expose no absolute local paths to the remote model.
         commands = sorted(self.runner.allowed_commands)
+        installation = self.installed_openfoam
         return {
             "wm_project": os.environ.get("WM_PROJECT", ""),
             "wm_project_version": os.environ.get("WM_PROJECT_VERSION", ""),
             "foundation_version": self.detected_foundation_version(),
             "trusted_installation_configured": bool(self.runner.trusted_executable_roots),
+            "installed_ir_fingerprint": installation.fingerprint,
+            "installed_executable_count": len(installation.executables),
+            "installed_solver_modules": sorted(installation.solver_modules),
+            "installed_fv_models": sorted(installation.fv_models),
             "commands": [self.runner.executable_status(command) for command in commands],
             "reference_scopes_configured": {
                 "tutorials": bool(os.environ.get("FOAM_TUTORIALS")),
@@ -87,6 +91,59 @@ class OpenFOAMTools:
                 "but constant/polyMesh/boundary contains an empty patch."
             )
         return True, ""
+
+    def run_native_command(
+        self,
+        command: str,
+        case_dir: str | Path,
+        *,
+        arguments: list[str] | None = None,
+        timeout: int = 900,
+        stream_output: bool = False,
+        output_callback: Callable[[str], None] | None = None,
+    ):
+        """Execute any application discovered in the trusted OpenFOAM installation.
+
+        The LLM never supplies an executable path and cannot override the case/root.
+        Every invocation is shell=False, case-workspace confined, and re-resolved under
+        WM_PROJECT_DIR immediately before execution.
+        """
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+-]*", command):
+            raise ValueError(f"Unsafe OpenFOAM command identifier: {command!r}")
+        args = list(arguments or [])
+        reserved = {"-case", "-root", "-hostRoots", "-roots"}
+        if any(arg in reserved for arg in args):
+            raise ValueError("Agent native commands cannot override Python-owned case/root paths.")
+        return self.runner.run(
+            [command, *args],
+            cwd=case_dir,
+            timeout=timeout,
+            stream_output=stream_output,
+            output_callback=output_callback,
+        )
+
+    def run_execution(
+        self,
+        case_dir: str | Path,
+        execution: OpenFOAMExecutionSpec,
+        *,
+        stream_output: bool = False,
+        timeout: int = 3600,
+        output_callback: Callable[[str], None] | None = None,
+    ):
+        args = list(execution.arguments)
+        if execution.driver == "foamRun":
+            assert execution.solver_module is not None
+            args = ["-solver", execution.solver_module, *args]
+        # foamMultiRun obtains region->solver semantics from controlDict.regionSolvers.
+        return self.run_native_command(
+            execution.driver,
+            case_dir,
+            arguments=args,
+            stream_output=stream_output,
+            timeout=timeout,
+            output_callback=output_callback,
+        )
 
     def block_mesh(self, case_dir: str | Path):
         return self.runner.run(["blockMesh", "-case", str(Path(case_dir).resolve())], cwd=case_dir)
@@ -184,8 +241,10 @@ class OpenFOAMTools:
             "createPatch": self.create_patch,
             "checkMesh": self.check_mesh,
         }
-        try:
-            tool = dispatch[command]
-        except KeyError as exc:
-            raise ValueError(f"Unsupported mesh command: {command}") from exc
-        return tool(case_dir)
+        tool = dispatch.get(command)
+        if tool is not None:
+            return tool(case_dir)
+        # Any other installed Foundation utility is allowed through the same trusted
+        # native runner. Strategy choice remains Agent-owned; Python only verifies
+        # installation provenance and workspace confinement.
+        return self.run_native_command(command, case_dir)

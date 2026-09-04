@@ -75,6 +75,7 @@ from openfoam_agent.schemas.engineering import (
     PatchCaseFileAction,
     RetrySolverAction,
     RunMeshCommandAction,
+    RunNativeOpenFOAMAction,
     SearchCapabilitiesAction,
     SearchReferencesAction,
     SurfaceCheckAction,
@@ -219,7 +220,7 @@ class CFDEngineeringAgent:
         self.llm = llm
         self.workspace = CaseWorkspace(workspace)
         self.tools = tools or OpenFOAMTools.for_workspace(self.workspace.root)
-        self.catalog = CapabilityCatalog(capability_db)
+        self.catalog = CapabilityCatalog(capability_db, installation=getattr(self.tools, "installed_openfoam", None))
         self.references = OpenFOAMReferenceIndex()
         self.safety = DeterministicSafetyGate(self.tools, self.workspace)
         self.presolve = PreSolveCompletenessGate(self.tools, self.workspace)
@@ -1017,14 +1018,23 @@ class CFDEngineeringAgent:
                     rationale="",
                 )
             )
-        for command in execution.mesh_commands:
-            actions.append(
-                RunMeshCommandAction(
-                    type="run_mesh_command",
-                    command=command,
-                    rationale="",
+        if execution.native_pipeline:
+            for invocation in execution.native_pipeline:
+                actions.append(
+                    RunNativeOpenFOAMAction(
+                        type="run_openfoam_command",
+                        invocation=invocation,
+                    )
                 )
-            )
+        else:
+            for command in execution.mesh_commands:
+                actions.append(
+                    RunMeshCommandAction(
+                        type="run_mesh_command",
+                        command=command,
+                        rationale="",
+                    )
+                )
         actions.append(
             ValidatePreSolveAction(
                 type="validate_pre_solve",
@@ -1249,8 +1259,12 @@ class CFDEngineeringAgent:
             )
         for path in repair.surface_checks:
             actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale=""))
-        for command in repair.mesh_commands:
-            actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
+        if repair.native_pipeline:
+            for invocation in repair.native_pipeline:
+                actions.append(RunNativeOpenFOAMAction(type="run_openfoam_command", invocation=invocation))
+        else:
+            for command in repair.mesh_commands:
+                actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
 
         plan = repair.updated_plan or state.engineering_plan or self._pending_execution_plan
         if plan is None:
@@ -1373,8 +1387,12 @@ class CFDEngineeringAgent:
             actions.append(ValidateDictionaryAction(type="validate_dictionary", path=path, rationale=""))
         for path in revision.surface_checks:
             actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale=""))
-        for command in revision.mesh_commands:
-            actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
+        if revision.native_pipeline:
+            for invocation in revision.native_pipeline:
+                actions.append(RunNativeOpenFOAMAction(type="run_openfoam_command", invocation=invocation))
+        else:
+            for command in revision.mesh_commands:
+                actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
         if revision.validate_pre_solve:
             actions.append(ValidatePreSolveAction(type="validate_pre_solve", required_case_files=plan.required_case_files, rationale=""))
         actions.append(FinishPreviewAction(type="finish_preview", plan=plan, rationale=""))
@@ -1442,8 +1460,12 @@ class CFDEngineeringAgent:
             actions.append(ValidateDictionaryAction(type="validate_dictionary", path=path, rationale=""))
         for path in repair.surface_checks:
             actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale=""))
-        for command in repair.mesh_commands:
-            actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
+        if repair.native_pipeline:
+            for invocation in repair.native_pipeline:
+                actions.append(RunNativeOpenFOAMAction(type="run_openfoam_command", invocation=invocation))
+        else:
+            for command in repair.mesh_commands:
+                actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
         if repair.validate_pre_solve:
             actions.append(
                 ValidatePreSolveAction(
@@ -2858,6 +2880,7 @@ class CFDEngineeringAgent:
                         ValidateDictionaryAction,
                         SurfaceCheckAction,
                         RunMeshCommandAction,
+                        RunNativeOpenFOAMAction,
                         ValidatePreSolveAction,
                     ),
                 )
@@ -3183,6 +3206,77 @@ class CFDEngineeringAgent:
                     summary,
                     event_output,
                     native_command_executed=True,
+                )
+
+            if isinstance(action, RunNativeOpenFOAMAction):
+                invocation = action.invocation
+                if not native_execution:
+                    return self._event(
+                        step, action.type, False,
+                        f"Native execution is disabled; {invocation.command} was not run.",
+                    )
+                preflight = self.safety.validate_native_inputs()
+                if not preflight.valid:
+                    return self._event(
+                        step, action.type, False,
+                        f"{invocation.command} blocked by generic syntax/safety preflight.",
+                        "\n".join(preflight.failures),
+                    )
+                if invocation.command == "snappyHexMesh":
+                    precondition_ok, precondition_reason = self._mesh_command_precondition(invocation.command)
+                    if not precondition_ok:
+                        return self._event(
+                            step, "mesh_tool_precondition", False,
+                            f"{invocation.command} blocked by deterministic executable precondition.",
+                            precondition_reason,
+                            failure_signature=f"tool_contract:{invocation.command}:prerequisite",
+                            failure_scope="strategy",
+                        )
+                try:
+                    result = self.tools.run_native_command(
+                        invocation.command,
+                        self.workspace.case_dir,
+                        arguments=invocation.arguments,
+                    )
+                except (ValueError, WorkspaceSafetyError) as exc:
+                    return self._event(step, action.type, False, str(exc))
+                if invocation.command != "checkMesh":
+                    self._presolve_case_manifest = None
+                    self._presolve_required_case_files = None
+                if invocation.role == "mesh" or invocation.command in _MESH_TOPOLOGY_MUTATING_COMMANDS:
+                    self._checkmesh_mesh_manifest = None
+                    if state is not None:
+                        state.mesh_evidence = None
+                        if phase == "runtime_repair":
+                            state.case_seal = None
+                output = _tool_output(result)
+                self.workspace.write_log(f"{step:03d}.{invocation.command}.log", output)
+                success = result.success
+                summary = f"{invocation.command} returned status {result.return_code}."
+                event_output = output
+                failure_signature = None
+                failure_scope = None
+                if not result.success:
+                    diagnostic = diagnose_openfoam_failure(result, command_name=invocation.command)
+                    event_output = diagnostic.render()
+                    failure_signature = self._native_failure_signature(
+                        invocation.command, diagnostic.kind, diagnostic.excerpt
+                    )
+                    failure_scope = "local"
+                    summary = f"{invocation.command} returned status {result.return_code}; native diagnostic captured."
+                if invocation.command == "checkMesh" and state is not None:
+                    evidence = parse_check_mesh_evidence(result)
+                    state.mesh_evidence = evidence
+                    success = evidence.passed
+                    summary = f"checkMesh returned status {result.return_code}; evidence {'passed' if evidence.passed else 'failed'}."
+                    if evidence.passed:
+                        self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
+                return self._event(
+                    step, action.type, success, summary, event_output,
+                    native_command_executed=True,
+                    mesh_command_executed=(invocation.role in {"mesh", "mesh_validation"}),
+                    failure_signature=failure_signature,
+                    failure_scope=failure_scope,
                 )
 
             if isinstance(action, ValidatePreSolveAction):
@@ -4022,7 +4116,7 @@ class CFDEngineeringAgent:
         plan: EngineeringPlan,
         state: CFDState,
     ) -> list[str]:
-        """Reject LLM-selected evidence IDs that Python did not issue in this run."""
+        """Reject execution/capability claims that Python did not issue in this run."""
 
         failures: list[str] = []
         registry = self._observed_evidence_registry(state)
@@ -4036,30 +4130,60 @@ class CFDEngineeringAgent:
                 "Engineering plan has no successful capability-graph observation in this run."
             )
 
-        provider = self.catalog.provider(plan.solver_provider_id)
-        if provider is None:
-            failures.append(
-                f"Solver provider '{plan.solver_provider_id}' does not exist in the loaded capability graph."
-            )
+        requirements: list[tuple[str, str, set[str], str]] = []
+        execution = plan.execution
+        if execution is None:
+            requirements.append((
+                plan.solver_provider_id, plan.solver, {"solver", "solver_module", "generated_solver"}, "solver"
+            ))
         else:
-            if provider.provider_type not in {"solver", "generated_solver"}:
+            requirements.append((
+                execution.driver_provider_id, execution.driver,
+                {"execution_driver", "solver_application", "utility"}, "execution driver"
+            ))
+            if execution.driver == "foamRun":
+                assert execution.solver_module is not None and execution.solver_provider_id is not None
+                requirements.append((
+                    execution.solver_provider_id, execution.solver_module,
+                    {"solver", "solver_module", "generated_solver"}, "solver module"
+                ))
+            elif execution.driver == "foamMultiRun":
+                for item in execution.regions:
+                    requirements.append((
+                        item.provider_id, item.solver_module,
+                        {"solver", "solver_module", "generated_solver"},
+                        f"region solver {item.region}",
+                    ))
+
+        seen_requirements: set[str] = set()
+        for provider_id, expected_name, allowed_types, label in requirements:
+            if provider_id in seen_requirements:
+                continue
+            seen_requirements.add(provider_id)
+            provider = self.catalog.provider(provider_id)
+            if provider is None:
+                failures.append(f"{label.title()} provider '{provider_id}' does not exist in the capability catalog.")
+                continue
+            if provider.provider_type not in allowed_types:
                 failures.append(
-                    f"Capability provider '{plan.solver_provider_id}' is not a solver provider."
+                    f"Capability provider '{provider_id}' has type {provider.provider_type!r}, "
+                    f"which is not valid for {label}."
                 )
-            if provider.name != plan.solver:
+            if provider.name != expected_name:
                 failures.append(
-                    f"Engineering plan solver '{plan.solver}' disagrees with capability provider "
-                    f"'{plan.solver_provider_id}' ({provider.name})."
+                    f"{label.title()} '{expected_name}' disagrees with capability provider "
+                    f"'{provider_id}' ({provider.name})."
                 )
             if provider.openfoam_version != plan.openfoam_version:
                 failures.append(
-                    f"Solver provider '{plan.solver_provider_id}' targets OpenFOAM "
+                    f"Capability provider '{provider_id}' targets OpenFOAM "
                     f"{provider.openfoam_version}, not {plan.openfoam_version}."
                 )
-        if plan.solver_provider_id not in capability_ids:
-            failures.append(
-                f"Solver provider '{plan.solver_provider_id}' was not present in deterministic capability evidence supplied to this run."
-            )
+            if provider_id not in capability_ids:
+                failures.append(
+                    f"Capability provider '{provider_id}' was not present in deterministic "
+                    "capability evidence supplied to this run."
+                )
 
         for evidence in plan.evidence:
             if evidence.evidence_id not in registry:

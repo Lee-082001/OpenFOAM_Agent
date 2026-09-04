@@ -56,10 +56,17 @@ class RuntimeOrchestrator:
             return state
 
         attempts: list[SimulationAttempt] = []
+        execution = state.engineering_plan.execution
+        runtime_driver = execution.driver if execution is not None else "foamRun"
+        target_summary = (
+            ",".join(f"{item.region}:{item.solver_module}" for item in execution.regions)
+            if execution is not None and execution.regions
+            else state.engineering_plan.solver
+        )
         self.progress.emit(
             ProgressEvent(
                 phase="runtime",
-                message=f"foamRun 시작: solver={state.engineering_plan.solver}",
+                message=f"{runtime_driver} 시작: target={target_summary}",
                 status="start",
                 metrics={"maxAttempts": self.policy.max_attempts},
             )
@@ -76,7 +83,7 @@ class RuntimeOrchestrator:
             self.progress.emit(
                 ProgressEvent(
                     phase="runtime",
-                    message=f"foamRun attempt {attempt_number}/{self.policy.max_attempts}",
+                    message=f"{runtime_driver} attempt {attempt_number}/{self.policy.max_attempts}",
                     status="start",
                 )
             )
@@ -84,35 +91,45 @@ class RuntimeOrchestrator:
                 self.progress,
                 attempt=attempt_number,
                 attempt_limit=self.policy.max_attempts,
+                runtime_label=runtime_driver,
             )
-            run = self.tools.foam_run(
-                state.case_dir,
-                solver=plan.solver,
-                stream_output=self.stream_output,
-                timeout=self.policy.solver_timeout_seconds,
-                output_callback=(tracker.feed if self.progress.enabled() else None),
-            )
+            if plan.execution is not None:
+                run = self.tools.run_execution(
+                    state.case_dir,
+                    plan.execution,
+                    stream_output=self.stream_output,
+                    timeout=self.policy.solver_timeout_seconds,
+                    output_callback=(tracker.feed if self.progress.enabled() else None),
+                )
+            else:
+                run = self.tools.foam_run(
+                    state.case_dir,
+                    solver=plan.solver,
+                    stream_output=self.stream_output,
+                    timeout=self.policy.solver_timeout_seconds,
+                    output_callback=(tracker.feed if self.progress.enabled() else None),
+                )
             log = "\n".join(part for part in (run.stdout, run.stderr) if part)
             self.engineering.workspace.write_log(
-                f"foamRun.attempt-{attempt_number:03d}.log", log
+                f"{runtime_driver}.attempt-{attempt_number:03d}.log", log
             )
-            result = parse_runtime_log(log, return_code=run.return_code)
+            result = parse_runtime_log(log, return_code=run.return_code, runtime_driver=runtime_driver)
             state.simulation = result
             state.simulation_attempts = attempt_number
             attempt = SimulationAttempt(attempt=attempt_number, result=result)
             attempts.append(attempt)
 
             diagnostic = None if result.success else diagnose_openfoam_failure(
-                run, command_name="foamRun"
+                run, command_name=runtime_driver
             )
             diagnostic_text = diagnostic.render() if diagnostic is not None else ""
             self.progress.emit(
                 ProgressEvent(
                     phase="runtime",
                     message=(
-                        f"foamRun attempt {attempt_number} 완료"
+                        f"{runtime_driver} attempt {attempt_number} 완료"
                         if result.success
-                        else f"foamRun attempt {attempt_number} 실패; native diagnostic captured; repair 판단으로 이동"
+                        else f"{runtime_driver} attempt {attempt_number} 실패; native diagnostic captured; repair 판단으로 이동"
                     ),
                     status="success" if result.success else "failure",
                     metrics={
@@ -140,7 +157,7 @@ class RuntimeOrchestrator:
                 )
                 state.transition(
                     State.EXECUTION_DONE,
-                    "foamRun completed with finite, fatal-error-free execution evidence. "
+                    f"{runtime_driver} completed with finite, fatal-error-free execution evidence. "
                     "Result review remains required.",
                 )
                 return state
