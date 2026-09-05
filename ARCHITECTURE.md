@@ -412,3 +412,23 @@ sourced Foundation 13/14
 `OpenFOAMExecutionSpec` supports three execution topologies: `foamRun` + one solver module, `foamMultiRun` + explicit region-to-module assignments, and a discovered direct solver application. For `foamMultiRun`, deterministic semantic parsing verifies that `system/controlDict.regionSolvers` exactly matches the selected regions/modules before sealing the case. Preprocessing and meshing are no longer constrained to a fixed `MESH_COMMANDS` enum: `native_pipeline` may use any executable discovered in the trusted installation. Specialized wrappers remain only for commands whose outputs require dedicated deterministic parsing (for example `checkMesh`), not as a feature allowlist.
 
 The trust boundary remains strict: dynamic discovery activates only for `WM_PROJECT=OpenFOAM` with `WM_PROJECT_VERSION` 13 or 14 and a trusted `WM_PROJECT_DIR`; executable paths are re-resolved under that root immediately before launch; shell execution is disabled; cwd is workspace-confined; case/root override arguments and parent traversal are rejected. User/site application bins are not implicitly trusted.
+
+
+## v3.6 — Bounded staged Engineering context
+
+The durable CFD/evidence state and the model context are separate contracts. Retrieval can accumulate arbitrary deterministic evidence locally, while the model sees a bounded relevance/recency projection. Stateless transports receive a complete bounded capsule each turn; response-chain delta mode is used only by transports that actually store prior responses.
+
+```text
+Frozen intake
+   -> targeted deterministic capability shortlist
+   -> GatherEvidence (optional, <= configured cycles)
+   -> durable EngineeringEvidenceRecord[]
+   -> EvidenceContextCompiler (10/12 item bounded projection)
+   -> DesignCaseAction / EngineeringPlan
+   -> Python provenance/default validation + frozen draft plan
+   -> CaseAuthoringAction (files + native pipeline only)
+   -> existing transactional ExecuteCasePlan executor
+   -> checkMesh / PreSolve / CaseSeal
+```
+
+The split is representational, not a change in authority: the Engineering Agent still chooses CFD physics/solver/mesh/BC/numerics; Python only compiles evidence context, validates provenance/safety, freezes the selected plan between stages, and executes deterministic tools.

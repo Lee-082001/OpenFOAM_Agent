@@ -1,4 +1,6 @@
-# OpenFOAM Agent v3.5.0
+# OpenFOAM Agent v3.6.0
+
+> **v3.6.0 bounded staged Engineering context:** full deterministic evidence remains durable local state, but each Engineering model call receives only a relevance/recency-bounded evidence capsule. Production prompts are capped at 18k characters with 10 evidence items (12 for decision turns) and two prepare retrieval cycles. Codex/other stateless transports no longer pretend to reuse previous-response delta state. Engineering is split into a compact `design_case` turn followed by a separate `author_case` turn against a Python-held frozen plan, removing the giant plan+OpenFOAM-files structured output. See `V3_6_CHANGES.md`.
 
 > **v3.5.0 evidence projection contract:** deterministic evidence retrieval now stores the complete observed-evidence set in `EngineeringEvidenceRecord` without an arbitrary cardinality ceiling, while `EngineeringEvent` is explicitly a bounded progress/audit projection. Event construction and the event model itself cap the projection before validation, so a valid batch with 25, 65, or more evidence items cannot disable retrieval or block Engineering merely because a UI/event list limit was exceeded. See `V3_5_CHANGES.md`.
 

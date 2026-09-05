@@ -18,6 +18,9 @@ from openfoam_agent.llm.prompts import (
     ENGINEERING_SYSTEM_PROMPT,
     PREPARE_SYSTEM_PROMPT,
     PREPARE_DECISION_ONLY_SYSTEM_PROMPT,
+    PREPARE_DESIGN_SYSTEM_PROMPT,
+    PREPARE_DECISION_DESIGN_SYSTEM_PROMPT,
+    CASE_AUTHORING_SYSTEM_PROMPT,
     CASE_PLAN_RETRY_SYSTEM_PROMPT,
     CANDIDATE_BLOCK_MESH_REPAIR_SYSTEM_PROMPT,
     BLOCK_MESH_REPAIR_SYSTEM_PROMPT,
@@ -47,6 +50,11 @@ from openfoam_agent.schemas.engineering import (
     EngineeringPlan,
     EngineeringSequenceAction,
     ExecuteCasePlanAction,
+    DesignCaseAction,
+    CaseAuthoringAction,
+    PrepareDesignTurn,
+    PrepareDecisionDesignTurn,
+    CaseAuthoringTurn,
     FinalizationTurn,
     PrepareTurn,
     PrepareDecisionOnlyTurn,
@@ -145,6 +153,9 @@ class EngineeringPolicy:
     max_observation_chars: int = 12_000
     model_event_excerpt_chars: int = 2_500
     max_model_prompt_chars: int = 60_000
+    max_prepare_model_evidence_items: int = 16
+    max_decide_model_evidence_items: int = 18
+    max_model_evidence_detail_chars: int = 900
     max_model_feedback_items: int = 8
     max_mesh_cells: int = 5_000_000
     require_solve_ready_gate: bool = False
@@ -159,6 +170,8 @@ class EngineeringPolicy:
     # compatibility; the production CLI enables both.
     compact_phase_schemas: bool = False
     state_delta_context: bool = False
+    bounded_evidence_context: bool = False
+    staged_case_authoring: bool = False
 
     def __post_init__(self) -> None:
         integer_fields = {
@@ -179,6 +192,9 @@ class EngineeringPolicy:
             "max_observation_chars": self.max_observation_chars,
             "model_event_excerpt_chars": self.model_event_excerpt_chars,
             "max_model_prompt_chars": self.max_model_prompt_chars,
+            "max_prepare_model_evidence_items": self.max_prepare_model_evidence_items,
+            "max_decide_model_evidence_items": self.max_decide_model_evidence_items,
+            "max_model_evidence_detail_chars": self.max_model_evidence_detail_chars,
             "max_model_feedback_items": self.max_model_feedback_items,
             "max_mesh_cells": self.max_mesh_cells,
             "max_preloaded_capabilities": self.max_preloaded_capabilities,
@@ -232,6 +248,8 @@ class CFDEngineeringAgent:
         self._presolve_case_manifest: str | None = None
         self._presolve_required_case_files: tuple[str, ...] | None = None
         self._pending_execution_plan: EngineeringPlan | None = None
+        self._draft_design_plan: EngineeringPlan | None = None
+        self._draft_authoring_brief: str = ""
         self._pending_candidate_execution: ExecuteCasePlanAction | None = None
         self._pending_candidate_failed_paths: tuple[str, ...] = ()
         self._structured_block_mesh: TypedBlockMeshFile | None = None
@@ -244,6 +262,8 @@ class CFDEngineeringAgent:
     def prepare(self, state: CFDState, *, native_execution: bool = True) -> CFDState:
         state.assert_confirmed_intake()
         self._evidence_gap_ledger["prepare"] = {}
+        self._draft_design_plan = None
+        self._draft_authoring_brief = ""
         self._retrieval_cycles["prepare"] = 0
         self._evidence_retrieval_disabled.pop("prepare", None)
         if native_execution and not self._checkmesh_preflight(state, phase="preflight"):
@@ -528,6 +548,78 @@ class CFDEngineeringAgent:
                 action,
                 llm_step=llm_step,
                 progress_phase=progress_phase,
+                native_execution=native_execution,
+            )
+
+        if isinstance(action, DesignCaseAction):
+            # Stage-1 validation must not depend on case files that have not been authored
+            # yet. Validate only immutable intake binding, deterministic capability
+            # provenance and delegated-default policy here; full workspace/native safety
+            # validation still runs after author_case writes the case.
+            failures: list[str] = []
+            if action.plan.confirmed_intake_sha256 != state.intake_digest:
+                failures.append("Engineering design confirmed_intake_sha256 does not match the frozen intake.")
+            failures.extend(self._validate_observed_provenance(action.plan, state))
+            failures.extend(self._validate_engineering_defaults(action.plan, state))
+            valid = not failures
+            if valid:
+                self._draft_design_plan = action.plan
+                self._draft_authoring_brief = action.authoring_brief
+                self._mark_evidence_gaps_satisfied("prepare")
+                event = self._event(
+                    llm_step,
+                    action.type,
+                    True,
+                    "Engineering design accepted; case authoring will run in a separate compact turn.",
+                )
+            else:
+                event = self._event(
+                    llm_step,
+                    action.type,
+                    False,
+                    "Engineering design rejected by deterministic plan/evidence validation.",
+                    "\n".join(failures),
+                )
+            state.engineering_events.append(event)
+            self._emit_engineering_event(
+                progress_phase, event, step=progress_step, limit=progress_limit, state=state
+            )
+            return False
+
+        if isinstance(action, CaseAuthoringAction) and not isinstance(action, ExecuteCasePlanAction):
+            plan = self._draft_design_plan
+            if plan is None:
+                event = self._event(
+                    llm_step, action.type, False, "No Python-held staged EngineeringPlan exists for case authoring."
+                )
+                state.engineering_events.append(event)
+                self._emit_engineering_event(
+                    progress_phase, event, step=progress_step, limit=progress_limit, state=state
+                )
+                return False
+            data = action.model_dump(mode="python")
+            data["type"] = "execute_case_plan"
+            data["plan"] = plan.model_dump(mode="python")
+            try:
+                execution = ExecuteCasePlanAction.model_validate(data)
+            except ValueError as exc:
+                event = self._event(
+                    llm_step, action.type, False, f"Staged case authoring contract rejected: {exc}"
+                )
+                state.engineering_events.append(event)
+                self._emit_engineering_event(
+                    progress_phase, event, step=progress_step, limit=progress_limit, state=state
+                )
+                return False
+            self._draft_design_plan = None
+            self._draft_authoring_brief = ""
+            return self._execute_case_plan(
+                state,
+                execution,
+                llm_step=llm_step,
+                progress_phase=progress_phase,
+                progress_step=progress_step,
+                progress_limit=progress_limit,
                 native_execution=native_execution,
             )
 
@@ -2757,7 +2849,11 @@ class CFDEngineeringAgent:
                 "refines_gap_id": gap.refines_gap_id,
                 "requested_gap_id": requested_gap_id,
                 "protocol_notes": list(protocol_notes),
+                "capability_queries": list(gap.capability_queries),
+                "reference_queries": list(gap.reference_queries),
                 "seen_ids": set(),
+                "ordered_seen_ids": [],
+                "last_new_ids": [],
                 "retrievals": 0,
                 "last_new_count": 0,
                 "status": "open",
@@ -2832,8 +2928,16 @@ class CFDEngineeringAgent:
             if not isinstance(seen_ids, set):
                 seen_ids = set(seen_ids)
                 entry["seen_ids"] = seen_ids
-            new_ids = sorted(set(found) - seen_ids)
+            new_ids = [evidence_id for evidence_id in found if evidence_id not in seen_ids]
             seen_ids.update(found)
+            ordered_seen = entry.setdefault("ordered_seen_ids", [])
+            if not isinstance(ordered_seen, list):
+                ordered_seen = list(ordered_seen)
+                entry["ordered_seen_ids"] = ordered_seen
+            for evidence_id in found:
+                if evidence_id not in ordered_seen:
+                    ordered_seen.append(evidence_id)
+            entry["last_new_ids"] = list(new_ids)
             new_observed_ids.update(new_ids)
             entry["retrievals"] = int(entry.get("retrievals", 0)) + 1
             entry["last_new_count"] = len(new_ids)
@@ -3761,6 +3865,16 @@ class CFDEngineeringAgent:
             return BlockMeshRepairTurn, BLOCK_MESH_REPAIR_SYSTEM_PROMPT, "block_mesh_repair"
         if phase == "prepare" and self._pending_execution_plan is not None:
             return RepairTurn, REPAIR_SYSTEM_PROMPT, "repair"
+        if phase == "prepare" and self.policy.staged_case_authoring:
+            if self._draft_design_plan is not None:
+                return CaseAuthoringTurn, CASE_AUTHORING_SYSTEM_PROMPT, "author_case"
+            if self._retrieval_cycles.get("prepare", 0) >= self.policy.max_prepare_retrieval_cycles:
+                return (
+                    PrepareDecisionDesignTurn,
+                    PREPARE_DECISION_DESIGN_SYSTEM_PROMPT,
+                    "prepare_design_decide",
+                )
+            return PrepareDesignTurn, PREPARE_DESIGN_SYSTEM_PROMPT, "prepare_design"
         if phase == "prepare" and self._retrieval_cycles.get("prepare", 0) >= self.policy.max_prepare_retrieval_cycles:
             return PrepareDecisionOnlyTurn, PREPARE_DECISION_ONLY_SYSTEM_PROMPT, "prepare_decide"
         return PrepareTurn, PREPARE_SYSTEM_PROMPT, "prepare"
@@ -3799,7 +3913,21 @@ class CFDEngineeringAgent:
         prompt_count = self._phase_prompt_counts.get(conversation_key, 0)
         plan_digest = state.engineering_plan.digest() if state.engineering_plan is not None else None
         manifest_digest = self.workspace.manifest_digest()
-        evidence_records = self._available_evidence_for_model(state)
+        evidence_total = len(self._observed_evidence_registry(state))
+        if self.policy.bounded_evidence_context:
+            if contract_phase == "author_case":
+                evidence_records = []
+            else:
+                evidence_limit = (
+                    self.policy.max_decide_model_evidence_items
+                    if contract_phase in {"prepare_design_decide", "prepare_decide"}
+                    else self.policy.max_prepare_model_evidence_items
+                )
+                evidence_records = self._bounded_evidence_for_model(
+                    state, phase=phase, max_items=evidence_limit
+                )
+        else:
+            evidence_records = self._available_evidence_for_model(state)
         case_files = [
             {"path": item.path, "sha256": item.sha256, "size_bytes": item.size_bytes}
             for item in self.workspace.file_seals()
@@ -3872,14 +4000,76 @@ class CFDEngineeringAgent:
             supports_stateful = "conversation_key" in inspect.signature(self.llm.generate).parameters
         except (TypeError, ValueError):
             supports_stateful = False
+        true_stateful_delta = bool(
+            supports_stateful and bool(getattr(self.llm, "store", False))
+        )
         use_delta = bool(
             self.policy.state_delta_context
             and prompt_count > 0
-            and contract_phase not in {"runtime_repair", "block_mesh_replan", "block_mesh_repair"}
+            and (true_stateful_delta or not self.policy.bounded_evidence_context)
+            and contract_phase not in {
+                "runtime_repair", "block_mesh_replan", "block_mesh_repair",
+                "prepare_design", "prepare_design_decide", "author_case",
+            }
         )
         previous_snapshot = self._phase_context_snapshots.get(conversation_key, {})
 
-        if contract_phase == "runtime_repair":
+        if contract_phase == "author_case":
+            if self._draft_design_plan is None:
+                raise RuntimeError("author_case contract requested without a staged EngineeringPlan")
+            payload: dict[str, object] = {
+                "state_mode": "staged_case_authoring",
+                "phase": phase,
+                "step": step,
+                "frozen_engineering_plan": self._draft_design_plan.model_dump(mode="json"),
+                "authoring_brief": self._draft_authoring_brief,
+                "environment_hint": self.tools.environment_snapshot(),
+                "tool_execution_contracts": self._mesh_tool_contracts(),
+                "current_case_files": case_files,
+                "bindings": bindings,
+                "budget": budget,
+            }
+            instruction = (
+                "Author the OpenFOAM case for the frozen EngineeringPlan. Return only author_case "
+                "with the required files and deterministic native validation pipeline; do not "
+                "repeat/revise the plan or retrieve more evidence:\n"
+            )
+        elif contract_phase in {"prepare_design", "prepare_design_decide"}:
+            payload = {
+                "state_mode": "bounded_engineering_design",
+                "phase": phase,
+                "step": step,
+                "confirmed_intake": confirmed_intake_definition(state),
+                "intake_sha256": state.intake_digest,
+                "engineering_assumption_policy": assumption_policy,
+                "evidence_retrieval_policy": retrieval_policy,
+                "environment_hint": self.tools.environment_snapshot(),
+                "capability_graph_hint": self.catalog.summary(),
+                "available_evidence": evidence_records,
+                "evidence_context": {
+                    "shown": len(evidence_records),
+                    "total_observed": evidence_total,
+                    "truncated": evidence_total > len(evidence_records),
+                },
+                "evidence_gap_status": self._compact_evidence_gap_status(phase),
+                "recent_observations": self._recent_observations_for_model(state)[-4:],
+                "bindings": bindings,
+                "budget": budget,
+            }
+            if contract_phase == "prepare_design":
+                instruction = (
+                    "Choose the next compact engineering-design action. Use gather_evidence only "
+                    "for a genuinely missing OpenFOAM tool/version fact. Otherwise return design_case "
+                    "with the complete EngineeringPlan but no case files. Delegated ordinary values "
+                    "belong in engineering_defaults:\n"
+                )
+            else:
+                instruction = (
+                    "Retrieval is closed. Use this bounded evidence capsule to return design_case "
+                    "with the complete EngineeringPlan, or block only for a genuine unsupported "
+                    "tool/version requirement. Do not author case files yet:\n"
+                )
+        elif contract_phase == "runtime_repair":
             payload: dict[str, object] = {
                 "state_mode": "runtime_failure_slice",
                 "phase": phase,
@@ -4161,6 +4351,9 @@ class CFDEngineeringAgent:
         metrics["compacted"] = prompt_result.compacted
         metrics["deltaContext"] = use_delta
         metrics["contractPhase"] = contract_phase
+        metrics["evidenceShown"] = len(evidence_records)
+        metrics["evidenceObserved"] = evidence_total
+        metrics["stagedAuthoring"] = bool(self.policy.staged_case_authoring)
         model_name = getattr(self.llm, "model", None)
         if isinstance(model_name, str) and model_name:
             metrics["model"] = model_name
@@ -4383,6 +4576,140 @@ class CFDEngineeringAgent:
             records.append(item)
         return records
 
+    def _bounded_evidence_for_model(
+        self,
+        state: CFDState,
+        *,
+        phase: str,
+        max_items: int,
+    ) -> list[dict[str, object]]:
+        """Compile a relevance/recency-bounded evidence capsule for one LLM turn.
+
+        Durable evidence remains complete in CFDState.  The model sees only evidence
+        associated with the active/recent gaps plus a small fallback tail.  This
+        prevents successful retrieval from making every later prompt monotonically
+        larger.
+        """
+
+        if max_items <= 0:
+            return []
+        registry = self._observed_evidence_registry(state)
+        details = self._evidence_details_for_model(state)
+        selected: list[str] = []
+        selected_set: set[str] = set()
+
+        def add(evidence_id: object) -> None:
+            if not isinstance(evidence_id, str):
+                return
+            if evidence_id not in registry or evidence_id in selected_set:
+                return
+            selected.append(evidence_id)
+            selected_set.add(evidence_id)
+
+        ledger_items = list(self._evidence_gap_ledger.get(phase, {}).items())
+        active = [
+            item for item in ledger_items
+            if str(item[1].get("status", "")) not in {"superseded"}
+        ]
+        # Keep evidence from at most the four most recent active gaps.  Per-gap caps
+        # preserve breadth when one broad query returns dozens of weak matches.
+        for _gap_id, entry in reversed(active[-4:]):
+            last_new = list(entry.get("last_new_ids", []) or [])
+            ordered_seen = list(entry.get("ordered_seen_ids", []) or [])
+            for evidence_id in last_new[:4]:
+                add(evidence_id)
+            for evidence_id in ordered_seen[:6]:
+                add(evidence_id)
+
+        # Before generic fallback, surface intake-relevant providers that Python
+        # deterministically pre-observed from the frozen intake.
+        for provider_id in self._targeted_capability_provider_ids(state):
+            add(canonical_engineering_evidence_id("capability", provider_id))
+
+        # If the gap ledger is sparse, preserve the most recent deterministic records.
+        for record in reversed(state.engineering_evidence_records[-6:]):
+            for observed in record.observed_evidence[:6]:
+                add(observed.evidence_id)
+
+        # Finally retain a tiny provider/reference tail so a no-gap design still has
+        # deterministic capability anchors.
+        for evidence in registry.values():
+            if evidence.kind == "capability":
+                add(evidence.evidence_id)
+            if len(selected) >= max_items:
+                break
+        if len(selected) < max_items:
+            for evidence_id in reversed(list(registry)):
+                add(evidence_id)
+                if len(selected) >= max_items:
+                    break
+
+        projected: list[dict[str, object]] = []
+        for evidence_id in selected[:max_items]:
+            evidence = registry[evidence_id]
+            item: dict[str, object] = {
+                "evidence_id": evidence.evidence_id,
+                "kind": evidence.kind,
+                "reference": compact_text(evidence.reference, 320),
+                "summary": compact_text(evidence.summary, 520),
+            }
+            detail = details.get(evidence_id)
+            if detail is not None:
+                encoded = json.dumps(
+                    detail, ensure_ascii=False, separators=(",", ":"), default=str
+                )
+                item["detail"] = compact_text(
+                    encoded, self.policy.max_model_evidence_detail_chars
+                )
+            projected.append(item)
+        return projected
+
+    def _compact_evidence_gap_status(
+        self, phase: str, *, max_gaps: int = 6
+    ) -> list[dict[str, object]]:
+        status = self._evidence_gap_status(phase)
+        if len(status) <= max_gaps:
+            return status
+        return status[-max_gaps:]
+
+    def _intake_capability_queries(self, state: CFDState) -> list[str]:
+        """Derive a tiny deterministic capability-search shortlist from frozen intake facts.
+
+        This does not choose a solver/model.  It only pre-observes likely relevant
+        documented/installed providers so the Agent can often decide without an extra
+        gather_evidence round trip.
+        """
+
+        if state.intake is None:
+            return []
+        preferred = ("classification", "physics", "objective", "material", "motion")
+        queries: list[str] = []
+        for prefix in preferred:
+            for fact in state.intake.facts:
+                if fact.category != prefix:
+                    continue
+                text = str(fact.value).replace("_", " ").strip()
+                if len(text) < 3 or text in queries:
+                    continue
+                queries.append(text[:160])
+                if len(queries) >= 5:
+                    return queries
+        return queries
+
+    def _targeted_capability_provider_ids(self, state: CFDState) -> list[str]:
+        ids: list[str] = []
+        seen: set[str] = set()
+        for query in self._intake_capability_queries(state):
+            for item in self.catalog.search(query, limit=4):
+                provider_id = str(item.get("provider_id", ""))
+                if not provider_id or provider_id in seen:
+                    continue
+                seen.add(provider_id)
+                ids.append(provider_id)
+                if len(ids) >= 12:
+                    return ids
+        return ids
+
     def _observed_evidence_registry(
         self,
         state: CFDState,
@@ -4404,6 +4731,21 @@ class CFDEngineeringAgent:
                     summary=(
                         f"Preloaded capability provider {provider_id}: {item.get('name', '')} "
                         f"({item.get('provider_type', '')}, OpenFOAM {item.get('openfoam_version', '')})"
+                    )[:1200],
+                )
+                registry[evidence.evidence_id] = evidence
+
+            for provider_id in self._targeted_capability_provider_ids(state):
+                provider = self.catalog.provider(provider_id)
+                if provider is None:
+                    continue
+                evidence = ObservedEngineeringEvidence(
+                    evidence_id=canonical_engineering_evidence_id("capability", provider_id),
+                    kind="capability",
+                    reference=provider_id,
+                    summary=(
+                        f"Targeted intake capability provider {provider_id}: {provider.name} "
+                        f"({provider.provider_type}, OpenFOAM {provider.openfoam_version})"
                     )[:1200],
                 )
                 registry[evidence.evidence_id] = evidence

@@ -859,18 +859,23 @@ EngineeringSequenceMemberAction = (
 )
 
 
-class ExecuteCasePlanAction(_EngineeringModel):
-    """High-level case construction + deterministic validation/execution plan.
+class DesignCaseAction(_EngineeringModel):
+    """Stage-1 engineering decision without case-file authoring payload.
 
-    One LLM turn may author the complete case bundle and the predictable native
-    pipeline. Python still executes every file write and native validation through
-    the existing sandbox, budgets, safety gates and stop-on-failure semantics.
-    On success the supplied EngineeringPlan is finalized and sealed in the same
-    LLM turn; on the first failure execution stops and the native evidence is
-    returned to the next LLM turn for repair.
+    The Agent chooses the CFD design and evidence bindings here.  Python freezes this
+    draft for the next authoring turn, so the model does not need to emit the large
+    OpenFOAM file DSL and the EngineeringPlan in the same structured response.
     """
 
-    type: Literal["execute_case_plan"]
+    type: Literal["design_case"]
+    plan: EngineeringPlan
+    authoring_brief: str = Field(default="", max_length=1200)
+
+
+class CaseAuthoringAction(_EngineeringModel):
+    """Stage-2 case bundle authored against a Python-held EngineeringPlan."""
+
+    type: Literal["author_case"]
     goal: str = Field(min_length=1, max_length=1000)
     files: list[CaseBundleFile] = Field(default_factory=list, max_length=40)
     typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=40)
@@ -880,18 +885,17 @@ class ExecuteCasePlanAction(_EngineeringModel):
     mesh_commands: list[str] = Field(default_factory=list, max_length=12)
     native_pipeline: list[NativeOpenFOAMCommand] = Field(default_factory=list, max_length=20)
     required_case_files: list[str] = Field(min_length=1, max_length=80)
-    plan: EngineeringPlan
     rationale: str = Field(default="", max_length=200)
 
     @model_validator(mode="after")
-    def validate_execution_plan(self) -> Self:
+    def validate_case_authoring(self) -> Self:
         if not self.files and not self.typed_dictionaries and self.block_mesh is None:
-            raise ValueError("execute_case_plan requires at least one raw, typed, or blockMesh case file.")
+            raise ValueError("author_case requires at least one raw, typed, or blockMesh case file.")
         paths = [item.path for item in self.files] + [item.path for item in self.typed_dictionaries]
         if self.block_mesh is not None:
             paths.append(self.block_mesh.path)
         if len(paths) != len(set(paths)):
-            raise ValueError("execute_case_plan contains duplicate file paths.")
+            raise ValueError("author_case contains duplicate file paths.")
 
         for collection_name, paths_to_check in (
             ("validate_dictionaries", self.validate_dictionaries),
@@ -899,7 +903,7 @@ class ExecuteCasePlanAction(_EngineeringModel):
             ("required_case_files", self.required_case_files),
         ):
             if len(paths_to_check) != len(set(paths_to_check)):
-                raise ValueError(f"execute_case_plan contains duplicate {collection_name} paths.")
+                raise ValueError(f"author_case contains duplicate {collection_name} paths.")
             for path in paths_to_check:
                 if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
                     raise ValueError(f"Unsafe {collection_name} path: {path}")
@@ -912,12 +916,23 @@ class ExecuteCasePlanAction(_EngineeringModel):
         if self.native_pipeline and self.mesh_commands:
             raise ValueError("Use either native_pipeline or legacy mesh_commands, not both.")
         if not self.native_pipeline and not self.mesh_commands:
-            raise ValueError("execute_case_plan requires a native validation pipeline.")
+            raise ValueError("author_case requires a native validation pipeline.")
         pipeline_names = [item.command for item in self.native_pipeline] if self.native_pipeline else list(self.mesh_commands)
         if pipeline_names.count("checkMesh") != 1:
-            raise ValueError("execute_case_plan requires exactly one checkMesh validation command.")
+            raise ValueError("author_case requires exactly one checkMesh validation command.")
         if pipeline_names[-1] != "checkMesh":
-            raise ValueError("execute_case_plan native pipeline must end with checkMesh.")
+            raise ValueError("author_case native pipeline must end with checkMesh.")
+        return self
+
+
+class ExecuteCasePlanAction(CaseAuthoringAction):
+    """Legacy one-shot case construction contract retained for compatibility/repair."""
+
+    type: Literal["execute_case_plan"]
+    plan: EngineeringPlan
+
+    @model_validator(mode="after")
+    def validate_execution_plan(self) -> Self:
         if set(self.required_case_files) != set(self.plan.required_case_files):
             raise ValueError(
                 "execute_case_plan required_case_files must exactly match plan.required_case_files."
@@ -1151,6 +1166,51 @@ def _route_action_payload(value: Any, routes: dict[str, type[_EngineeringModel]]
 
 # Phase-specific compact contracts. Agent identity remains one CFDEngineeringAgent; only
 # permissions/schema vary by phase so repeated calls do not carry the giant all-phase union.
+# v3.6 staged preparation keeps the large file-authoring DSL out of the design/evidence turn.
+PrepareDesignAction = GatherEvidenceAction | ReadCaseFileAction | DesignCaseAction | BlockAction
+class PrepareDesignTurn(_EngineeringModel):
+    action: PrepareDesignAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {
+                "gather_evidence": GatherEvidenceAction,
+                "read_case_file": ReadCaseFileAction,
+                "design_case": DesignCaseAction,
+                "block": BlockAction,
+            },
+        )
+
+
+PrepareDecisionDesignAction = DesignCaseAction | BlockAction
+class PrepareDecisionDesignTurn(_EngineeringModel):
+    action: PrepareDecisionDesignAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {"design_case": DesignCaseAction, "block": BlockAction},
+        )
+
+
+CaseAuthoringTurnAction = CaseAuthoringAction | BlockAction
+class CaseAuthoringTurn(_EngineeringModel):
+    action: CaseAuthoringTurnAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {"author_case": CaseAuthoringAction, "block": BlockAction},
+        )
+
+
 PrepareAction = GatherEvidenceAction | ReadCaseFileAction | ExecuteCasePlanAction | BlockAction
 class PrepareTurn(_EngineeringModel):
     action: PrepareAction

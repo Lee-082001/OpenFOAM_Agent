@@ -235,6 +235,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Progress-aware LLM-turn extension chunk size (default: 6 turns).",
     )
     parser.add_argument(
+        "--engineering-context-chars",
+        type=int,
+        default=18_000,
+        help=(
+            "Hard character cap for each Engineering model prompt before schema/system text "
+            "(default: 18000). Smaller values reduce Codex/Claude context cost."
+        ),
+    )
+    parser.add_argument(
+        "--engineering-evidence-items",
+        type=int,
+        default=10,
+        help=(
+            "Maximum evidence descriptors projected into normal Engineering turns "
+            "(default: 10; decision-only turns may use two additional items)."
+        ),
+    )
+    parser.add_argument(
+        "--engineering-retrieval-cycles",
+        type=int,
+        default=2,
+        help="Maximum prepare evidence-retrieval cycles before forced design decision (default: 2).",
+    )
+    parser.add_argument(
         "--finalization-steps",
         type=int,
         default=2,
@@ -378,6 +402,12 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--codex-timeout must be >= 1.")
     if args.claude_timeout < 1:
         parser.error("--claude-timeout must be >= 1.")
+    if args.engineering_context_chars < 8_000:
+        parser.error("--engineering-context-chars must be >= 8000.")
+    if not 1 <= args.engineering_evidence_items <= 40:
+        parser.error("--engineering-evidence-items must be between 1 and 40.")
+    if not 1 <= args.engineering_retrieval_cycles <= 6:
+        parser.error("--engineering-retrieval-cycles must be between 1 and 6.")
     positive_budget_fields = {
         "--engineering-steps": args.engineering_steps,
         "--engineering-hard-cap": args.engineering_hard_cap,
@@ -663,6 +693,14 @@ def _policies_from_args(
         preload_capabilities=True,
         compact_phase_schemas=True,
         state_delta_context=True,
+        bounded_evidence_context=True,
+        staged_case_authoring=True,
+        max_prepare_retrieval_cycles=args.engineering_retrieval_cycles,
+        max_preloaded_capabilities=12,
+        max_model_prompt_chars=args.engineering_context_chars,
+        max_prepare_model_evidence_items=args.engineering_evidence_items,
+        max_decide_model_evidence_items=min(40, args.engineering_evidence_items + 2),
+        max_model_evidence_detail_chars=600,
     )
     runtime = RuntimePolicy(max_attempts=args.runtime_repair_cycles + 1)
     postprocessing = PostProcessingPolicy(
@@ -733,6 +771,10 @@ def build_report(
             "engineering_soft_limit": engineering_policy.max_agent_steps,
             "engineering_hard_limit": engineering_policy.hard_max_agent_steps,
             "engineering_tool_action_limit": engineering_policy.max_tool_actions,
+            "engineering_model_prompt_char_limit": engineering_policy.max_model_prompt_chars,
+            "engineering_model_evidence_items": engineering_policy.max_prepare_model_evidence_items,
+            "engineering_prepare_retrieval_cycle_limit": engineering_policy.max_prepare_retrieval_cycles,
+            "engineering_staged_case_authoring": engineering_policy.staged_case_authoring,
             "engineering_extensions": [
                 item.model_dump(mode="json") for item in state.engineering_budget_extensions
             ],

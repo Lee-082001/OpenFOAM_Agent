@@ -117,3 +117,4 @@ tests/test_v310_block_mesh_topology_contract.py
 tests/test_v320_engineering_evidence_assumption_contract.py
 tests/test_v330_openfoam13_14_native_discovery.py
 tests/test_v340_evidence_gap_ledger_authority.py
+tests/test_v350_evidence_projection_contract.py

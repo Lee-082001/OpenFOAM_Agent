@@ -9,6 +9,11 @@ Evidence retrieval now separates durable cardinality from UI/audit projection ca
 Structured evidence storage is separated from event logging, delegated engineering defaults receive explicit provenance, and repeated evidence-infrastructure failures deterministically close retrieval instead of consuming LLM turns. See `V3_2_CHANGES.md`.
 # OpenFOAM Agent v3.0.0 changes
 
+## v3.6.0 — Bounded staged Engineering context
+
+Engineering prompts now use a relevance/recency-bounded evidence capsule instead of replaying the entire evidence registry. Stateless Codex/Claude-style calls do not claim previous-response delta reuse. Initial Engineering is split into `design_case` (plan only) and `author_case` (OpenFOAM files/pipeline only), while Python freezes the accepted plan between stages and reuses the existing transactional executor. Production defaults cap Engineering prompt payload at 18k characters, expose 10/12 evidence items, and close prepare retrieval after two cycles. See `V3_6_CHANGES.md`.
+
+
 ## Semantic PreSolve foundation
 
 v3.0 replaces literal set-difference boundary validation with a reusable OpenFOAM semantic interpretation layer under `src/openfoam_agent/verification/foam_semantics/`.

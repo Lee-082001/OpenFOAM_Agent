@@ -129,6 +129,8 @@ def describe_action(action: object) -> str:
         "search_capabilities": "capability graph 조회",
         "search_references": "OpenFOAM reference 탐색",
         "gather_evidence": "evidence gap batch 조회",
+        "design_case": "engineering design 확정",
+        "author_case": "OpenFOAM case authoring",
         "repair_runtime_case": "runtime case delta repair",
         "revise_mesh_strategy": "meshing strategy revision",
         "read_reference": "OpenFOAM reference 읽기",
@@ -166,6 +168,11 @@ def _safe_action_target(action: object) -> str:
     if action_type == "run_mesh_command":
         return str(getattr(action, "command", ""))
     if action_type == "sequence":
+        return _compact(str(getattr(action, "goal", "")), 120)
+    if action_type == "design_case":
+        plan = getattr(action, "plan", None)
+        return _compact(str(getattr(plan, "case_name", "")), 100)
+    if action_type == "author_case":
         return _compact(str(getattr(action, "goal", "")), 120)
     if action_type in {"search_capabilities", "search_references", "search_postprocess_references"}:
         return _compact(str(getattr(action, "query", "")), 100)
