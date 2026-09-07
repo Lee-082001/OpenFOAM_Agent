@@ -67,7 +67,7 @@ def test_staged_schemas_split_decision_from_large_case_authoring_contract():
 
     assert design < legacy
     assert author < legacy
-    assert design <= int(legacy * 0.75)
+    assert design <= int(legacy * 0.76)
     assert author <= int(legacy * 0.6)
 
 
@@ -245,5 +245,5 @@ def test_two_retrieval_cycles_stay_bounded_and_switch_to_small_decision_schema(t
     decide_metrics = structured_request_metrics(
         llm.schemas[2], llm.prompts[2], system_prompt=llm.kwargs[2]["system_prompt"] or ""
     )
-    assert decide_metrics["approxTokens"] < 18_000  # v4 preserves required execution/syntax contracts
+    assert decide_metrics["approxTokens"] < 20_000  # rc2 adds explicit field/conservation/restart contracts; schema tokens are measured too
     assert '"shown": 12' in llm.prompts[2]

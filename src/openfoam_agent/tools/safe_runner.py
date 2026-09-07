@@ -119,6 +119,7 @@ class SafeRunner:
         self._mpi_ranks = 1
         self._mpi_launcher: str | None = None
         self.process_observer = None
+        self.isolation = None
         self._base_env = dict(os.environ if base_env is None else base_env)
         self.trusted_executable_roots = self._resolve_trusted_roots(
             trusted_executable_roots
@@ -188,11 +189,40 @@ class SafeRunner:
             actual_command = [str(launcher), "-np", str(self._mpi_ranks), *actual_command]
         if os.name != "posix" and (self.resource_limits.cpu_seconds or self.resource_limits.memory_bytes):
             raise UnsafeCommandError("Requested OS resource limits are unsupported on this platform.")
-        row = self.budget.reserve(command, effect)
-        return self._run_streaming(
-            actual_command, logical_command=command, cwd=resolved_cwd, timeout=timeout,
-            env=env, echo_output=stream_output, output_callback=output_callback, record=row,
-        )
+        from openfoam_agent.tools.linux_isolation import workspace_execution_lock, bounded_tree_bytes, IsolationUnavailable
+        root = self.workspace_root or resolved_cwd
+        if root is None:
+            raise UnsafeCommandError("A bounded workspace is required for native execution.")
+        with workspace_execution_lock(root):
+            # Multiple runner instances must not use stale in-memory process budgets.
+            if self.budget.ledger_path and self.budget.ledger_path.exists():
+                fresh = json.loads(self.budget.ledger_path.read_text())["records"]
+                if fresh != self.budget.records:
+                    raise UnsafeCommandError("Process ledger changed; reload/reconcile before executing.")
+            if any(row.get("status") in {"running", "spawn_intent"} for row in self.budget.records):
+                raise UnsafeCommandError("An earlier subprocess has uncertain completion; no automatic replay.")
+            if bounded_tree_bytes(root) > self.resource_limits.max_case_bytes:
+                raise UnsafeCommandError("Aggregate workspace byte quota exceeded before spawn.")
+            spent_wall = sum(row.get("wall_seconds", 0) for row in self.budget.records)
+            spent_cpu = sum((row.get("aggregate_cpu_seconds") or 0) for row in self.budget.records)
+            if spent_wall >= self.resource_limits.total_wall_seconds:
+                raise UnsafeCommandError("Cumulative native wall budget exhausted.")
+            if self.resource_limits.total_cpu_seconds is not None and spent_cpu >= self.resource_limits.total_cpu_seconds:
+                raise UnsafeCommandError("Cumulative native CPU budget exhausted.")
+            if self.resource_limits.total_cpu_seconds is not None and any(row.get("pid") and row.get("aggregate_cpu_seconds") is None for row in self.budget.records):
+                raise UnsafeCommandError("Prior native CPU accounting is unknown; a cumulative guarantee cannot be invented on resume.")
+            if self.resource_limits.total_cpu_seconds is not None and self.isolation is None:
+                raise UnsafeCommandError("Aggregate CPU accounting requires the strict cgroup isolation backend.")
+            if sum(row.get("output_bytes", 0) for row in self.budget.records) >= self.resource_limits.max_total_output_bytes:
+                raise UnsafeCommandError("Cumulative native output budget exhausted.")
+            if self.isolation is not None:
+                self.isolation.preflight()
+            row = self.budget.reserve(command, effect)
+            return self._run_streaming(
+                actual_command, logical_command=command, cwd=resolved_cwd,
+                timeout=min(timeout, self.resource_limits.total_wall_seconds-spent_wall),
+                env=env, echo_output=stream_output, output_callback=output_callback, record=row,
+            )
 
     @contextmanager
     def approved_execution(self, context: ExecutionContext):
@@ -414,8 +444,23 @@ class SafeRunner:
         partial_line = ""
         limits = self.resource_limits
         guard = Path(__file__).with_name("exec_guard.py")
+        aggregate_metrics = {}
+        cgroup = None
+        if self.isolation is not None:
+            try:
+                cgroup = self.isolation.start(limits)
+                command = self.isolation.command(command, cwd, env)
+            except BaseException as exc:
+                if self.isolation.active is not None:
+                    self.isolation.finish()
+                self.budget.update(record, status="isolation_unavailable", error=str(exc))
+                raise
         guarded = [sys.executable, str(guard), json.dumps({"cpu_seconds": limits.cpu_seconds,
-                   "memory_bytes": limits.memory_bytes, "file_bytes": limits.max_case_bytes}), *command]
+                   "memory_bytes": limits.memory_bytes if self.isolation is None else None,
+                   "file_bytes": limits.max_case_bytes, "cgroup": cgroup}), *command]
+        spent_cpu = sum((row.get("aggregate_cpu_seconds") or 0) for row in self.budget.records)
+        spent_output = sum(row.get("output_bytes", 0) for row in self.budget.records)
+        next_quota_check = started
         proc = None
         reader = None
         handle = None
@@ -427,7 +472,7 @@ class SafeRunner:
             proc = subprocess.Popen(guarded, cwd=str(cwd) if cwd else None,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=dict(env),
                 start_new_session=(os.name == "posix"), bufsize=0)
-            self.budget.update(record, pid=proc.pid, status="running")
+            self.budget.update(record, pid=proc.pid, status="running", cgroup_path=cgroup)
             if self.process_observer is not None:
                 self.process_observer("running", record)
             assert proc.stdout is not None
@@ -456,6 +501,17 @@ class SafeRunner:
             killed_at = None
             while not eof or proc.poll() is None:
                 now = time.monotonic()
+                if now >= next_quota_check and killed_at is None:
+                    from openfoam_agent.tools.linux_isolation import bounded_tree_bytes
+                    next_quota_check = now + 0.1
+                    if bounded_tree_bytes(self.workspace_root or cwd) > limits.max_case_bytes:
+                        termination = "workspace_quota"; self._terminate_group(proc); killed_at = now
+                    if self.isolation is not None:
+                        metrics = self.isolation.metrics()
+                        if metrics.get("oom_kill", 0):
+                            termination = "aggregate_memory_limit"; self._terminate_group(proc); killed_at = now
+                        elif limits.total_cpu_seconds is not None and spent_cpu + metrics["cpu_seconds"] >= limits.total_cpu_seconds:
+                            termination = "aggregate_cpu_limit"; self._terminate_group(proc); killed_at = now
                 if now - started >= timeout and killed_at is None:
                     termination = "timeout"; self._terminate_group(proc); killed_at = now
                 if killed_at is not None and now - killed_at > 2.0:
@@ -467,7 +523,7 @@ class SafeRunner:
                 if chunk is None:
                     eof = True
                     continue
-                remaining = limits.max_output_bytes - total
+                remaining = min(limits.max_output_bytes - total, limits.max_total_output_bytes - spent_output - total)
                 if len(chunk) > remaining:
                     chunk = chunk[:max(0, remaining)]
                     termination = "output_limit"
@@ -527,9 +583,23 @@ class SafeRunner:
                 proc.stdout.close()
             if handle is not None:
                 handle.close()
+            if self.isolation is not None and self.isolation.active is not None:
+                aggregate_metrics = self.isolation.finish()
+                if aggregate_metrics.get("oom_kill", 0):
+                    termination = "aggregate_memory_limit"
+                if limits.total_cpu_seconds is not None and spent_cpu + aggregate_metrics.get("cpu_seconds", 0) >= limits.total_cpu_seconds:
+                    termination = "aggregate_cpu_limit"
         elapsed = time.monotonic() - started
+        from openfoam_agent.tools.linux_isolation import bounded_tree_bytes
+        if bounded_tree_bytes(self.workspace_root or cwd) > limits.max_case_bytes:
+            termination = "workspace_quota"
+        if termination in {"workspace_quota","aggregate_cpu_limit","aggregate_memory_limit"}:
+            code = 125
         self.budget.update(record, status=termination, return_code=code, wall_seconds=elapsed,
-                           log_path=str(log_path), log_sha256=digest.hexdigest(), output_bytes=total)
+                           log_path=str(log_path), log_sha256=digest.hexdigest(), output_bytes=total,
+                           aggregate_cpu_seconds=aggregate_metrics.get("cpu_seconds", 0) if self.isolation else None,
+                           isolation_metrics=aggregate_metrics,
+                           isolation_mode="strict_linux" if self.isolation else "local_no_os_isolation")
         if self.process_observer is not None:
             self.process_observer("finished", record)
         return ToolResult(success=code == 0 and termination == "exited", command=logical_command,

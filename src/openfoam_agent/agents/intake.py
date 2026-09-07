@@ -275,10 +275,27 @@ def confirmed_intake_definition(state: CFDState) -> dict[str, object]:
         if fact.category == "context":
             continue
         facts.append(fact.model_dump(mode="json", exclude={"evidence"}))
+    # The semantic projection omits conversational context, but derived facts
+    # must not acquire dangling provenance dependencies. Carry only referenced
+    # frozen context facts separately; raw conversation turns stay excluded.
+    by_id = {fact.id: fact for fact in state.intake.facts}
+    selected = {fact["id"] for fact in facts}
+    todo = [dependency for fact in facts for dependency in fact.get("depends_on", [])]
+    dependencies = set()
+    while todo:
+        dependency = todo.pop()
+        if dependency in selected or dependency in dependencies:
+            continue
+        if dependency not in by_id:
+            raise ValueError("Frozen intake has an unknown provenance dependency: " + dependency)
+        dependencies.add(dependency)
+        todo.extend(by_id[dependency].depends_on)
     return {
         "semantic_contract_version": state.intake.semantic_contract_version,
         "title": state.intake.title,
         "facts": facts,
+        "provenance_dependencies": [fact.model_dump(mode="json", exclude={"evidence"})
+            for fact in state.intake.facts if fact.id in dependencies],
         "status": state.intake.status,
     }
 

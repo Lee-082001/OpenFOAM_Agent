@@ -1,3 +1,16 @@
+# Release notice: OpenFOAM Agent 4.0.1
+
+This candidate extends rc1 with bounded file-task authoring, shared syntax-evidence
+gates, a mesh dependency DAG, opt-in strict Linux isolation/aggregate budgets,
+preserved-output local MPI restart and saved-field physical/conservation checks.
+See [RC2 operations](docs/V4_0_1_OPERATIONS.md) and
+[the Korean RC2 implementation/verification report](docs/V4_0_1_REPORT_KO.md).
+Native OpenFOAM/MPI, actual strict Linux isolation and live models were **not**
+qualified in this release. Historical sections and verification records below
+retain their original version scope; they are not RC2 native-test evidence.
+
+---
+
 # OpenFOAM Agent 4.0.0rc1
 
 이번 배포는 **native CFD 검증 전 후보판**입니다. [한국어 구현·검증 보고서](docs/V4_IMPLEMENTATION_VERIFICATION_KO.md)와 [33개 감사 대조표](docs/V4_AUDIT_33.json)를 먼저 확인하세요.

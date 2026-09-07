@@ -96,7 +96,7 @@ def test_gather_evidence_large_batch_keeps_full_store_and_bounded_event(tmp_path
         for i in range(100)
     ]
     agent.catalog.search = lambda query, limit=8: providers[: min(len(providers), max(limit, 100))]
-    state = make_state()
+    state = make_state(syntax_evidence=False)
     agent._evidence_gap_ledger["prepare"] = {}
     agent._retrieval_cycles["prepare"] = 0
     action = GatherEvidenceAction(

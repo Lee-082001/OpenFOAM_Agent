@@ -108,6 +108,8 @@ def time_statistics(series):
 
 
 def analyze_quantity(workspace, spec: QuantityOfInterest):
+    if spec.native_field is not None:
+        return analyze_native_quantity(workspace,spec)
     source = workspace.resolve_result_path(spec.source_path, must_exist=True)
     rows, digest = scalar_rows(source)
     series, cleanup = clean_series(rows, time_column=spec.time_column, value_column=spec.value_column)
@@ -141,10 +143,25 @@ def analyze_quantity(workspace, spec: QuantityOfInterest):
              stats["time_mean"] if op in {"difference", "balance"} else stats[op])
     bounds = ((spec.expected_min is None or value >= spec.expected_min) and
               (spec.expected_max is None or value <= spec.expected_max))
-    return {"id": spec.id, "quantity": spec.quantity, "region": spec.region, "selection": spec.selection,
+    return {"id": spec.id, "quantity_contract": spec.model_dump(mode="json"), "quantity": spec.quantity, "region": spec.region, "selection": spec.selection,
         "operation": op, "value": value, "unit": spec.unit+"*s" if op == "integral" else spec.unit,
         "samples_used": len(series), "start_time": series[0][0], "end_time": series[-1][0],
         "sources": sources, "statistics": stats, "cleanup": cleanup, "arithmetic_verified": True,
         "declared_bounds_satisfied": bounds, "physical_semantics_verified": False,
         "limitations": ["Scalar columns, units, region and selection are declared by the approved plan; their physical meaning is not automatically verified.",
                         "Time integration uses piecewise-linear interpolation; no extrapolation."]}
+
+
+def analyze_native_quantity(workspace,spec):
+    from .native_fields import reduce_field
+    series,sources,semantic=reduce_field(workspace,spec)
+    series=window(series,spec.start_time,spec.end_time)
+    if len(series)<spec.minimum_samples:raise ValueError("Insufficient physical observation samples.")
+    stats=time_statistics(series) if len(series)>1 else {}
+    op=spec.operation
+    value=(min(y for t,y in series) if op=="minimum" else max(y for t,y in series) if op=="maximum" else series[-1][1] if op=="last" else stats[op])
+    return {"id":spec.id,"quantity_contract":spec.model_dump(mode="json"),"quantity":spec.quantity,"region":spec.region,"selection":spec.selection,"operation":op,"value":value,
+        "unit":spec.unit+"*s" if op=="integral" else spec.unit,"sources":sources,"statistics":stats,"samples_used":len(series),
+        "start_time":series[0][0],"end_time":series[-1][0],"arithmetic_verified":True,"physical_semantics_verified":True,
+        "semantics":semantic,"declared_bounds_satisfied":(spec.expected_min is None or value>=spec.expected_min) and (spec.expected_max is None or value<=spec.expected_max),
+        "limitations":["Dimensions, region/patch, geometric reduction and saved values are verified; solver physics and quantity naming are not independently certified."]}

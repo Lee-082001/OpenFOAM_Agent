@@ -115,6 +115,8 @@ def _dynamic_state() -> CFDState:
     request = UserRequest(prompt=prompt, exploratory_completion_authorized=True)
     state = CFDState(run_id="hard-dynamic-run", user_request=request, intake=intake)
     state.confirm_intake()
+    from conftest import register_authoring_syntax
+    register_authoring_syntax(state)
     return state
 
 

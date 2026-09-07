@@ -26,6 +26,9 @@ from openfoam_agent.progress import (
 from openfoam_agent.postprocessing.analysis import analyze_force_coefficients
 from openfoam_agent.postprocessing.quantities import analyze_quantity
 from openfoam_agent.postprocessing.context import resolve_postprocess_context
+from openfoam_agent.schemas.postprocessing import AnalyzeConservationAction
+from openfoam_agent.postprocessing.conservation import analyze_conservation
+from openfoam_agent.postprocessing.native_fields import check_sources_current
 from openfoam_agent.schemas.postprocessing import (
     AnalyzeForceCoefficientsAction,
     AnalyzeQuantityAction,
@@ -248,6 +251,8 @@ class CFDPostProcessingAgent:
                     rationale="",
                 )
             )
+        for check_id in plan.conservation_ids:
+            actions.append(AnalyzeConservationAction(type="analyze_conservation",check_id=check_id))
         for quantity_id in plan.quantity_ids:
             actions.append(AnalyzeQuantityAction(type="analyze_quantity", quantity_id=quantity_id))
         for index, action in enumerate(actions, start=1):
@@ -393,6 +398,14 @@ class CFDPostProcessingAgent:
                 analysis = analyze_quantity(self.workspace, specs[action.quantity_id])
                 state.quantity_analyses = [item for item in state.quantity_analyses if item["id"] != action.quantity_id] + [analysis]
                 return self._event(step, action.type, True, "Deterministic scalar quantity analysis completed.", _json(analysis)), False
+
+            if isinstance(action, AnalyzeConservationAction):
+                specs = {item.id:item for item in state.engineering_plan.conservation_checks}
+                if action.check_id not in specs:
+                    raise ValueError("Conservation check is not in the approved engineering plan.")
+                analysis = analyze_conservation(self.workspace,specs[action.check_id],state.engineering_plan)
+                state.conservation_analyses = [item for item in state.conservation_analyses if item["id"] != action.check_id]+[analysis]
+                return self._event(step,action.type,analysis["conservation_verified"],"Saved-field conservation check completed.",_json(analysis)),False
 
             if isinstance(action, AnalyzeForceCoefficientsAction):
                 coefficient_text = self.workspace.read_result_text(
@@ -560,6 +573,8 @@ class CFDPostProcessingAgent:
                 "do not claim unobserved numeric results:\n"
             )
         payload["quantities_of_interest"] = [item.model_dump(mode="json") for item in plan.quantities_of_interest]
+        payload["conservation_checks"] = [item.model_dump(mode="json") for item in plan.conservation_checks]
+        payload["physical_analysis_contract"] = "Use approved native_field quantities to verify actual scalar dimensions/mesh/patch reductions. Use conservation_ids for closed-region saved-field balances. Table labels alone never verify physical meaning."
         payload["execution_contract"] = plan.execution.model_dump(mode="json") if plan.execution else {"solver": plan.solver}
         payload["region_layouts"] = [item.model_dump(mode="json") for item in plan.region_layouts]
         prompt_result = build_bounded_json_prompt(
@@ -634,7 +649,26 @@ class CFDPostProcessingAgent:
         if force_analysis is not None:
             merged.extend(force_analysis.limitations)
         quantities = self._validated_quantity_analyses(state, merged)
-        if not artifacts and not quantities:
+        missing_quantities = {q.id for q in state.engineering_plan.quantities_of_interest}-{q["id"] for q in quantities}
+        quantities_failed = bool(missing_quantities) or any(not q.get("declared_bounds_satisfied",False) for q in quantities)
+        if missing_quantities: merged.append("Requested quantities are missing or stale: "+", ".join(sorted(missing_quantities)))
+        if quantities_failed: merged.append("Requested quantity verification is incomplete or outside declared bounds.")
+        conservation = []
+        for analysis in state.conservation_analyses:
+            try:
+                spec=next((c for c in state.engineering_plan.conservation_checks if c.id==analysis["id"]),None)
+                if spec is None or spec.model_dump(mode="json")!=analysis.get("equation_contract"):
+                    raise ValueError("Conservation plan changed after analysis.")
+                check_sources_current(self.workspace,analysis["sources"])
+                conservation.append(analysis)
+            except (ValueError,OSError) as exc:
+                merged.append(str(exc))
+        missing_checks = {c.id for c in state.engineering_plan.conservation_checks}-{c["id"] for c in conservation}
+        balance_failed = bool(missing_checks) or any(not c["conservation_verified"] for c in conservation)
+        required_verification_failed = balance_failed or quantities_failed
+        if missing_checks: merged.append("Requested conservation checks are missing or stale: "+", ".join(sorted(missing_checks)))
+        if balance_failed: merged.append("Requested conservation verification is incomplete or failed.")
+        if not artifacts and not quantities and not conservation:
             merged.append("No post-processing artifact was verified in native result directories.")
         if force_analysis is not None and any(item.kind == "vorticity_field" for item in artifacts):
             summary = "Verified vorticity and force-coefficient evidence were collected from native OpenFOAM outputs."
@@ -643,18 +677,21 @@ class CFDPostProcessingAgent:
         elif artifacts:
             summary = "Verified post-processing artifacts were collected from native OpenFOAM outputs."
         elif quantities:
-            summary = "Scalar quantity arithmetic and source hashes were verified; physical column semantics remain declared, not verified."
+            summary = "Quantity evidence was analyzed; each result reports whether native physical semantics or only table arithmetic were verified."
+        elif conservation:
+            summary = "Saved-field conservation equations were checked; inspect per-interval and interface verdicts."
         else:
             summary = "The solver completed, but no post-processing artifact could be verified."
         return PostProcessingReport(
-            success=bool(artifacts or force_analysis is not None or quantities),
+            success=bool(artifacts or force_analysis is not None or quantities or conservation) and not required_verification_failed,
             summary=summary,
-            scientific_confidence=scientific_confidence,
-            review_reasons=list(review_reasons or []),
+            scientific_confidence="low" if required_verification_failed else scientific_confidence,
+            review_reasons=list(review_reasons or []) + (["Required conservation/quantity verification is incomplete or failed."] if required_verification_failed else []),
             recommended_human_checks=list(recommended_human_checks or []),
             artifacts=artifacts,
             force_analysis=force_analysis,
             quantity_analyses=quantities,
+            conservation_analyses=conservation,
             limitations=_dedupe(merged),
             actions_executed=len(state.postprocessing_events) + 1,
             native_commands_executed=self._native_count(state),
@@ -664,12 +701,10 @@ class CFDPostProcessingAgent:
         valid = []
         for analysis in state.quantity_analyses:
             try:
-                for source in analysis["sources"]:
-                    path = self.workspace.resolve_result_path(source["path"], must_exist=True)
-                    with path.open("rb") as stream:
-                        digest = hashlib.file_digest(stream, "sha256").hexdigest()
-                    if digest != source["sha256"]:
-                        raise ValueError("Quantity source changed after analysis.")
+                spec=next((q for q in state.engineering_plan.quantities_of_interest if q.id==analysis["id"]),None)
+                if spec is None or spec.model_dump(mode="json")!=analysis.get("quantity_contract"):
+                    raise ValueError("Quantity plan changed after analysis.")
+                check_sources_current(self.workspace,analysis["sources"])
                 valid.append(analysis)
             except (OSError, ValueError) as exc:
                 limitations.append(str(exc))

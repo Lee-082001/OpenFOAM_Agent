@@ -13,6 +13,11 @@ from openfoam_agent.verification.foam_semantics import parse_top_level_assignmen
 def completion_contract(plan, workspace):
     if plan.completion is not None:
         contract = plan.completion
+        restart = plan.execution.parallel.restart if plan.execution is not None else None
+        if restart is not None:
+            from .restart import verify_restart
+            verify_restart(workspace, plan)
+            contract = contract.model_copy(update={"start_time": float(restart.time_name)})
         if contract.mode == "transient":
             path = workspace.resolve_case_path("system/controlDict", must_exist=True)
             entries, complete = parse_top_level_assignments(path.read_text(encoding="utf-8"))

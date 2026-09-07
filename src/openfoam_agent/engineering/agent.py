@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from openfoam_agent.contracts.evidence import implementation_evidence_pack, evidence_coverage_failures
+from openfoam_agent.contracts.evidence import implementation_evidence_pack, evidence_coverage_failures, require_authoring_evidence, authoring_prompt_evidence
+from openfoam_agent.engineering.authoring_tasks import compile_tasks, accept_task
+from openfoam_agent.llm.context import ContextBudgetError
 from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
 from openfoam_agent.tools.execution_policy import (
     deny_unapproved_engineering_solve, command_effect, ExecutionPolicyError,
@@ -179,6 +181,7 @@ class EngineeringPolicy:
     state_delta_context: bool = False
     bounded_evidence_context: bool = False
     staged_case_authoring: bool = False
+    isolation_policy_path: str | None = None
 
     def __post_init__(self) -> None:
         integer_fields = {
@@ -254,11 +257,19 @@ class CFDEngineeringAgent:
         if isinstance(runner, SafeRunner):
             runner.budget.limit = self.policy.max_native_commands
             runner.resource_limits.max_native_processes = self.policy.max_native_commands
+            if self.policy.isolation_policy_path:
+                from openfoam_agent.tools.linux_isolation import LinuxIsolation, LinuxIsolationPolicy
+                operator = LinuxIsolationPolicy.read(self.policy.isolation_policy_path)
+                operator.limits.max_native_processes = min(operator.limits.max_native_processes, self.policy.max_native_commands)
+                runner.resource_limits = operator.limits
+                runner.budget.limit = operator.limits.max_native_processes
+                runner.isolation = LinuxIsolation(operator, runner.workspace_root)
         self.progress = progress or NullProgressReporter()
         self._checkmesh_mesh_manifest: str | None = None
         self._presolve_case_manifest: str | None = None
         self._presolve_required_case_files: tuple[str, ...] | None = None
         self._pending_execution_plan: EngineeringPlan | None = None
+        self._authoring_task_queue = None
         self._draft_design_plan: EngineeringPlan | None = None
         self._draft_authoring_brief: str = ""
         self._pending_candidate_execution: ExecuteCasePlanAction | None = None
@@ -282,6 +293,7 @@ class CFDEngineeringAgent:
         if not resumed:
             self._evidence_gap_ledger["prepare"] = {}
             self._draft_design_plan = None
+            self._authoring_task_queue = None
             self._draft_authoring_brief = ""
             self._retrieval_cycles["prepare"] = 0
             self._evidence_retrieval_disabled.pop("prepare", None)
@@ -608,6 +620,7 @@ class CFDEngineeringAgent:
             failures.extend(self._validate_engineering_defaults(action.plan, state))
             valid = not failures
             if valid:
+                self._authoring_task_queue = None
                 self._draft_design_plan = action.plan
                 self._draft_authoring_brief = action.authoring_brief
                 self._mark_evidence_gaps_satisfied("prepare")
@@ -646,7 +659,20 @@ class CFDEngineeringAgent:
             data["type"] = "execute_case_plan"
             data["plan"] = plan.model_dump(mode="python")
             try:
-                execution = ExecuteCasePlanAction.model_validate(data)
+                if self._authoring_task_queue is not None:
+                    from copy import deepcopy
+                    candidate_queue = deepcopy(self._authoring_task_queue)
+                    execution = accept_task(candidate_queue, action, plan)
+                    self._authoring_task_queue = candidate_queue
+                    if execution is None:
+                        state.engineering_events.append(self._event(llm_step, action.type, True,
+                            "Authoring partition validated and checkpointed; no case mutation/native execution yet."))
+                        self.checkpoint(state, "authoring-partition-accepted")
+                        return False
+                else:
+                    if action.task_id is not None or action.defer_native:
+                        raise ValueError("No controller-issued authoring task is pending.")
+                    execution = ExecuteCasePlanAction.model_validate(data)
             except ValueError as exc:
                 event = self._event(
                     llm_step, action.type, False, f"Staged case authoring contract rejected: {exc}"
@@ -657,6 +683,7 @@ class CFDEngineeringAgent:
                 )
                 return False
             self._draft_design_plan = None
+            self._authoring_task_queue = None
             self._draft_authoring_brief = ""
             return self._execute_case_plan(
                 state,
@@ -1072,6 +1099,10 @@ class CFDEngineeringAgent:
         # repair cascade.
         candidate_bundle = {path: content for path, content in rendered_files}
         bundle_failures = self.workspace.validate_candidate_bundle(candidate_bundle)
+        try:
+            require_authoring_evidence(state, execution.plan, candidate_bundle)
+        except ValueError as exc:
+            bundle_failures.append(str(exc))
 
         # v3.0.2: solve-critical OpenFOAM files must satisfy the IOobject-facing
         # FoamFile contract before *any* candidate file is committed. This closes the
@@ -1958,11 +1989,28 @@ class CFDEngineeringAgent:
         if isinstance(runner, SafeRunner):
             runner.process_observer = lambda phase, record: self.checkpoint(state, f"native-{phase}")
 
-    def restore_checkpoint(self):
+    def restore_checkpoint(self, *, reconcile_parallel_restart=False):
         from openfoam_agent.workflow.checkpoint import CheckpointStore
-        state = CheckpointStore(self).load()
+        state = CheckpointStore(self).load(reconcile_parallel_restart=reconcile_parallel_restart)
         self.bind_checkpoint(state)
         return state
+
+    def _invalidate_mesh_dependencies(self, state):
+        if state is None:
+            return
+        from openfoam_agent.contracts.regions import region_mesh_digest
+        stale = [name for name, old in state.region_mesh_manifests.items()
+                 if region_mesh_digest(self.workspace, name) != old]
+        if stale:
+            for name in stale:
+                state.region_mesh_evidence.pop(name, None)
+                state.region_mesh_manifests.pop(name, None)
+            state.mesh_evidence = None
+            state.case_seal = None
+            state.solve_approved = False
+            state.execution_approval = None
+            self._checkmesh_mesh_manifest = None
+            self._presolve_case_manifest = None
 
     def _record_region_mesh(self, state, evidence, arguments):
         region = ""
@@ -3034,6 +3082,7 @@ class CFDEngineeringAgent:
                     excerpt = ""
                 if excerpt:
                     record["content_excerpt"] = excerpt
+                    record["target_case_files"] = list(gap.target_case_files)
 
             for evidence_id, record in found.items():
                 if record["kind"] != "openfoam_reference":
@@ -3392,7 +3441,7 @@ class CFDEngineeringAgent:
                 payload_ref = (
                     self._store_evidence_payload(
                         state, phase=phase, step=step, action_type=action.type,
-                        payload={"reference": action.reference, "content": text, "read_metadata": getattr(self.references, "last_read_metadata", {})},
+                        payload={"reference": action.reference, "content": text, "target_case_files": action.target_case_files, "read_metadata": getattr(self.references, "last_read_metadata", {})},
                         observed_evidence=observed,
                     )
                     if state is not None else None
@@ -3422,6 +3471,11 @@ class CFDEngineeringAgent:
                 text = self.workspace.read_text(action.path)
                 return self._event(step, action.type, True, f"Read {action.path}.", text)
 
+            if isinstance(action, (WriteCaseFileAction, PatchCaseFileAction)):
+                path = action.patch.path if isinstance(action, PatchCaseFileAction) else action.path
+                plan = self._pending_execution_plan or self._draft_design_plan or (state.engineering_plan if state else None)
+                require_authoring_evidence(state, plan, [path], evidence_ids=action.evidence_ids)
+
             if isinstance(action, WriteCaseFileAction):
                 if action.path.startswith("postprocessConfig/"):
                     return self._event(
@@ -3445,6 +3499,7 @@ class CFDEngineeringAgent:
                         )
                 mesh_affecting = self.workspace.is_mesh_affecting_path(action.path)
                 digest = self.workspace.write_text(action.path, action.content)
+                self._invalidate_mesh_dependencies(state)
                 if action.path == "system/blockMeshDict":
                     # Generic text writes have no trustworthy structured topology representation.
                     # Higher-level block_mesh actions restore this registry after the write succeeds.
@@ -3480,6 +3535,7 @@ class CFDEngineeringAgent:
                         )
                 mesh_affecting = self.workspace.is_mesh_affecting_path(patch.path)
                 digest = self.workspace.patch_text_once(patch.path, patch.old, patch.new)
+                self._invalidate_mesh_dependencies(state)
                 if patch.path == "system/blockMeshDict":
                     self._structured_block_mesh = None
                 self._presolve_case_manifest = None
@@ -3510,6 +3566,7 @@ class CFDEngineeringAgent:
                         )
                 mesh_affecting = self.workspace.is_mesh_affecting_path(action.path)
                 self.workspace.delete(action.path)
+                self._invalidate_mesh_dependencies(state)
                 if action.path == "system/blockMeshDict":
                     self._structured_block_mesh = None
                 self._presolve_case_manifest = None
@@ -3631,7 +3688,11 @@ class CFDEngineeringAgent:
                 if invocation.command != "checkMesh":
                     self._presolve_case_manifest = None
                     self._presolve_required_case_files = None
-                if command_effect(invocation.command, invocation.arguments) in {"mesh", "decomposition"}:
+                if command_effect(invocation.command, invocation.arguments) in {"mesh", "decomposition", "write", "initialization"}:
+                    from openfoam_agent.contracts.mesh_dependencies import MeshDependencyGraph
+                    MeshDependencyGraph(self.workspace).record_native(invocation.command, invocation.arguments,
+                        self._pending_execution_plan or (state.engineering_plan if state else None))
+                    self._invalidate_mesh_dependencies(state)
                     self._checkmesh_mesh_manifest = None
                     if state is not None:
                         state.mesh_evidence = None
@@ -3729,6 +3790,11 @@ class CFDEngineeringAgent:
                     )
 
                 result = self.tools.run_mesh_command(action.command, self.workspace.case_dir)
+                if command_effect(action.command, []) in {"mesh", "decomposition", "initialization", "write"}:
+                    from openfoam_agent.contracts.mesh_dependencies import MeshDependencyGraph
+                    MeshDependencyGraph(self.workspace).record_native(action.command, [],
+                        self._pending_execution_plan or (state.engineering_plan if state else None))
+                    self._invalidate_mesh_dependencies(state)
                 if action.command != "checkMesh":
                     self._presolve_case_manifest = None
                     self._presolve_required_case_files = None
@@ -4182,7 +4248,7 @@ class CFDEngineeringAgent:
                 "step": step,
                 "frozen_engineering_plan": self._draft_design_plan.model_dump(mode="json"),
                 "confirmed_intake": confirmed_intake_definition(state),
-                "implementation_evidence_pack": implementation_evidence_pack(state, self._draft_design_plan),
+                "implementation_evidence_pack": implementation_evidence_pack(state, self._draft_design_plan, max_chars=None),
                 "assets": state.assets,
                 "authoring_brief": self._draft_authoring_brief,
                 "environment_hint": self.tools.environment_snapshot(),
@@ -4482,6 +4548,13 @@ class CFDEngineeringAgent:
             else:
                 instruction = "Finalize or block from the validated state:\n"
 
+        if contract_phase not in {"author_case", "prepare_design", "prepare_design_decide"}:
+            evidence_plan = self._pending_execution_plan or self._draft_design_plan or state.engineering_plan
+            if self._pending_candidate_execution is not None:
+                evidence_plan = self._pending_candidate_execution.plan
+            payload["implementation_evidence_pack"] = authoring_prompt_evidence(state,evidence_plan)
+            instruction += " Every case mutation requires explicit file bindings to observed syntax. Use target_case_files on reference reads or evidence_ids on primitive writes/patches; search summaries alone do not authorize writes. "
+
         if contract_phase in {"replan", "block_mesh_replan"}:
             payload["retained_candidate"] = self._candidate_repair_context()
 
@@ -4503,11 +4576,17 @@ class CFDEngineeringAgent:
         ):
             payload["structured_block_mesh"] = self._structured_block_mesh.model_dump(mode="json")
 
-        prompt_result = build_bounded_json_prompt(
-            instruction,
-            payload,
-            max_chars=self.policy.max_model_prompt_chars,
-        )
+        if contract_phase == "author_case" and self._authoring_task_queue is not None:
+            payload = self._authoring_task_queue["tasks"][self._authoring_task_queue["cursor"]]
+        try:
+            prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=self.policy.max_model_prompt_chars)
+        except ContextBudgetError:
+            if contract_phase != "author_case":
+                raise
+            self._authoring_task_queue = compile_tasks(instruction, payload, self.policy.max_model_prompt_chars)
+            self.checkpoint(state, "authoring-partition-created")
+            payload = self._authoring_task_queue["tasks"][0]
+            prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=self.policy.max_model_prompt_chars)
         metrics = structured_request_metrics(
             schema,
             prompt_result.prompt,

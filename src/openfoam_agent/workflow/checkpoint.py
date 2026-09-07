@@ -18,7 +18,7 @@ class CheckpointError(RuntimeError):
 
 _SNAPSHOT_FIELDS = (
     "_checkmesh_mesh_manifest", "_presolve_case_manifest", "_presolve_required_case_files",
-    "_pending_execution_plan", "_draft_design_plan", "_draft_authoring_brief",
+    "_pending_execution_plan", "_draft_design_plan", "_draft_authoring_brief", "_authoring_task_queue",
     "_pending_candidate_execution", "_pending_candidate_failed_paths", "_structured_block_mesh",
     "_phase_prompt_counts", "_phase_context_snapshots", "_evidence_gap_ledger",
     "_retrieval_cycles", "_evidence_retrieval_disabled", "_active_transaction",
@@ -45,7 +45,7 @@ def environment_fingerprint(tools):
     snapshot = tools.environment_snapshot()
     runner = getattr(tools, "runner", None)
     if isinstance(runner, SafeRunner):
-        snapshot = {"installation": snapshot, "native_environment": runner.sanitized_environment(),
+        snapshot = {"installation": snapshot, "isolation": runner.isolation.fingerprint() if runner.isolation else None, "native_environment": runner.sanitized_environment(),
                     "executable_metadata": []}
         for item in runner.installation.executables:
             try:
@@ -74,6 +74,7 @@ class CheckpointStore:
         payload = {"schema_version": self.SCHEMA_VERSION, "reason": reason, "saved_unix": time.time(),
                    "workspace": str(workspace.root), "environment_sha256": environment_fingerprint(self.agent.tools),
                    "inputs": [x.model_dump(mode="json") for x in workspace.execution_file_seals()],
+                   "mesh_graph_sha256": hashlib.sha256((workspace.root / "mesh-dependencies.json").read_bytes()).hexdigest() if (workspace.root / "mesh-dependencies.json").exists() else None,
                    "state": state.model_dump(mode="json")}
         envelope = {"payload": payload, "sha256": _digest(payload)}
         temporary = self.path.with_suffix(".tmp")
@@ -92,7 +93,7 @@ class CheckpointStore:
                 os.close(fd)
         return self.path
 
-    def load(self):
+    def load(self, *, reconcile_parallel_restart=False):
         if self.path.is_symlink() or not self.path.is_file():
             raise CheckpointError("A regular checkpoint.json is required.")
         if self.path.stat().st_size > 64_000_000:
@@ -108,6 +109,10 @@ class CheckpointStore:
             raise CheckpointError("Checkpoint relocation requires an explicit fork; paths will not be guessed.")
         if payload.get("environment_sha256") != environment_fingerprint(self.agent.tools):
             raise CheckpointError("Native environment changed; evidence must be revalidated before resume.")
+        graph = workspace.root / "mesh-dependencies.json"
+        graph_digest = hashlib.sha256(graph.read_bytes()).hexdigest() if graph.exists() else None
+        if graph_digest != payload.get("mesh_graph_sha256"):
+            raise CheckpointError("Mesh dependency graph changed since checkpoint.")
         state = CFDState.model_validate(payload["state"])
         if state.intake_confirmed:
             state.assert_confirmed_intake()
@@ -119,10 +124,52 @@ class CheckpointStore:
         snapshot = state.engineering_checkpoint
         if snapshot.get("_active_transaction"):
             raise CheckpointError("Interrupted multi-action transaction needs explicit reconciliation; no automatic replay.")
-        if state.pending_action and state.pending_action.get("status") != "completed":
+        if (workspace.root / "parallel-restart-intent.json").exists():
+            raise CheckpointError("Interrupted restart preparation journal exists; preserve and reconcile manually.")
+        pending_runtime = state.pending_action and state.pending_action.get("status") != "completed"
+        if pending_runtime and not (reconcile_parallel_restart and state.pending_action.get("kind") == "runtime"):
             raise CheckpointError("An action has uncertain completion; partial work is preserved, not replayed.")
         runner = getattr(self.agent.tools, "runner", None)
         records = runner.budget.records if isinstance(runner, SafeRunner) else state.native_process_records
+        if reconcile_parallel_restart:
+            if state.engineering_plan is None or state.engineering_plan.execution is None or state.engineering_plan.execution.parallel.mode != "local_mpi":
+                raise CheckpointError("Explicit process reconciliation is restricted to parallel restart.")
+            for row in records:
+                if row.get("status") not in {"running", "spawn_intent"}:
+                    continue
+                group_path = row.get("cgroup_path")
+                if group_path:
+                    runner_isolation = getattr(runner,"isolation",None)
+                    group = Path(group_path)
+                    if runner_isolation is None or group.parent.resolve()!=runner_isolation.parent or not group.name.startswith("openfoam-agent-"):
+                        raise CheckpointError("Untrusted or unavailable cgroup reconciliation context.")
+                    if group.exists():
+                        events=dict(line.split() for line in (group/"cgroup.events").read_text().splitlines())
+                        if events.get("populated")!="0":
+                            raise CheckpointError("Recorded cgroup still contains descendants; restart is refused.")
+                        metrics=dict(line.split() for line in (group/"cpu.stat").read_text().splitlines())
+                        row["aggregate_cpu_seconds"]=int(metrics["usage_usec"])/1_000_000
+                pid = row.get("pid")
+                if pid is None:
+                    raise CheckpointError("Missing native PID: completion remains uncertain; no replay is allowed.")
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    pass
+                except PermissionError as exc:
+                    raise CheckpointError("Cannot prove recorded native PID is gone.") from exc
+                else:
+                    raise CheckpointError("Recorded PID still exists (possibly reused); restart preparation is refused.")
+                # Process-group members may outlive the launcher.
+                if os.name == "posix":
+                    try: os.killpg(pid, 0)
+                    except ProcessLookupError: pass
+                    except PermissionError as exc: raise CheckpointError("Cannot prove old process group is gone.") from exc
+                    else: raise CheckpointError("Old process group still exists; no restart preparation.")
+                row["status"] = "interrupted_reconciled_for_explicit_restart"
+                row["reconciliation"] = "PID and process group absent; outputs still require snapshot validation"
+            if isinstance(runner, SafeRunner): runner.budget._persist()
+            state.native_process_records = _jsonable(records)
         if any(row.get("status") in {"running", "spawn_intent"} for row in records):
             raise CheckpointError("A recorded native process may be in flight; manual reconciliation required. No stale PID was killed.")
         if isinstance(runner, SafeRunner) and records != state.native_process_records:

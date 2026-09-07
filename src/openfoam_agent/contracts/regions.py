@@ -35,24 +35,8 @@ def region_layouts(plan=None, required_files: list[str] | None = None) -> list[R
 
 
 def region_mesh_digest(workspace, region: str) -> str:
-    import hashlib
-    import json
-    def relevant(path: str) -> bool:
-        if not workspace.is_mesh_affecting_path(path):
-            return False
-        parts = PurePosixPath(path).parts
-        # Shared geometry and root meshing controls affect every region.
-        if len(parts) > 2 and parts[0] in {"system", "constant"}:
-            if parts[1] in {"polyMesh", "triSurface", "geometry"} or PurePosixPath(path).suffix.lower() in {".stl", ".obj", ".emesh", ".vtk", ".vtp", ".off", ".nas", ".bdf"}:
-                return True
-            if parts[1] == region:
-                return True
-            if parts[0] == "system" and len(parts) == 2:
-                return True
-            return False
-        return True
-    data = [(x.path, x.sha256) for x in workspace.execution_file_seals() if relevant(x.path)]
-    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+    from .mesh_dependencies import MeshDependencyGraph
+    return MeshDependencyGraph(workspace).digest(region)
 
 
 def validate_design(plan, intake) -> list[str]:

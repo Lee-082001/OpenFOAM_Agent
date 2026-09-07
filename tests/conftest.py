@@ -18,6 +18,25 @@ ROOT = Path(__file__).resolve().parents[1]
 GRAPH = ROOT / "config" / "openfoam14_capability_graph.json"
 
 
+def register_authoring_syntax(state, paths=None):
+    """Observed fixture bytes and explicit target bindings for positive tests.
+
+    This supplies the newly required prerequisite; it does not patch/disable the
+    production mutation gate. Rejection tests use syntax_evidence=False.
+    """
+    from openfoam_agent.schemas.engineering import EngineeringEvidenceRecord
+    path=Path(__file__).parent/"fixtures"/"authoring_syntax.foam"
+    paths=paths or ["0/U","0/p","0/T","0/k","0/epsilon","0/omega","0/nut","0/pointDisplacement",
+        "constant/physicalProperties","constant/transportProperties","constant/momentumTransport",
+        "constant/turbulenceProperties","constant/dynamicMeshDict","constant/thermophysicalProperties",
+        "constant/fvModels","constant/fvConstraints","constant/g","system/controlDict","system/fvSchemes",
+        "system/fvSolution","system/blockMeshDict","system/snappyHexMeshDict","system/decomposeParDict",
+        "system/fvModels","system/fvConstraints","system/testDict","constant/triSurface/cylinder.stl"]
+    state.engineering_evidence_records.append(EngineeringEvidenceRecord(record_id="evrec_"+"a"*20,phase="prepare",
+        step=1,action_type="read_reference",payload={"reference":"test-fixture:authoring_syntax.foam",
+        "content":path.read_text(),"target_case_files":paths}))
+
+
 def make_intake(*, reynolds: str = "1000") -> CFDIntakeSpec:
     user_text = f"사각형 장애물 주위 vortex shedding Re={reynolds} 나머지는 탐색용으로 정해줘"
     return CFDIntakeSpec(
@@ -61,13 +80,15 @@ def make_intake(*, reynolds: str = "1000") -> CFDIntakeSpec:
     )
 
 
-def make_state(*, reynolds: str = "1000") -> CFDState:
+def make_state(*, reynolds: str = "1000", syntax_evidence: bool = True) -> CFDState:
     request = UserRequest(
         prompt=f"사각형 장애물 주위 vortex shedding Re={reynolds} 나머지는 탐색용으로 정해줘",
         exploratory_completion_authorized=True,
     )
     state = CFDState(run_id="test-run", user_request=request, intake=make_intake(reynolds=reynolds))
     state.confirm_intake()
+    if syntax_evidence:
+        register_authoring_syntax(state)
     return state
 
 

@@ -1,3 +1,14 @@
+# RC2 isolation scope
+
+Default local execution is **not** an OS sandbox. RC2 adds explicitly configured
+`--isolation-policy` strict Linux execution, with no unisolated fallback. Read
+[the operator prerequisites and qualification limits](docs/V4_0_1_OPERATIONS.md#strict-linux-isolation-explicit-operator-setup).
+The strict backend was unit-tested for policy/command construction and rejection,
+not actually qualified with Bubblewrap/cgroup kernel isolation in this environment.
+Do not use this candidate as a multi-tenant hostile-code execution service.
+
+---
+
 # v4.0.0rc1 security qualification notice
 
 The v4 native runner enforces command effects, explicit execution approvals, sealed inputs, direct subprocess budgets and bounded logs. These are application-level controls, **not an OS sandbox**. They do not isolate filesystem reads or networking. Use one agent process per workspace and only trusted native binaries.

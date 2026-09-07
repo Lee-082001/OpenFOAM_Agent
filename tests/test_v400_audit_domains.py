@@ -214,7 +214,7 @@ def test_a13_unresolved_physics_ambiguity_cannot_be_review_ready():
 def test_a14_read_syntax_is_projected_with_hash_not_just_search_summary(tmp_path,graph_path):
     refs=tmp_path/"refs";refs.mkdir();(refs/"controlDict").write_text("FoamFile { class dictionary; }\nendTime 1;\n")
     agent=checkpoint_agent(tmp_path/"work",graph_path);agent.references=OpenFOAMReferenceIndex({"tutorials":refs})
-    state=make_state();plan=make_plan(state.intake);plan.required_case_files=["system/controlDict"]
+    state=make_state(syntax_evidence=False);plan=make_plan(state.intake);plan.required_case_files=["system/controlDict"]
     eid=canonical_engineering_evidence_id("openfoam_reference","tutorials:controlDict")
     plan.implementation_evidence_bindings=[ImplementationEvidenceBinding(path="system/controlDict",evidence_ids=[eid])]
     with pytest.raises(ValueError): implementation_evidence_pack(state,plan)

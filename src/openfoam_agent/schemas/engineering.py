@@ -7,6 +7,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
+from openfoam_agent.contracts.models import ConservationCheck
 from openfoam_agent.contracts.models import (ImplementationEvidenceBinding, ParallelExecution, RegionCaseLayout, RegionInterface, CompletionContract, QuantityOfInterest)
 
 
@@ -403,6 +404,7 @@ class EngineeringPlan(_EngineeringModel):
     interfaces: list[RegionInterface] = Field(default_factory=list)
     completion: CompletionContract | None = None
     quantities_of_interest: list[QuantityOfInterest] = Field(default_factory=list)
+    conservation_checks: list[ConservationCheck] = Field(default_factory=list)
     implementation_evidence_bindings: list[ImplementationEvidenceBinding] = Field(default_factory=list)
     openfoam_distribution: Literal["foundation"] = "foundation"
     openfoam_version: str = Field(pattern=r"^(?:13|14)$")
@@ -535,6 +537,7 @@ class EvidenceGapRequest(_EngineeringModel):
     reference_queries: list[str] = Field(default_factory=list, max_length=3)
     reference_scope: Literal["all", "tutorials", "source", "etc", "modules"] = "all"
     read_top_reference_matches: int = Field(default=1, ge=0, le=2)
+    target_case_files: list[str] = Field(default_factory=list, max_length=80)
 
     @model_validator(mode="before")
     @classmethod
@@ -600,6 +603,7 @@ class GatherEvidenceAction(_EngineeringModel):
 
 
 class ReadReferenceAction(_EngineeringModel):
+    target_case_files: list[str] = Field(default_factory=list, max_length=80)
     type: Literal["read_reference"]
     reference: str = Field(min_length=1, max_length=1000)
     start_line: int = Field(default=1, ge=1, le=1_000_000)
@@ -620,6 +624,7 @@ class ReadCaseFileAction(_EngineeringModel):
 
 class WriteCaseFileAction(_EngineeringModel):
     type: Literal["write_case_file"]
+    evidence_ids: list[str] = Field(default_factory=list)
     path: str = Field(min_length=1, max_length=240)
     content: str = Field(min_length=1, max_length=1_000_000)
     rationale: str = Field(default="", max_length=200)
@@ -765,6 +770,7 @@ class CaseFilePatch(_EngineeringModel):
 
 class PatchCaseFileAction(_EngineeringModel):
     type: Literal["patch_case_file"]
+    evidence_ids: list[str] = Field(default_factory=list)
     patch: CaseFilePatch
 
 
@@ -883,9 +889,11 @@ class CaseAuthoringAction(_EngineeringModel):
     """Stage-2 case bundle authored against a Python-held EngineeringPlan."""
 
     type: Literal["author_case"]
+    task_id: str | None = None
+    defer_native: bool = False
     goal: str = Field(min_length=1, max_length=1000)
-    files: list[CaseBundleFile] = Field(default_factory=list, max_length=40)
-    typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=40)
+    files: list[CaseBundleFile] = Field(default_factory=list, max_length=80)
+    typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=80)
     block_mesh: TypedBlockMeshFile | None = None
     validate_dictionaries: list[str] = Field(default_factory=list, max_length=40)
     surface_checks: list[str] = Field(default_factory=list, max_length=16)
@@ -922,11 +930,27 @@ class CaseAuthoringAction(_EngineeringModel):
                 raise ValueError(f"Unsafe mesh command identifier: {command}")
         if self.native_pipeline and self.mesh_commands:
             raise ValueError("Use either native_pipeline or legacy mesh_commands, not both.")
+        if self.defer_native:
+            if self.type == "execute_case_plan" or not self.task_id:
+                raise ValueError("Deferred native work requires a controller-issued authoring task.")
+            if self.native_pipeline or self.mesh_commands:
+                raise ValueError("Intermediate authoring tasks cannot request native execution.")
+            return self
         if not self.native_pipeline and not self.mesh_commands:
             raise ValueError("author_case requires a native validation pipeline.")
         pipeline_names = [item.command for item in self.native_pipeline] if self.native_pipeline else list(self.mesh_commands)
-        if pipeline_names.count("checkMesh") != 1:
-            raise ValueError("author_case requires exactly one checkMesh validation command.")
+        if not self.native_pipeline and pipeline_names.count("checkMesh") != 1:
+            raise ValueError("Legacy author_case requires exactly one checkMesh validation command.")
+        if self.native_pipeline:
+            regions = []
+            for command in self.native_pipeline:
+                if command.command != "checkMesh": continue
+                args = command.arguments
+                region = args[args.index("-region")+1] if "-region" in args and args.index("-region")+1 < len(args) else ""
+                if region in regions:
+                    raise ValueError("author_case contains duplicate checkMesh validation for a region.")
+                regions.append(region)
+            if not regions: raise ValueError("author_case requires checkMesh region validation.")
         if pipeline_names[-1] != "checkMesh":
             raise ValueError("author_case native pipeline must end with checkMesh.")
         return self

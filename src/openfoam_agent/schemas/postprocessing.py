@@ -85,6 +85,7 @@ class PostProcessingReport(_PostModel):
     artifacts: list[PostProcessingArtifact] = Field(default_factory=list, max_length=200)
     force_analysis: ForceCoefficientAnalysis | None = None
     quantity_analyses: list[dict] = Field(default_factory=list)
+    conservation_analyses: list[dict] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list, max_length=50)
     actions_executed: int = Field(default=0, ge=0)
     native_commands_executed: int = Field(default=0, ge=0)
@@ -140,6 +141,12 @@ class AnalyzeQuantityAction(_PostModel):
     rationale: str = Field(default="", max_length=200)
 
 
+class AnalyzeConservationAction(_PostModel):
+    type: Literal["analyze_conservation"]
+    check_id: str = Field(min_length=1)
+    rationale: str = Field(default="", max_length=200)
+
+
 class AnalyzeForceCoefficientsAction(_PostModel):
     type: Literal["analyze_force_coefficients"]
     coefficient_path: str = Field(min_length=1, max_length=500)
@@ -175,6 +182,7 @@ class PostProcessingExecutionPlanAction(_PostModel):
     typed_configs: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=12)
     runs: list[PostProcessRunSpec] = Field(default_factory=list, max_length=12)
     quantity_ids: list[str] = Field(default_factory=list, max_length=32)
+    conservation_ids: list[str] = Field(default_factory=list, max_length=32)
     force_analyses: list[ForceAnalysisSpec] = Field(default_factory=list, max_length=8)
     summary: str = Field(min_length=1, max_length=1500)
     limitations: list[str] = Field(default_factory=list, max_length=30)
@@ -184,7 +192,7 @@ class PostProcessingExecutionPlanAction(_PostModel):
 
     @model_validator(mode="after")
     def validate_plan(self) -> Self:
-        if not (self.configs or self.typed_configs or self.runs or self.force_analyses or self.quantity_ids):
+        if not (self.configs or self.typed_configs or self.runs or self.force_analyses or self.quantity_ids or self.conservation_ids):
             raise ValueError("Post-processing execution plan must contain deterministic work.")
         paths = [x.path for x in self.configs] + [x.path for x in self.typed_configs]
         if len(paths) != len(set(paths)):
@@ -220,6 +228,7 @@ PostProcessingAction = (
     | ReadResultFileAction
     | AnalyzeForceCoefficientsAction
     | AnalyzeQuantityAction
+    | AnalyzeConservationAction
     | PostProcessingExecutionPlanAction
     | FinishPostProcessingAction
     | BlockPostProcessingAction

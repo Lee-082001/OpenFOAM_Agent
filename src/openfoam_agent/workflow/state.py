@@ -47,6 +47,7 @@ class CFDState(BaseModel):
     region_mesh_manifests: dict[str, str] = Field(default_factory=dict)
     assets: list[dict] = Field(default_factory=list)
     quantity_analyses: list[dict] = Field(default_factory=list)
+    conservation_analyses: list[dict] = Field(default_factory=list)
     parallel_evidence: dict | None = None
     result_output_evidence: list[dict] = Field(default_factory=list)
     engineering_checkpoint: dict = Field(default_factory=dict)

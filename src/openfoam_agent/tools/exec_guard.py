@@ -7,6 +7,13 @@ import sys
 
 def main() -> None:
     limits = json.loads(sys.argv[1])
+    if limits.get("cgroup"):
+        from pathlib import Path
+        (Path(limits["cgroup"]) / "cgroup.procs").write_text(str(os.getpid()))
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(38, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "Could not enforce no_new_privs")
     if os.name == "posix":
         import resource
         if limits.get("cpu_seconds"):

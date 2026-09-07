@@ -40,7 +40,7 @@ def _agent(tmp_path, graph_path) -> CFDEngineeringAgent:
 
 def test_large_evidence_payload_is_stored_outside_engineering_event(tmp_path, graph_path):
     agent = _agent(tmp_path, graph_path)
-    state = make_state()
+    state = make_state(syntax_evidence=False)
 
     def huge_search(query: str, limit: int = 8):
         del query

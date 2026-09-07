@@ -17,6 +17,22 @@ class ResourceLimits(Contract):
     max_output_bytes: int = Field(default=256 * 1024 * 1024, ge=1024)
     max_case_bytes: int = Field(default=2_000_000_000, ge=1024)
     max_ranks: int = Field(default=8, ge=1, le=256)
+    max_processes: int = Field(default=256, ge=2, le=65536)
+    cpu_cores: float = Field(default=8.0, gt=0, le=256, allow_inf_nan=False)
+    total_cpu_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    total_wall_seconds: float = Field(default=86400.0, gt=0, allow_inf_nan=False)
+    max_total_output_bytes: int = Field(default=1_000_000_000, ge=1024)
+
+
+class ParallelRestart(Contract):
+    time_name: str = Field(pattern=r"^(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$")
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def finite_time(self) -> Self:
+        if not math.isfinite(float(self.time_name)):
+            raise ValueError("Restart time must be finite.")
+        return self
 
 
 class ParallelExecution(Contract):
@@ -25,9 +41,12 @@ class ParallelExecution(Contract):
     launcher: Literal["mpirun", "mpiexec"] = "mpirun"
     decomposition_method: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
     reconstruct: bool = True
+    restart: ParallelRestart | None = None
 
     @model_validator(mode="after")
     def validate_mode(self) -> Self:
+        if self.mode == "serial" and self.restart is not None:
+            raise ValueError("Parallel restart cannot be attached to serial execution.")
         if self.mode == "serial" and self.ranks != 1:
             raise ValueError("Serial execution requires exactly one rank.")
         if self.mode == "local_mpi" and (self.ranks < 2 or not self.decomposition_method):
@@ -129,13 +148,72 @@ class CompletionContract(Contract):
         return self
 
 
+class NativeFieldReduction(Contract):
+    quantity_kind: Literal["temperature", "pressure", "density", "mass_flow", "volume_flow", "heat_rate", "mass", "energy"]
+    field: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
+    time_names: list[str] = Field(min_length=1, max_length=1000)
+    reduction: Literal["patch_sum", "area_integral", "area_mean", "volume_integral", "volume_mean", "cell_minimum", "cell_maximum"]
+    patches: list[str] = Field(default_factory=list, max_length=200)
+    dimensions: tuple[int, int, int, int, int, int, int]
+
+    @model_validator(mode="after")
+    def validate_observation(self) -> Self:
+        import re
+        if any(not re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", t) or not math.isfinite(float(t)) for t in self.time_names):
+            raise ValueError("Field observation requires literal finite time directory names.")
+        times = [float(t) for t in self.time_names]
+        if times != sorted(set(times)):
+            raise ValueError("Field observation times must be strictly increasing and unique.")
+        if len(self.patches) != len(set(self.patches)) or any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", p) for p in self.patches):
+            raise ValueError("Patch selections must be unique literal names, not regexes.")
+        surface = self.reduction in {"patch_sum", "area_integral", "area_mean"}
+        if surface != bool(self.patches):
+            raise ValueError("Surface reduction requires explicit patches; volume reduction uses the whole region.")
+        return self
+
+
+class RegionBalance(Contract):
+    region: str = Field(default="", pattern=r"^(?:[A-Za-z][A-Za-z0-9_.-]*)?$")
+    flux_field: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
+    storage_mode: Literal["steady", "density_field"]
+    storage_density_field: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
+    source_mode: Literal["zero", "density_field"]
+    source_density_field: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> Self:
+        if (self.storage_mode == "density_field") != bool(self.storage_density_field):
+            raise ValueError("Storage mode and density field must agree.")
+        if (self.source_mode == "density_field") != bool(self.source_density_field):
+            raise ValueError("Source mode and density field must agree.")
+        return self
+
+
+class ConservationCheck(Contract):
+    id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
+    kind: Literal["mass", "energy", "volume"]
+    regions: list[RegionBalance] = Field(min_length=1, max_length=30)
+    time_names: list[str] = Field(min_length=2, max_length=1000)
+    absolute_tolerance: float = Field(ge=0, allow_inf_nan=False)
+    relative_tolerance: float = Field(ge=0, le=1, allow_inf_nan=False)
+    check_interfaces: bool = True
+
+    @model_validator(mode="after")
+    def validate_balance(self) -> Self:
+        NativeFieldReduction(quantity_kind="temperature", field="probe", time_names=self.time_names, reduction="volume_mean", dimensions=(0,0,0,0,0,0,0))
+        if len({r.region for r in self.regions}) != len(self.regions):
+            raise ValueError("Conservation region names must be unique.")
+        return self
+
+
 class QuantityOfInterest(Contract):
     id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
     quantity: str = Field(min_length=1)
     region: str = ""
     selection: str = ""
     unit: str = Field(min_length=1)
-    source_path: str = Field(min_length=1)
+    source_path: str = ""
+    native_field: NativeFieldReduction | None = None
     time_column: int = Field(default=0, ge=0)
     value_column: int = Field(default=1, ge=0)
     operation: Literal["time_mean", "rms", "minimum", "maximum", "last", "integral", "difference", "balance"]
@@ -150,6 +228,10 @@ class QuantityOfInterest(Contract):
 
     @model_validator(mode="after")
     def validate_quantity_window(self) -> Self:
+        if self.native_field is None and not self.source_path:
+            raise ValueError("Scalar table source or native field observation is required.")
+        if self.native_field is not None and (self.source_path or self.operation in {"difference", "balance"} or self.other_source_path):
+            raise ValueError("Native field analysis must not ambiguously mix table sources or table-difference operations.")
         for v in (self.start_time, self.end_time, self.expected_min, self.expected_max):
             if v is not None and not math.isfinite(v):
                 raise ValueError("Quantity bounds must be finite.")

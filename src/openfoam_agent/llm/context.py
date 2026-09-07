@@ -255,7 +255,7 @@ _PROTECTED_KEYS = frozenset({
     "required_case_files", "required_files", "confirmed_fact_bindings", "confirmed_fact_ids",
     "execution", "execution_approval", "region_layouts", "interfaces", "geometry",
     "geometry_data", "implementation_evidence_pack", "bindings", "current_case_files",
-    "assets", "physical_quantities", "quantity_analyses", "quantities_of_interest", "execution_contract",
+    "authoring_task", "authoring_contract", "conservation_checks", "assets", "physical_quantities", "quantity_analyses", "quantities_of_interest", "execution_contract",
 })
 
 

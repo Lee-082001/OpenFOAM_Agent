@@ -99,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="OpenFOAM Agent v2: autonomous CFD engineering behind deterministic safety gates.",
     )
     parser.add_argument("prompt", nargs="?", help="One-shot CFD prompt.")
+    parser.add_argument("--prepare-parallel-restart", metavar="TIME_OR_LATEST", help="With --resume: preserve partial outputs and prepare an MPI restart without running it.")
+    parser.add_argument("--isolation-policy", type=Path, help="Operator-owned strict Linux sandbox/quota JSON; missing OS support refuses execution.")
     parser.add_argument("--resume", type=Path, help="Restore a checkpoint directory/file after integrity checks; /solve approval is not reused.")
     parser.add_argument("--geometry", action="append", default=[], help="Explicitly authorize a geometry input file (repeatable).")
     parser.add_argument("--data", action="append", default=[], help="Explicitly authorize a data/table input file (repeatable).")
@@ -337,6 +339,8 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
     prompt_sources = sum(value is not None for value in (args.prompt, args.prompt_option))
     if args.interactive and prompt_sources:
         parser.error("Choose either a one-shot prompt or --interactive, not both.")
+    if args.prepare_parallel_restart and (not args.resume or args.solve):
+        parser.error("--prepare-parallel-restart requires --resume and must not be combined with --solve; review before a fresh approval.")
     if args.resume and (prompt_sources or args.interactive or args.geometry or args.data or args.import_case):
         parser.error("--resume cannot be combined with a new prompt, --interactive, or new assets.")
     if not args.interactive and prompt_sources == 0 and not args.resume:
@@ -355,7 +359,7 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--solve requires --confirm-intake.")
     if args.solve and args.dry_run:
         parser.error("--solve cannot be combined with --dry-run.")
-    if args.backend == "rule-based-intake":
+    if not args.prepare_parallel_restart and args.backend == "rule-based-intake":
         role_model_flags = {
             "--model": args.model,
             "--intake-model": args.intake_model,
@@ -377,22 +381,22 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
                 "Autonomous engineering has no rule-based template fallback. "
                 "Use --backend openai/codex/claude with --confirm-api-calls, or --backend ollama."
             )
-    elif args.backend == "openai":
+    elif not args.prepare_parallel_restart and args.backend == "openai":
         if args.base_url:
             parser.error("--base-url is only valid with --backend ollama.")
         if not args.confirm_api_calls:
             parser.error("--backend openai requires --confirm-api-calls.")
-    elif args.backend == "codex":
+    elif not args.prepare_parallel_restart and args.backend == "codex":
         if args.base_url:
             parser.error("--base-url is only valid with --backend ollama.")
         if not args.confirm_api_calls:
             parser.error("--backend codex requires --confirm-api-calls because Codex is a cloud model backend.")
-    elif args.backend == "claude":
+    elif not args.prepare_parallel_restart and args.backend == "claude":
         if args.base_url:
             parser.error("--base-url is only valid with --backend ollama.")
         if not args.confirm_api_calls:
             parser.error("--backend claude requires --confirm-api-calls because Claude Code is a cloud model backend.")
-    elif args.backend == "ollama":
+    elif not args.prepare_parallel_restart and args.backend == "ollama":
         if args.confirm_api_calls:
             parser.error(
                 "--confirm-api-calls is for cloud OpenAI/Codex/Claude backends and is not used by Ollama."
@@ -704,6 +708,7 @@ def _policies_from_args(
         state_delta_context=True,
         bounded_evidence_context=True,
         staged_case_authoring=True,
+        isolation_policy_path=str(args.isolation_policy) if getattr(args, "isolation_policy", None) else None,
         max_prepare_retrieval_cycles=args.engineering_retrieval_cycles,
         max_preloaded_capabilities=12,
         max_model_prompt_chars=args.engineering_context_chars,
@@ -752,6 +757,13 @@ def build_report(
         "parallel_evidence": state.parallel_evidence,
         "result_output_evidence": state.result_output_evidence,
         "quantity_analyses": state.quantity_analyses,
+        "conservation_analyses": state.conservation_analyses,
+        "execution_isolation": {
+            "requested_mode": "strict_linux" if engineering_policy.isolation_policy_path else "local_no_os_isolation",
+            "observed_modes": sorted({r["isolation_mode"] for r in state.native_process_records if r.get("isolation_mode")}),
+            "native_results_observed": sum(bool(r.get("isolation_mode")) for r in state.native_process_records),
+            "requested_is_not_observed": True,
+        },
         "pending_action": state.pending_action,
         "native_process_records": state.native_process_records,
         "run_id": state.run_id,
@@ -1653,7 +1665,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     prompt = _validate_args(args, parser)
     try:
-        llm, backend, model = _build_llm(args)
+        if args.prepare_parallel_restart:
+            class NoModelForRestart:
+                model = "not-used"
+                def generate(self,*a,**k):
+                    raise RuntimeError("Restart preparation is controller-only; model use is forbidden.")
+            llm,backend,model = NoModelForRestart(),"controller-only","not-used"
+        else:
+            llm, backend, model = _build_llm(args)
     except LLMConfigurationError as exc:
         parser.error(str(exc))
     except Exception as exc:
@@ -1671,8 +1690,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 native_execution=not args.dry_run, engineering_policy=engineering_policy,
                 runtime_policy=runtime_policy, postprocessing_policy=postprocessing_policy,
                 postprocessing_enabled=not args.skip_postprocess, progress=_progress_from_args(args))
-            state = workflow.engineering.restore_checkpoint()
-            state = workflow.run(state)
+            state = workflow.engineering.restore_checkpoint(reconcile_parallel_restart=bool(args.prepare_parallel_restart))
+            if args.prepare_parallel_restart:
+                from openfoam_agent.runtime.restart import prepare_restart_state
+                state = prepare_restart_state(workflow.engineering, state, time_name=args.prepare_parallel_restart)
+            else:
+                state = workflow.run(state)
             if args.solve and state.current_state in SOLVE_APPROVAL_STATES:
                 from openfoam_agent.contracts.models import ResourceLimits
                 state.approve_solve(ResourceLimits(max_native_processes=engineering_policy.max_native_commands,

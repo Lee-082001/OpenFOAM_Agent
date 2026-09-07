@@ -24,7 +24,7 @@ def execution_document(plan: EngineeringPlan) -> dict[str, Any]:
 def physical_plan_document(plan: EngineeringPlan) -> dict[str, Any]:
     return {key: plan.model_dump(mode="json")[key] for key in (
         "confirmed_intake_sha256", "confirmed_fact_ids", "confirmed_fact_bindings", "temporal_behavior",
-        "motion_kind", "mesh_motion_requirement", "required_case_files", "region_layouts", "interfaces", "completion", "quantities_of_interest",
+        "motion_kind", "mesh_motion_requirement", "required_case_files", "region_layouts", "interfaces", "completion", "quantities_of_interest", "conservation_checks",
     )}
 
 
