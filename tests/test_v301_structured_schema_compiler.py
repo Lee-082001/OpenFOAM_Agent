@@ -123,7 +123,7 @@ def test_codex_client_writes_openai_strict_compiled_schema(monkeypatch):
         output_path = command[command.index("--output-last-message") + 1]
         with open(output_path, "w", encoding="utf-8") as handle:
             json.dump({"point": [1.0, 2.0, 3.0], "note": None}, handle)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout='{"type":"turn.completed"}\n', stderr="")
 
     monkeypatch.setattr(codex.subprocess, "run", fake_run)
     status = CodexCLIStatus(

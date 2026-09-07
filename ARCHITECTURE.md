@@ -1,3 +1,13 @@
+# v4.0.0rc1 contract changes
+
+Current v4 additions are organized under `contracts/`, `tools/execution_policy.py`, `tools/dictionary_policy.py`, `tools/assets.py`, `runtime/completion.py`, `runtime/parallel.py`, `workflow/checkpoint.py`, and `postprocessing/context.py` / `quantities.py`. Engineering remains the coordinator; its full decomposition is not complete.
+
+Approval covers execution topology, physical inputs, goals and resource limits. Regions, immutable assets, syntax evidence, process accounting and completion are checked across their relevant workflow boundaries. These connections have Python/mock and synthetic-process regression evidence, not end-to-end native CFD qualification.
+
+See `docs/V4_AUDIT_33.json` and `docs/V4_IMPLEMENTATION_VERIFICATION_KO.md` for exact implementation/test mapping. The following architecture describes the historical v3.6 and earlier design.
+
+---
+
 # OpenFOAM Agent v3.0 Architecture
 
 

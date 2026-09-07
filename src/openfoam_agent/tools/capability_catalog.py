@@ -6,6 +6,7 @@ from pathlib import Path
 from openfoam_agent.capabilities.graph import CapabilityGraph
 from openfoam_agent.schemas.capability import CapabilityEvidence, CapabilityProvider
 from openfoam_agent.schemas.installation import InstalledOpenFOAMIR
+from .references import normalize_query
 
 
 class CapabilityCatalog:
@@ -45,11 +46,7 @@ class CapabilityCatalog:
         return None
 
     def search(self, query: str, *, limit: int = 12) -> list[dict[str, object]]:
-        tokens = [
-            token
-            for token in re.findall(r"[A-Za-z0-9_.-]+", query.casefold())
-            if len(token) > 1
-        ]
+        tokens = normalize_query(query)
         candidates: list[tuple[int, str, dict[str, object]]] = []
         for provider in self.all_providers():
             haystack = " ".join(
@@ -61,7 +58,7 @@ class CapabilityCatalog:
                 if token in haystack
             )
             if not tokens:
-                score = 1
+                continue
             if score <= 0:
                 continue
             candidates.append(
@@ -76,6 +73,7 @@ class CapabilityCatalog:
                         "capabilities": list(provider.capabilities),
                         "verified": provider.verified,
                         "verification_level": provider.verification_level,
+                        "readiness_metadata": provider.metadata,
                         "evidence": [item.model_dump(mode="json") for item in provider.evidence],
                         "extension_points": list(provider.extension_points),
                     },
@@ -118,7 +116,8 @@ class CapabilityCatalog:
                     capabilities=capabilities,
                     openfoam_version=installation.version,
                     verified=True,
-                    verification_level="installed",
+                    verification_level="binary_present",
+                    metadata={"runtime_load_verified": False, "native_test_verified": False},
                     evidence=evidence,
                 )
             )
@@ -155,6 +154,14 @@ class CapabilityCatalog:
                         "phase_change.mass_transfer",
                     ]
                 provider_id = f"installed.fv_model.{item.name}"
+            elif item.category == "function_object":
+                ptype = "function_object"
+                capabilities = [f"functionObject.{item.name}", "postprocessing"]
+                provider_id = f"installed.function_object.{item.name}"
+            elif item.category == "source_component":
+                ptype = "source_component"
+                capabilities = [f"source.component.{item.name}"]
+                provider_id = f"installed.source_component.{item.name}"
             else:
                 continue
             providers.append(
@@ -165,7 +172,8 @@ class CapabilityCatalog:
                     capabilities=capabilities,
                     openfoam_version=installation.version,
                     verified=True,
-                    verification_level="installed",
+                    verification_level="source_discovered",
+                    metadata={"runtime_load_verified": False, "native_test_verified": False},
                     evidence=evidence,
                 )
             )

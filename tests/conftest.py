@@ -239,11 +239,21 @@ class FakeOpenFOAMTools:
         timeout=3600,
         output_callback=None,
     ):
-        del case_dir, stream_output, timeout
+        del stream_output, timeout
         self.foam_run_solvers.append(solver)
         if not self.foam_runs:
             raise AssertionError("No scripted foamRun result")
         result = self.foam_runs.popleft()
+        # Synthetic output writer is OPT-IN. Boundary tests without it still fail
+        # the production output gate; these files are not native CFD evidence.
+        if result.return_code == 0 and getattr(self, "synthetic_output_fields", None):
+            import re
+            times = re.findall(r"^Time\s*=\s*([-+0-9.eE]+)", result.stdout, re.M)
+            if times:
+                for name in self.synthetic_output_fields:
+                    output = Path(case_dir) / times[-1] / name
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    output.write_text("FoamFile { format ascii; class volVectorField; object U; }\ninternalField uniform (0 0 0);\n", encoding="utf-8")
         if output_callback is not None:
             for line in result.stdout.splitlines(keepends=True):
                 output_callback(line)
@@ -291,3 +301,30 @@ def tool_result(command: str, *, success: bool, stdout: str = "", stderr: str = 
 @pytest.fixture
 def graph_path() -> Path:
     return GRAPH
+
+
+def configure_mock_completed_run(state, agent, *, end_time):
+    """Declare a fixture's intended interval/outputs BEFORE approval.
+
+    Only used by mocked orchestration tests; never evidence of native CFD success.
+    """
+    from openfoam_agent.contracts.models import CompletionContract
+    import re
+    plan = state.engineering_plan
+    plan.completion = CompletionContract(mode="transient", start_time=0, end_time=end_time,
+                                         required_result_fields=["U"])
+    text = agent.workspace.read_text("system/controlDict")
+    text = re.sub(r"\bendTime\s+[^;]+;", f"endTime {end_time};", text)
+    agent.workspace.write_text("system/controlDict", text)
+    # Keep retry plans bound to exactly the same contract in scripted calls.
+    for turn in getattr(agent.llm, "turns", []):
+        action = getattr(turn, "action", turn)
+        if getattr(action, "plan", None) is not None:
+            action.plan.completion = plan.completion.model_copy(deep=True)
+    state.case_seal = agent.workspace.seal(plan)
+    agent.tools.synthetic_output_fields = ["U"]
+
+
+def fixture_verified_output(result):
+    """Postprocessing-only tests explicitly inject synthetic output verification."""
+    return result.model_copy(update={"outputs_verified": True})

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from openfoam_agent.workflow.states import State
 
 from collections import deque
 import json
@@ -202,6 +203,8 @@ def test_runtime_grouped_patch_allows_multiple_edits_to_same_file_and_retries(tm
     state.engineering_plan = plan
     state.case_seal = agent.workspace.seal(plan)
 
+    state.current_state = State.MESH_READY
+    state.approve_solve()
     outcome = agent.repair_runtime(
         state,
         runtime_log=(

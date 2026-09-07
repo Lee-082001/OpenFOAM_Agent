@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from openfoam_agent.contracts.models import CompletionContract
+from conftest import fixture_verified_output
+
 from collections import deque
 
 from pydantic import BaseModel, ConfigDict
@@ -281,7 +284,7 @@ def test_postprocessing_execution_plan_finishes_in_one_llm_turn(tmp_path):
     state.engineering_plan = plan
     state.case_seal = workspace.seal(plan)
     state.case_dir = str(workspace.case_dir)
-    runtime_result = parse_runtime_log("Time = 1\nEnd\n", return_code=0)
+    runtime_result = fixture_verified_output(parse_runtime_log("Time = 1\nEnd\n", return_code=0, contract=CompletionContract(mode="transient", start_time=0, end_time=1.0)))
     state.runtime_report = RuntimeReport(
         success=True,
         attempts=[SimulationAttempt(attempt=1, result=runtime_result)],
@@ -330,7 +333,7 @@ def test_compact_phase_schemas_are_strict_output_compatible_and_smaller():
     repair = structured_request_metrics(RepairTurn, "{}", system_prompt=REPAIR_SYSTEM_PROMPT)["approxTokens"]
     legacy_post = structured_request_metrics(PostProcessingTurn, "{}", system_prompt=POSTPROCESSING_SYSTEM_PROMPT)["approxTokens"]
     compact_post = structured_request_metrics(PostProcessingPlanTurn, "{}", system_prompt=POSTPROCESSING_PLAN_SYSTEM_PROMPT)["approxTokens"]
-    assert repair < legacy * 0.5
+    assert repair < legacy * 0.6  # v4 includes non-truncatable execution contracts
     assert compact_post < legacy_post * 0.7
 
 

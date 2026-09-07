@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
+import signal
+import uuid
+from contextlib import contextmanager
 import queue
 import shutil
 import subprocess
@@ -11,10 +16,12 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from openfoam_agent.schemas.common import ToolResult
+from openfoam_agent.contracts.models import ResourceLimits
+from .execution_policy import (ExecutionContext, ExecutionPolicyError, ProcessBudget, command_effect)
 from openfoam_agent.tools.installation import OpenFOAMInstallationDiscovery
 
 
-class UnsafeCommandError(RuntimeError):
+class UnsafeCommandError(ExecutionPolicyError):
     pass
 
 
@@ -96,14 +103,22 @@ class SafeRunner:
         allowed_commands: set[str] | None = None,
         *,
         workspace_root: str | Path | None = None,
-        max_timeout: int = 3600,
+        max_timeout: int = 86400,
         trusted_executable_roots: Sequence[str | Path] | None = None,
         base_env: Mapping[str, str] | None = None,
+        resource_limits: ResourceLimits | None = None,
     ) -> None:
         self.workspace_root = (
             Path(workspace_root).expanduser().resolve() if workspace_root else None
         )
         self.max_timeout = max_timeout
+        self.resource_limits = resource_limits or ResourceLimits(wall_seconds=max_timeout)
+        self.budget = ProcessBudget(limit=self.resource_limits.max_native_processes,
+                                    ledger_path=(self.workspace_root / "process-ledger.json" if self.workspace_root else None))
+        self._execution_context: ExecutionContext | None = None
+        self._mpi_ranks = 1
+        self._mpi_launcher: str | None = None
+        self.process_observer = None
         self._base_env = dict(os.environ if base_env is None else base_env)
         self.trusted_executable_roots = self._resolve_trusted_roots(
             trusted_executable_roots
@@ -151,33 +166,76 @@ class SafeRunner:
         executable = self.resolve_trusted_executable(exe, env=env)
         actual_command = [str(executable), *command[1:]]
 
-        if stream_output or output_callback is not None:
-            return self._run_streaming(
-                actual_command,
-                logical_command=command,
-                cwd=resolved_cwd,
-                timeout=timeout,
-                env=env,
-                echo_output=stream_output,
-                output_callback=output_callback,
-            )
+        effect = command_effect(exe, command[1:], self.installation)
+        if effect in {"unknown", "destructive"}:
+            raise UnsafeCommandError(f"Command effect {effect!r} is not authorized: {exe}")
+        if effect == "solve":
+            if self._execution_context is None or resolved_cwd is None:
+                raise UnsafeCommandError("Main calculation requires an explicit execution approval and sealed runtime context.")
+            self._execution_context.validate(command, resolved_cwd, timeout, ranks=self._mpi_ranks)
+        if effect == "reconstruction" and self._execution_context is None:
+            raise UnsafeCommandError("Reconstruction requires the approved runtime execution context.")
+        if effect == "decomposition":
+            if resolved_cwd is None:
+                raise UnsafeCommandError("Decomposition requires a case directory.")
+            import re
+            text = (resolved_cwd / "system/decomposeParDict").read_text(encoding="utf-8")
+            match = re.search(r"\bnumberOfSubdomains\s+(\d+)\s*;", text)
+            if not match or not 1 <= int(match.group(1)) <= self.resource_limits.max_ranks:
+                raise UnsafeCommandError("Decomposition rank count is missing or exceeds the configured rank cap.")
+        if self._mpi_launcher is not None:
+            launcher = self._resolve_mpi_launcher(self._mpi_launcher, env)
+            actual_command = [str(launcher), "-np", str(self._mpi_ranks), *actual_command]
+        if os.name != "posix" and (self.resource_limits.cpu_seconds or self.resource_limits.memory_bytes):
+            raise UnsafeCommandError("Requested OS resource limits are unsupported on this platform.")
+        row = self.budget.reserve(command, effect)
+        return self._run_streaming(
+            actual_command, logical_command=command, cwd=resolved_cwd, timeout=timeout,
+            env=env, echo_output=stream_output, output_callback=output_callback, record=row,
+        )
 
-        proc = subprocess.run(
-            actual_command,
-            cwd=str(resolved_cwd) if resolved_cwd else None,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            env=env,
-        )
-        return ToolResult(
-            success=proc.returncode == 0,
-            command=command,
-            return_code=proc.returncode,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
-        )
+    @contextmanager
+    def approved_execution(self, context: ExecutionContext):
+        previous = self._execution_context
+        old_limits, old_limit = self.resource_limits, self.budget.limit
+        approved = context.approval.resource_limits
+        values = {}
+        for key, value in old_limits.model_dump().items():
+            other = getattr(approved, key)
+            values[key] = other if value is None else value if other is None else min(value, other)
+        self.resource_limits = ResourceLimits(**values)
+        self.budget.limit = min(old_limit, self.resource_limits.max_native_processes)
+        self._execution_context = context
+        try:
+            yield
+        finally:
+            self._execution_context = previous
+            self.resource_limits, self.budget.limit = old_limits, old_limit
+
+    def _resolve_mpi_launcher(self, name: str, env: Mapping[str, str]) -> Path:
+        if name not in {"mpirun", "mpiexec"}:
+            raise UnsafeCommandError("Only operator-selected local MPI launchers are supported.")
+        found = shutil.which(name, path=env.get("PATH", ""))
+        if not found:
+            raise UnsafeCommandError("MPI launcher is not installed; no solver was started.")
+        path = Path(found).resolve()
+        roots = (*self.trusted_executable_roots, *self._SYSTEM_PATH_ROOTS)
+        if not any(_is_within(path, root.resolve()) for root in roots):
+            raise UnsafeCommandError("MPI launcher is outside trusted system/installation roots.")
+        return path
+
+    def run_mpi(self, command: list[str], *, ranks: int, launcher: str, **kwargs) -> ToolResult:
+        if self._execution_context is None or ranks < 2:
+            raise UnsafeCommandError("Local MPI requires explicit runtime approval and at least two ranks.")
+        approved = self._execution_context.approval.execution.get("parallel", {})
+        if approved.get("mode") != "local_mpi" or approved.get("launcher") != launcher:
+            raise UnsafeCommandError("MPI launcher/mode differs from approval.")
+        old = self._mpi_ranks, self._mpi_launcher
+        self._mpi_ranks, self._mpi_launcher = ranks, launcher
+        try:
+            return self.run([*command, "-parallel"], **kwargs)
+        finally:
+            self._mpi_ranks, self._mpi_launcher = old
 
     def executable_status(self, exe: str) -> dict[str, object]:
         try:
@@ -312,6 +370,15 @@ class SafeRunner:
         working directory; callers may not override root/case paths, use parent traversal, or
         pass absolute paths outside the workspace.
         """
+        forbidden = {"-root", "-roots", "-hostRoots", "-lib", "-libs", "--host", "-host", "-hostfile"}
+        for index, token in enumerate(args):
+            if token in forbidden or any(token.startswith(flag + "=") for flag in forbidden | {"-case"}):
+                raise UnsafeCommandError(f"Native path/library/host override is forbidden: {token}")
+            if token == "-case":
+                if index + 1 >= len(args) or cwd is None or Path(args[index + 1]).resolve() != cwd:
+                    raise UnsafeCommandError("Native -case must equal the Python-owned cwd.")
+            if token == "-parallel" and self._mpi_launcher is None:
+                raise UnsafeCommandError("Parallel execution requires the structured MPI path.")
         for raw in args:
             if not isinstance(raw, str) or not raw or len(raw) > 1000:
                 raise UnsafeCommandError("Native OpenFOAM arguments must be bounded non-empty strings.")
@@ -328,70 +395,158 @@ class SafeRunner:
                         f"Native OpenFOAM argument escapes the workspace: {raw}"
                     )
 
-    @staticmethod
     def _run_streaming(
-        command: list[str],
-        *,
-        logical_command: list[str],
-        cwd: Path | None,
-        timeout: int,
-        env: Mapping[str, str],
-        echo_output: bool,
-        output_callback: Callable[[str], None] | None,
+        self, command: list[str], *, logical_command: list[str], cwd: Path | None,
+        timeout: int, env: Mapping[str, str], echo_output: bool,
+        output_callback: Callable[[str], None] | None, record: dict,
     ) -> ToolResult:
-        proc = subprocess.Popen(
-            command,
-            cwd=str(cwd) if cwd else None,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=dict(env),
-        )
-        assert proc.stdout is not None
-        output_queue: queue.Queue[str | None] = queue.Queue()
-
-        def read_output() -> None:
-            for line in proc.stdout:
-                output_queue.put(line)
-            output_queue.put(None)
-
-        reader = threading.Thread(target=read_output, daemon=True)
-        reader.start()
+        # One bounded chunk queue, bounded memory tail, complete byte-for-byte disk log.
+        log_dir = (self.workspace_root or cwd or Path.cwd()) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"native-{record['id']:05d}-{uuid.uuid4().hex[:8]}.log"
+        output_queue: queue.Queue[bytes | None] = queue.Queue(maxsize=8)
+        stop_reader = threading.Event()
+        tail = bytearray()
+        digest = hashlib.sha256()
+        total = 0
         started = time.monotonic()
-        chunks: list[str] = []
-        finished = False
-        while not finished:
-            if time.monotonic() - started > timeout:
-                proc.kill()
-                reader.join(timeout=1)
-                raise subprocess.TimeoutExpired(logical_command, timeout)
-            try:
-                item = output_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if item is None:
-                finished = True
-                continue
-            chunks.append(item)
-            if output_callback is not None:
+        termination = "exited"
+        partial_line = ""
+        limits = self.resource_limits
+        guard = Path(__file__).with_name("exec_guard.py")
+        guarded = [sys.executable, str(guard), json.dumps({"cpu_seconds": limits.cpu_seconds,
+                   "memory_bytes": limits.memory_bytes, "file_bytes": limits.max_case_bytes}), *command]
+        proc = None
+        reader = None
+        handle = None
+        try:
+            handle = log_path.open("xb")
+            os.chmod(log_path, 0o600)
+            if self.process_observer is not None:
+                self.process_observer("spawn_intent", record)
+            proc = subprocess.Popen(guarded, cwd=str(cwd) if cwd else None,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=dict(env),
+                start_new_session=(os.name == "posix"), bufsize=0)
+            self.budget.update(record, pid=proc.pid, status="running")
+            if self.process_observer is not None:
+                self.process_observer("running", record)
+            assert proc.stdout is not None
+
+            def read_output() -> None:
                 try:
-                    output_callback(item)
+                    while not stop_reader.is_set():
+                        chunk = os.read(proc.stdout.fileno(), 16384)
+                        if not chunk:
+                            break
+                        while not stop_reader.is_set():
+                            try:
+                                output_queue.put(chunk, timeout=0.1); break
+                            except queue.Full:
+                                continue
+                finally:
+                    while not stop_reader.is_set():
+                        try:
+                            output_queue.put(None, timeout=0.1); break
+                        except queue.Full:
+                            continue
+
+            reader = threading.Thread(target=read_output, name="native-log-reader", daemon=True)
+            reader.start()
+            eof = False
+            killed_at = None
+            while not eof or proc.poll() is None:
+                now = time.monotonic()
+                if now - started >= timeout and killed_at is None:
+                    termination = "timeout"; self._terminate_group(proc); killed_at = now
+                if killed_at is not None and now - killed_at > 2.0:
+                    break
+                try:
+                    chunk = output_queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if chunk is None:
+                    eof = True
+                    continue
+                remaining = limits.max_output_bytes - total
+                if len(chunk) > remaining:
+                    chunk = chunk[:max(0, remaining)]
+                    termination = "output_limit"
+                    self._terminate_group(proc); killed_at = now
+                try:
+                    handle.write(chunk)
+                except OSError:
+                    termination = "log_io_error"; self._terminate_group(proc); killed_at = now
+                    break
+                total += len(chunk); digest.update(chunk)
+                tail.extend(chunk)
+                if len(tail) > 65536:
+                    del tail[:-65536]
+                text = chunk.decode("utf-8", errors="replace")
+                if echo_output:
+                    sys.stdout.write(text); sys.stdout.flush()
+                if output_callback is not None:
+                    partial_line += text
+                    while "\n" in partial_line:
+                        line, partial_line = partial_line.split("\n", 1)
+                        try:
+                            output_callback(line + "\n")
+                        except Exception:
+                            pass
+                    # A malicious/no-newline log cannot grow this observation buffer.
+                    if len(partial_line) > 16384:
+                        partial_line = partial_line[-16384:]
+            if proc.poll() is None:
+                self._terminate_group(proc)
+            code = proc.wait(timeout=5)
+            if termination == "exited" and code < 0:
+                termination = "signal"
+            if termination == "timeout":
+                code = 124
+            elif termination == "output_limit":
+                code = 125
+            elif termination == "log_io_error":
+                code = 126
+            if partial_line and output_callback is not None:
+                try:
+                    output_callback(partial_line)
                 except Exception:
-                    # Progress/reporting callbacks are observational only and must
-                    # never terminate or alter an OpenFOAM subprocess.
                     pass
-            if echo_output:
-                sys.stdout.write(item)
-                sys.stdout.flush()
-        return_code = proc.wait(timeout=5)
-        return ToolResult(
-            success=return_code == 0,
-            command=logical_command,
-            return_code=return_code,
-            stdout="".join(chunks),
-            stderr="",
-        )
+            handle.flush(); os.fsync(handle.fileno())
+        except BaseException as exc:
+            if proc is not None:
+                self._terminate_group(proc)
+                proc.wait(timeout=5)
+            termination = "cancelled" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else "spawn_or_io_error"
+            self.budget.update(record, status=termination, error=type(exc).__name__)
+            raise
+        finally:
+            stop_reader.set()
+            if reader is not None:
+                reader.join(timeout=1)
+            if proc is not None and proc.stdout is not None:
+                proc.stdout.close()
+            if handle is not None:
+                handle.close()
+        elapsed = time.monotonic() - started
+        self.budget.update(record, status=termination, return_code=code, wall_seconds=elapsed,
+                           log_path=str(log_path), log_sha256=digest.hexdigest(), output_bytes=total)
+        if self.process_observer is not None:
+            self.process_observer("finished", record)
+        return ToolResult(success=code == 0 and termination == "exited", command=logical_command,
+            return_code=code, stdout=tail.decode("utf-8", errors="replace"), stderr="",
+            termination_reason=termination, log_path=str(log_path), log_sha256=digest.hexdigest(),
+            output_bytes=total, output_truncated=total > len(tail), wall_seconds=elapsed,
+            process_id=proc.pid, process_group_terminated=termination != "exited")
+
+    @staticmethod
+    def _terminate_group(proc) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            elif proc.poll() is None:
+                proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 def _is_within(path: Path, root: Path) -> bool:

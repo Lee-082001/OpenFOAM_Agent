@@ -23,3 +23,7 @@ class State(StrEnum):
     COMPLETE = "COMPLETE"
     DONE = "DONE"
     FAILED = "FAILED"
+
+
+SOLVE_APPROVAL_STATES = frozenset({State.MESH_READY, State.SOLVE_READY})
+FEEDBACK_STATES = frozenset({State.MESH_READY, State.SOLVE_READY, State.RESULT_REVIEW_REQUIRED})

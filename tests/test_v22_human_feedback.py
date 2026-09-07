@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from openfoam_agent.contracts.models import CompletionContract
+from conftest import fixture_verified_output
+
 from pathlib import Path
 
 import pytest
@@ -114,10 +117,9 @@ def _prepare_mesh_ready(tmp_path: Path, graph_path: Path, extra_actions=()):
 
 
 def _mark_result_review(state: CFDState) -> None:
-    result = parse_runtime_log(
+    result = fixture_verified_output(parse_runtime_log(
         "Time = 20s\nCourant Number mean: 0.01 max: 0.03\nEnd\n",
-        return_code=0,
-    )
+        return_code=0, contract=CompletionContract(mode="transient", start_time=0, end_time=20.0)))
     state.simulation = result
     state.runtime_report = RuntimeReport(
         success=True,

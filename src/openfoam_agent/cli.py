@@ -46,10 +46,11 @@ from openfoam_agent.schemas.request import UserRequest
 from openfoam_agent.schemas.simulation import RuntimePolicy
 from openfoam_agent.workflow.engine import CFDWorkflow
 from openfoam_agent.workflow.state import CFDState
-from openfoam_agent.workflow.states import State
+from openfoam_agent.workflow.states import State, SOLVE_APPROVAL_STATES, FEEDBACK_STATES
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PACKAGED_DATA_ROOT = Path(__file__).resolve().parent / "data"
 INSTALLED_DATA_ROOT = Path(sysconfig.get_path("data")) / "share" / "openfoam-agent"
 
 
@@ -60,7 +61,9 @@ def _resource_path(source_path: Path, installed_path: Path) -> Path:
 DEFAULT_CAPABILITY_DBS = {
     version: _resource_path(
         PROJECT_ROOT / "config" / f"openfoam{version}_capability_graph.json",
-        INSTALLED_DATA_ROOT / "config" / f"openfoam{version}_capability_graph.json",
+        (PACKAGED_DATA_ROOT / f"openfoam{version}_capability_graph.json"
+         if (PACKAGED_DATA_ROOT / f"openfoam{version}_capability_graph.json").exists()
+         else INSTALLED_DATA_ROOT / "config" / f"openfoam{version}_capability_graph.json"),
     )
     for version in ("13", "14")
 }
@@ -96,6 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="OpenFOAM Agent v2: autonomous CFD engineering behind deterministic safety gates.",
     )
     parser.add_argument("prompt", nargs="?", help="One-shot CFD prompt.")
+    parser.add_argument("--resume", type=Path, help="Restore a checkpoint directory/file after integrity checks; /solve approval is not reused.")
+    parser.add_argument("--geometry", action="append", default=[], help="Explicitly authorize a geometry input file (repeatable).")
+    parser.add_argument("--data", action="append", default=[], help="Explicitly authorize a data/table input file (repeatable).")
+    parser.add_argument("--import-case", type=Path, help="Import immutable 0/constant/system inputs from an existing case.")
     parser.add_argument("--prompt", dest="prompt_option", help="Alternative one-shot prompt.")
     parser.add_argument("-i", "--interactive", action="store_true", help="Conversational mode.")
     parser.add_argument(
@@ -330,7 +337,9 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
     prompt_sources = sum(value is not None for value in (args.prompt, args.prompt_option))
     if args.interactive and prompt_sources:
         parser.error("Choose either a one-shot prompt or --interactive, not both.")
-    if not args.interactive and prompt_sources == 0:
+    if args.resume and (prompt_sources or args.interactive or args.geometry or args.data or args.import_case):
+        parser.error("--resume cannot be combined with a new prompt, --interactive, or new assets.")
+    if not args.interactive and prompt_sources == 0 and not args.resume:
         parser.error("Provide a prompt or use --interactive.")
     if prompt_sources > 1:
         parser.error("Provide the prompt either positionally or with --prompt, not both.")
@@ -342,7 +351,7 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("Use /solve in interactive mode.")
     if args.force and not args.output:
         parser.error("--force requires --output.")
-    if args.solve and not args.confirm_intake:
+    if args.solve and not args.confirm_intake and not args.resume:
         parser.error("--solve requires --confirm-intake.")
     if args.solve and args.dry_run:
         parser.error("--solve cannot be combined with --dry-run.")
@@ -734,7 +743,17 @@ def build_report(
         len(round_events) / round_llm_turns if round_llm_turns else 0.0
     )
     return {
-        "architecture": "v2.10.0",
+        "architecture": "v4",
+        "version": __version__,
+        "execution_approval": state.execution_approval.model_dump(mode="json") if state.execution_approval else None,
+        "region_mesh_evidence": {k: v.model_dump(mode="json") for k, v in state.region_mesh_evidence.items()},
+        "region_mesh_manifests": dict(state.region_mesh_manifests),
+        "assets": list(state.assets),
+        "parallel_evidence": state.parallel_evidence,
+        "result_output_evidence": state.result_output_evidence,
+        "quantity_analyses": state.quantity_analyses,
+        "pending_action": state.pending_action,
+        "native_process_records": state.native_process_records,
         "run_id": state.run_id,
         "prompt": request.prompt,
         "conversation_turns": list(request.conversation_turns),
@@ -787,6 +806,9 @@ def build_report(
                 1 for item in state.engineering_events if item.native_command_executed
             ),
             "native_command_limit": engineering_policy.max_native_commands,
+            "native_event_counters_are_legacy_not_subprocess_counts": True,
+            "actual_process_spawn_attempts": len(state.native_process_records) if state.native_process_records else None,
+            "actual_processes_spawned": sum(row.get("pid") is not None for row in state.native_process_records) if state.native_process_records else None,
             "mesh_repair_cycle_limit": engineering_policy.max_mesh_repair_cycles,
             "runtime_repair_cycles_limit": runtime_policy.max_repair_cycles,
             "runtime_repair_steps_per_cycle": engineering_policy.max_runtime_repair_steps,
@@ -1106,8 +1128,10 @@ def run_prompt(
         progress=progress,
     )
     final_state = workflow.run(state)
-    if execute_solver and final_state.current_state == State.MESH_READY:
-        final_state.approve_solve()
+    if execute_solver and final_state.current_state in SOLVE_APPROVAL_STATES:
+        from openfoam_agent.contracts.models import ResourceLimits
+        final_state.approve_solve(ResourceLimits(max_native_processes=engineering_policy.max_native_commands,
+                                                wall_seconds=runtime_policy.solver_timeout_seconds))
         final_state = workflow.run(final_state)
     report = build_report(
         final_state,
@@ -1238,7 +1262,7 @@ def _confirm_session(session, args, llm, backend, model) -> None:
 
 def _feedback_session(session, args, llm, backend, model, feedback_text: str) -> None:
     state = session.pending_workflow_state
-    if state is None or state.current_state not in {State.MESH_READY, State.RESULT_REVIEW_REQUIRED}:
+    if state is None or state.current_state not in FEEDBACK_STATES:
         print("/feedback은 MESH_READY 또는 RESULT_REVIEW_REQUIRED에서 사용할 수 있습니다.")
         return
     if backend not in _AUTONOMOUS_BACKENDS:
@@ -1427,13 +1451,16 @@ def _solve_session(session, args, llm, backend, model) -> None:
         print("--dry-run 세션에서는 /solve를 사용할 수 없습니다.")
         return
     state = session.pending_workflow_state
-    if state is None or state.current_state != State.SOLVE_READY:
+    if state is None or state.current_state not in SOLVE_APPROVAL_STATES:
         print("/solve를 실행하려면 먼저 /confirm으로 SOLVE_READY에 도달해야 합니다.")
         return
     if state.case_dir is None:
         print("실행할 sealed case directory가 없습니다.")
         return
-    state.approve_solve()
+    from openfoam_agent.contracts.models import ResourceLimits
+    engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
+    state.approve_solve(ResourceLimits(max_native_processes=engineering_policy.max_native_commands,
+                                      wall_seconds=runtime_policy.solver_timeout_seconds))
     run_workspace = Path(state.case_dir).resolve().parent
     engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
     workflow = CFDWorkflow(
@@ -1540,7 +1567,9 @@ def _handle_command(command, session, args, llm, backend, model) -> bool:
 
 
 def _interactive(args, llm, backend, model) -> int:
-    session = ConversationSession(mode=InteractionMode(args.mode))
+    session = ConversationSession(mode=InteractionMode(args.mode),
+        geometry_files=list(args.geometry), additional_files=list(args.data),
+        existing_case=str(args.import_case) if args.import_case else None)
     print(f"OpenFOAM Agent v{__version__} (mode={session.mode.value}; progress={args.progress}; /help for commands)")
     if backend == "openai":
         routes = _model_routes(llm)
@@ -1633,8 +1662,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _interactive(args, llm, backend, model)
 
     engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
+    if args.resume:
+        from openfoam_agent.workflow.checkpoint import CheckpointError
+        location = args.resume.expanduser().resolve()
+        workspace = location.parent if location.name == "checkpoint.json" else location
+        try:
+            workflow = CFDWorkflow(llm=llm, capability_db=args.capability_db, workspace=workspace,
+                native_execution=not args.dry_run, engineering_policy=engineering_policy,
+                runtime_policy=runtime_policy, postprocessing_policy=postprocessing_policy,
+                postprocessing_enabled=not args.skip_postprocess, progress=_progress_from_args(args))
+            state = workflow.engineering.restore_checkpoint()
+            state = workflow.run(state)
+            if args.solve and state.current_state in SOLVE_APPROVAL_STATES:
+                from openfoam_agent.contracts.models import ResourceLimits
+                state.approve_solve(ResourceLimits(max_native_processes=engineering_policy.max_native_commands,
+                                                  wall_seconds=runtime_policy.solver_timeout_seconds))
+                state = workflow.run(state)
+            report = build_report(state, backend=backend, model=model, request=state.user_request,
+                model_routes=_model_routes(llm), workspace=workspace, engineering_policy=engineering_policy,
+                runtime_policy=runtime_policy, postprocessing_policy=postprocessing_policy)
+        except (CheckpointError, ValueError, OSError) as exc:
+            parser.error(f"Resume refused; existing work preserved: {exc}")
+        if args.output:
+            _write_report(args.output, report, force=args.force)
+        _emit_report(report, as_json=args.json)
+        return _exit_code(state.current_state)
     assert prompt is not None
-    session = ConversationSession(mode=InteractionMode(args.mode))
+    session = ConversationSession(mode=InteractionMode(args.mode),
+        geometry_files=list(args.geometry), additional_files=list(args.data),
+        existing_case=str(args.import_case) if args.import_case else None)
     session.add_turn(prompt)
     request = session.to_request()
     state, report = run_prompt(

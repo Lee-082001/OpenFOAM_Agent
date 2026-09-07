@@ -1,0 +1,7 @@
+{
+  "passed": 359,
+  "audit_items": 33,
+  "complete_collection_coverage": true,
+  "audit_source_hashes_match": true,
+  "native_cfd_qualified": false
+}

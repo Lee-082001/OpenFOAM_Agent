@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from openfoam_agent.contracts.regions import region_layouts
 
 from openfoam_agent.schemas.engineering import EngineeringPlan
 from openfoam_agent.tools.foam_file import validate_foam_file_header
@@ -26,6 +27,7 @@ _CONSTRAINT_PATCH_TYPES = frozenset({"empty", "wedge", "symmetry", "symmetryPlan
 @dataclass
 class PreSolveValidationResult:
     valid: bool
+    regions: dict[str, dict[str, object]] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
     checked_files: list[str] = field(default_factory=list)
     mesh_patches: list[str] = field(default_factory=list)
@@ -48,23 +50,70 @@ class PreSolveCompletenessGate:
         self.workspace = workspace
 
     def validate(self, plan: EngineeringPlan) -> PreSolveValidationResult:
-        return self.validate_required_case_files(plan.required_case_files)
+        try:
+            layouts = region_layouts(plan)
+        except ValueError as exc:
+            return PreSolveValidationResult(valid=False, failures=[str(exc)])
+        result = self._validate_layouts(plan.required_case_files, layouts)
+        for interface in plan.interfaces:
+            left = result.regions.get(interface.region, {})
+            right = result.regions.get(interface.neighbour_region, {})
+            if interface.patch not in left.get("mesh_patches", []):
+                result.failures.append(f"Interface patch missing: {interface.region}/{interface.patch}.")
+            if interface.neighbour_patch not in right.get("mesh_patches", []):
+                result.failures.append(f"Interface neighbour patch missing: {interface.neighbour_region}/{interface.neighbour_patch}.")
+            for field_name in interface.fields:
+                for region in (interface.region, interface.neighbour_region):
+                    if f"0/{region}/{field_name}" not in result.checked_files:
+                        result.failures.append(f"Interface field not declared: 0/{region}/{field_name}.")
+            # Membership is deterministic; correct physical coupling is not inferred
+            # from matching patch names. Native and balance evidence remain separate.
+            result.warnings.append(
+                f"Interface {interface.region}/{interface.patch} membership checked; "
+                "physical coupling and flux conservation require native/QoI verification."
+            )
+        result.valid = not result.failures
+        return result
 
-    def validate_required_case_files(
-        self,
-        required_case_files: list[str],
-    ) -> PreSolveValidationResult:
-        """Validate an Agent-declared solver-input file set without a full plan.
+    def validate_required_case_files(self, required_case_files: list[str]) -> PreSolveValidationResult:
+        try:
+            return self._validate_layouts(required_case_files, region_layouts(required_files=required_case_files))
+        except ValueError as exc:
+            return PreSolveValidationResult(valid=False, failures=[str(exc)])
 
-        This supports short engineering sequences such as write -> dictionary check ->
-        pre-solve readiness while keeping the final EngineeringPlan validation intact.
-        """
+    def _validate_layouts(self, required_case_files, layouts) -> PreSolveValidationResult:
+        result = PreSolveValidationResult(valid=True)
+        for layout in layouts:
+            partial = self._validate_region(required_case_files, layout)
+            result.regions[layout.region] = {
+                "valid": partial.valid, "mesh_patches": partial.mesh_patches,
+                "mesh_patch_types": partial.mesh_patch_types,
+                "checked_files": partial.checked_files,
+                "solver_module": layout.solver_module,
+            }
+            result.failures.extend(partial.failures)
+            result.warnings.extend(partial.warnings)
+            result.checked_files.extend(p for p in partial.checked_files if p not in result.checked_files)
+            prefix = layout.region + "/" if layout.region else ""
+            result.mesh_patches.extend(prefix + p for p in partial.mesh_patches)
+            result.mesh_patch_types.update({prefix+k: v for k,v in partial.mesh_patch_types.items()})
+            result.boundary_resolutions.update(partial.boundary_resolutions)
+            result.file_header_classes.update(partial.file_header_classes)
+        result.valid = not result.failures
+        return result
 
+    def _validate_region(self, required_case_files, layout) -> PreSolveValidationResult:
         failures: list[str] = []
         warnings: list[str] = []
         boundary_resolutions: dict[str, dict[str, str]] = {}
-        required = list(dict.fromkeys([*_CORE_SYSTEM_FILES, *required_case_files]))
-        field_files = [item for item in required_case_files if item.startswith(_FIELD_DIR)]
+        core = ["system/controlDict", f"{layout.system_dir}/fvSchemes", f"{layout.system_dir}/fvSolution"]
+        # Validate shared root controls plus this region, never demand root dummy fv*.
+        selected = [p for p in required_case_files
+                    if (len(PurePosixPath(p).parts) == 2
+                        or str(PurePosixPath(p).parent) in {layout.field_dir, layout.system_dir, layout.constant_dir})]
+        required = list(dict.fromkeys([*core, *selected,
+                        *(f"{layout.field_dir}/{name}" for name in layout.required_fields)]))
+        field_files = [item for item in required if str(PurePosixPath(item).parent) == layout.field_dir]
         if not field_files:
             failures.append(
                 "EngineeringPlan.required_case_files must declare the solver-required initial field files under 0/."
@@ -92,19 +141,20 @@ class PreSolveCompletenessGate:
                         excerpt = "\n".join(part for part in (result.stdout, result.stderr) if part)[-1200:]
                         failures.append(f"foamDictionary rejected required solve input {relative}: {excerpt}")
 
-        boundary_path = self.workspace.resolve_case_path("constant/polyMesh/boundary")
+        boundary_relative = f"{layout.mesh_dir}/boundary"
+        boundary_path = self.workspace.resolve_case_path(boundary_relative)
         mesh = None
         mesh_patches: list[str] = []
         mesh_patch_types: dict[str, str] = {}
         if not boundary_path.is_file():
-            failures.append("constant/polyMesh/boundary is missing; mesh patch coverage cannot be verified.")
+            failures.append(f"{boundary_relative} is missing; mesh patch coverage cannot be verified.")
         else:
             boundary_text = boundary_path.read_text(encoding="utf-8", errors="replace")
             mesh = parse_mesh_boundary(boundary_text)
             mesh_patches = mesh.names
             mesh_patch_types = mesh.patch_types
             if not mesh_patches:
-                failures.append("No mesh boundary patches could be parsed from constant/polyMesh/boundary.")
+                failures.append(f"No mesh boundary patches could be parsed from {boundary_relative}.")
 
         if mesh is not None and mesh.patches:
             interpreter = BoundaryFieldInterpreter()

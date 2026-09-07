@@ -1,6 +1,6 @@
 [project]
 name = "openfoam-agent"
-version = "3.6.0"
+version = "4.0.0rc1"
 description = "Agent-owned OpenFOAM CFD engineering behind deterministic safety gates"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -30,3 +30,6 @@ where = ["src"]
 
 [tool.setuptools.data-files]
 "share/openfoam-agent/config" = ["config/openfoam13_capability_graph.json", "config/openfoam14_capability_graph.json"]
+
+[tool.setuptools.package-data]
+openfoam_agent = ["data/*.json"]

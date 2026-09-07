@@ -7,6 +7,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.json_schema import SkipJsonSchema
+from openfoam_agent.contracts.models import (ImplementationEvidenceBinding, ParallelExecution, RegionCaseLayout, RegionInterface, CompletionContract, QuantityOfInterest)
 
 
 class _EngineeringModel(BaseModel):
@@ -341,6 +342,7 @@ class OpenFOAMExecutionSpec(_EngineeringModel):
     solver_provider_id: str | None = Field(default=None, max_length=240)
     regions: list[RegionSolverAssignment] = Field(default_factory=list, max_length=64)
     arguments: list[str] = Field(default_factory=list, max_length=24)
+    parallel: ParallelExecution = Field(default_factory=ParallelExecution)
 
     @model_validator(mode="after")
     def validate_execution_topology(self) -> Self:
@@ -397,6 +399,11 @@ class EngineeringPlan(_EngineeringModel):
     solver: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.+-]*$", max_length=160)
     solver_provider_id: str = Field(min_length=1, max_length=240)
     execution: OpenFOAMExecutionSpec | None = None
+    region_layouts: list[RegionCaseLayout] = Field(default_factory=list)
+    interfaces: list[RegionInterface] = Field(default_factory=list)
+    completion: CompletionContract | None = None
+    quantities_of_interest: list[QuantityOfInterest] = Field(default_factory=list)
+    implementation_evidence_bindings: list[ImplementationEvidenceBinding] = Field(default_factory=list)
     openfoam_distribution: Literal["foundation"] = "foundation"
     openfoam_version: str = Field(pattern=r"^(?:13|14)$")
     problem_interpretation: str = Field(min_length=1, max_length=4000)
@@ -507,7 +514,7 @@ class SearchCapabilitiesAction(_EngineeringModel):
 class SearchReferencesAction(_EngineeringModel):
     type: Literal["search_references"]
     query: str = Field(min_length=1, max_length=500)
-    scope: Literal["all", "tutorials", "source", "etc"] = "all"
+    scope: Literal["all", "tutorials", "source", "etc", "modules"] = "all"
     rationale: str = Field(default="", max_length=200)
 
 
@@ -526,7 +533,7 @@ class EvidenceGapRequest(_EngineeringModel):
     why_required: str = Field(min_length=1, max_length=400)
     capability_queries: list[str] = Field(default_factory=list, max_length=2)
     reference_queries: list[str] = Field(default_factory=list, max_length=3)
-    reference_scope: Literal["all", "tutorials", "source", "etc"] = "all"
+    reference_scope: Literal["all", "tutorials", "source", "etc", "modules"] = "all"
     read_top_reference_matches: int = Field(default=1, ge=0, le=2)
 
     @model_validator(mode="before")
@@ -561,7 +568,7 @@ class EvidenceGapRequest(_EngineeringModel):
         # fail the CFD run. Fall back to the Agent's own missing-evidence statement.
         if not normalized["capability_queries"] and not normalized["reference_queries"]:
             normalized["reference_queries"] = [missing[:500]]
-        if normalized.get("reference_scope") not in {"all", "tutorials", "source", "etc"}:
+        if normalized.get("reference_scope") not in {"all", "tutorials", "source", "etc", "modules"}:
             normalized["reference_scope"] = "all"
         try:
             read_top = int(normalized.get("read_top_reference_matches", 1))
@@ -1554,7 +1561,7 @@ class CaseFileSeal(_EngineeringModel):
     path: str = Field(min_length=1, max_length=240)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0)
-    origin: Literal["agent", "native"] = "agent"
+    origin: Literal["agent", "native", "user_asset"] = "agent"
 
 
 class CaseSeal(_EngineeringModel):

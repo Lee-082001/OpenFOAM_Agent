@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import nullcontext
+from openfoam_agent.tools.safe_runner import SafeRunner
+from openfoam_agent.tools.execution_policy import ExecutionContext, ExecutionPolicyError
+from openfoam_agent.tools.parsers import parse_runtime_stream
+from openfoam_agent.runtime.completion import completion_contract, verify_result_outputs, snapshot_result_outputs
+from openfoam_agent.runtime.parallel import prepare_parallel, verify_parallel_inputs, reconstruct_parallel
 
 from openfoam_agent.engineering import CFDEngineeringAgent
 from openfoam_agent.progress import (
@@ -42,6 +48,8 @@ class RuntimeOrchestrator:
         self.progress = progress or NullProgressReporter()
 
     def run(self, state: CFDState) -> CFDState:
+        self.engineering.bind_checkpoint(state)
+        self.engineering.checkpoint(state, "runtime-entry")
         if not state.solve_approved:
             state.transition(State.FAILED, "Solver execution blocked: user /solve approval is missing.")
             return state
@@ -55,7 +63,19 @@ class RuntimeOrchestrator:
             state.transition(State.FAILED, f"Solver execution blocked by integrity gate: {exc}")
             return state
 
+        if state.execution_approval is None:
+            state.transition(State.FAILED, "Durable execution approval is missing; a boolean is not authority.")
+            return state
+        try:
+            state.assert_confirmed_intake()
+            state.execution_approval.check_plan(state.engineering_plan)
+            state.execution_approval.check_repair_files(state.case_seal)
+            contract = completion_contract(state.engineering_plan, self.engineering.workspace)
+        except (ValueError, OSError) as exc:
+            state.transition(State.ENGINEERING_REVIEW_REQUIRED, f"Runtime contract requires review: {exc}")
+            return state
         attempts: list[SimulationAttempt] = []
+        parallel_manifest = None
         execution = state.engineering_plan.execution
         runtime_driver = execution.driver if execution is not None else "foamRun"
         target_summary = (
@@ -93,29 +113,73 @@ class RuntimeOrchestrator:
                 attempt_limit=self.policy.max_attempts,
                 runtime_label=runtime_driver,
             )
-            if plan.execution is not None:
-                run = self.tools.run_execution(
-                    state.case_dir,
-                    plan.execution,
-                    stream_output=self.stream_output,
-                    timeout=self.policy.solver_timeout_seconds,
-                    output_callback=(tracker.feed if self.progress.enabled() else None),
-                )
-            else:
-                run = self.tools.foam_run(
-                    state.case_dir,
-                    solver=plan.solver,
-                    stream_output=self.stream_output,
-                    timeout=self.policy.solver_timeout_seconds,
-                    output_callback=(tracker.feed if self.progress.enabled() else None),
-                )
+            state.pending_action = {"status": "intent", "kind": "runtime", "attempt": attempt_number}
+            self.engineering.checkpoint(state, "solver-start-intent")
+            runner = getattr(self.tools, "runner", None)
+            context = ExecutionContext(state.execution_approval, plan, state.case_seal, self.engineering.workspace)
+            scope = runner.approved_execution(context) if isinstance(runner, SafeRunner) else nullcontext()
+            try:
+                state.execution_approval.check_plan(plan)
+                state.execution_approval.check_repair_files(state.case_seal)
+                before_outputs = snapshot_result_outputs(self.engineering.workspace, contract)
+                with scope:
+                    if plan.execution is not None and plan.execution.parallel.mode == "local_mpi":
+                        if parallel_manifest is None:
+                            parallel_manifest = prepare_parallel(self.tools, self.engineering.workspace, plan)
+                            state.parallel_evidence = parallel_manifest
+                        verify_parallel_inputs(self.engineering.workspace, plan, parallel_manifest)
+                    if plan.execution is not None:
+                        run = self.tools.run_execution(
+                            state.case_dir, plan.execution, stream_output=self.stream_output,
+                            timeout=self.policy.solver_timeout_seconds,
+                            output_callback=(tracker.feed if self.progress.enabled() else None),
+                        )
+                    else:
+                        run = self.tools.foam_run(
+                            state.case_dir, solver=plan.solver, stream_output=self.stream_output,
+                            timeout=self.policy.solver_timeout_seconds,
+                            output_callback=(tracker.feed if self.progress.enabled() else None),
+                        )
+            except (ValueError, OSError, ExecutionPolicyError) as exc:
+                state.transition(State.ENGINEERING_BLOCKED, f"Execution policy blocked process creation/retry: {exc}")
+                return state
             log = "\n".join(part for part in (run.stdout, run.stderr) if part)
             self.engineering.workspace.write_log(
                 f"{runtime_driver}.attempt-{attempt_number:03d}.log", log
             )
-            result = parse_runtime_log(log, return_code=run.return_code, runtime_driver=runtime_driver)
+            parse_options = dict(return_code=run.return_code, runtime_driver=runtime_driver,
+                                 contract=contract, termination_reason=run.termination_reason)
+            if run.log_path:
+                # Read the complete disk stream, not the bounded UI tail.
+                with Path(run.log_path).open("rb") as stream:
+                    result = parse_runtime_stream(stream, **parse_options)
+                if run.log_sha256 and result.log_sha256 != run.log_sha256:
+                    result.success = result.completed = False
+                    result.evidence_failures.append("Native disk log hash differs from the captured stream.")
+            else:
+                result = parse_runtime_log(log, **parse_options)
+            if result.success:
+                try:
+                    if plan.execution is not None and plan.execution.parallel.mode == "local_mpi":
+                        scope = runner.approved_execution(context) if isinstance(runner, SafeRunner) else nullcontext()
+                        with scope:
+                            reconstruct_parallel(self.tools, self.engineering.workspace, plan, result.last_time)
+                    verified, failures, output_records = verify_result_outputs(
+                        self.engineering.workspace, plan, contract, result.last_time, before=before_outputs)
+                    state.result_output_evidence = output_records
+                except (ValueError, OSError, ExecutionPolicyError) as exc:
+                    verified, failures = False, [str(exc)]
+                result.outputs_verified = verified
+                if not verified:
+                    result.success = False
+                    result.evidence_failures.extend(failures)
+            if isinstance(runner, SafeRunner):
+                state.native_process_records = list(runner.budget.records)
             state.simulation = result
             state.simulation_attempts = attempt_number
+            state.pending_action = {"status": "completed", "kind": "runtime", "attempt": attempt_number}
+            self.engineering.checkpoint(state, "solver-result-captured")
+            state.pending_action = None
             attempt = SimulationAttempt(attempt=attempt_number, result=result)
             attempts.append(attempt)
 
@@ -157,9 +221,16 @@ class RuntimeOrchestrator:
                 )
                 state.transition(
                     State.EXECUTION_DONE,
-                    f"{runtime_driver} completed with finite, fatal-error-free execution evidence. "
-                    "Result review remains required.",
+                    f"{runtime_driver} met its termination contract and bounded output checks. "
+                    "Numerical accuracy and physical goal achievement remain unverified pending result review.",
                 )
+                return state
+
+            if result.process_success:
+                state.runtime_report = RuntimeReport(success=False, attempts=attempts, final_result=result)
+                state.solve_approved = False
+                state.transition(State.RESULT_REVIEW_REQUIRED,
+                    "Process exited normally but requested completion/output evidence is incomplete; user review required.")
                 return state
 
             if attempt_number >= self.policy.max_attempts:

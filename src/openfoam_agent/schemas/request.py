@@ -9,6 +9,7 @@ class UserRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     prompt: str = Field(min_length=1)
+    existing_case: str | None = None
     geometry_files: list[str] = Field(default_factory=list)
     additional_files: list[str] = Field(default_factory=list)
     conversation_turns: list[str] = Field(default_factory=list)

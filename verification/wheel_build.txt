@@ -1,0 +1,10 @@
+WARNING: The directory '/home/oai/.cache/pip' or its parent directory is not owned or is not writable by the current user. The cache has been disabled. Check the permissions and owner of that directory. If executing pip with sudo, you should use sudo's -H flag.
+Processing /mnt/data/work/OpenFOAM_Agent_v4
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: openfoam-agent
+  Building wheel for openfoam-agent (pyproject.toml): started
+  Building wheel for openfoam-agent (pyproject.toml): finished with status 'done'
+  Created wheel for openfoam-agent: filename=openfoam_agent-4.0.0rc1-py3-none-any.whl size=284004 sha256=acc11271a825fc3e23b84410f4163978a39780ff84a167de092b45caaada76ac
+  Stored in directory: /tmp/pip-ephem-wheel-cache-ywqa_k88/wheels/a6/82/d2/faa46c4cac0290e58ae75772e2b8c4f15a36e204933c5ef5b6
+Successfully built openfoam-agent

@@ -162,7 +162,7 @@ def test_model_prompt_redacts_known_local_paths(tmp_path, graph_path, monkeypatc
 def test_runtime_end_marker_without_time_progress_is_not_success():
     result = parse_runtime_log("End\n", return_code=0)
     assert not result.success
-    assert any("no Time progress evidence" in item for item in result.evidence_failures)
+    assert any("no positive Time progress evidence" in item for item in result.evidence_failures)
 
 
 def test_finish_preview_cannot_claim_unobserved_solver_capability(tmp_path, graph_path):

@@ -6,7 +6,9 @@ import re
 
 from openfoam_agent.llm.prompts import INTAKE_SYSTEM_PROMPT
 from openfoam_agent.llm.protocol import StructuredLLM
-from openfoam_agent.schemas.intake import CFDIntakeSpec
+from openfoam_agent.schemas.intake import CFDIntakeSpec, RequirementHistory
+from openfoam_agent.contracts.requirements import active_requirement_texts
+from openfoam_agent.contracts.quantities import si_value, UNITS
 from openfoam_agent.schemas.request import UserRequest
 from openfoam_agent.workflow.state import CFDState
 from openfoam_agent.workflow.states import State
@@ -27,7 +29,10 @@ def build_intake_prompt(request: UserRequest) -> str:
     return (
         "Create a solver-independent CFD intake definition from this delimited JSON. "
         "Only values under user_evidence may support source=user facts. The policy "
-        "object is workflow authorization and must not become a CFD fact:\n"
+        "object is workflow authorization and must not become a CFD fact. Preserve active requirements "
+        "chronologically, not superseded/cancelled historical values. Emit typed quantities with SI dimensions "
+        "and region/patch/material targets when known. List materially different interpretations as ambiguities; "
+        "easy mode does not authorize choosing a different physical problem:\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
 
@@ -58,7 +63,34 @@ def validate_intake_provenance(spec: CFDIntakeSpec, request: UserRequest) -> Non
                 raise ValueError(
                     f"User fact '{fact.id}' has evidence not found in user-provided input."
                 )
-    supplied_numbers = _finite_numbers("\n".join(user_evidence))
+    active_texts, history, assignments = active_requirement_texts([request.prompt, *request.conversation_turns])
+    spec.requirement_history = [RequirementHistory.model_validate(row) for row in history]
+    for record in history:
+        if record["status"] == "cancelled" and spec.fact(record["target"]) is not None:
+            raise ValueError(f"Cancelled requirement is still active: {record['target']}")
+    for key, assignment in assignments.items():
+        fact = spec.fact(key)
+        if fact is None and key == "operating.reynolds_number":
+            candidates = [f for f in spec.facts if f.id.endswith(".reynolds_number")]
+            if len(candidates) == 1:
+                fact = candidates[0]
+        if fact is None or fact.source != "user":
+            raise ValueError(f"Active explicit requirement has no matching user fact: {key}")
+        if fact is not None and fact.source == "user":
+            values = _finite_numbers(fact.value)
+            if values and not any(math.isclose(v, float(assignment["value"]), rel_tol=1e-12, abs_tol=1e-12) for _,v in values):
+                # Unit normalization is handled by an explicit typed quantity, not
+                # by letting arbitrary historical numbers satisfy preservation.
+                if fact.quantity is None or not _verified_unit_source(fact, assignment["evidence"]):
+                    raise ValueError(f"Active fact {key} does not match its latest explicit assignment.")
+    for fact in spec.facts:
+        if fact.quantity is not None:
+            si_value(fact.quantity)
+    for ambiguity in spec.ambiguities:
+        if ambiguity.selected is not None and not any(ambiguity.user_evidence in text for text in user_evidence):
+            raise ValueError("Ambiguity selection evidence was not supplied by the user.")
+    # Asset names are identifiers, never physical numeric constraints.
+    supplied_numbers = _finite_numbers("\n".join(active_texts))
     represented_numbers = _finite_numbers(
         "\n".join(
             " ".join(part for part in (fact.value, fact.unit or "") if part)
@@ -66,6 +98,11 @@ def validate_intake_provenance(spec: CFDIntakeSpec, request: UserRequest) -> Non
             if fact.category != "context" and fact.source == "user"
         )
     )
+    for fact in spec.facts:
+        if fact.source == "user" and fact.quantity is not None:
+            converted = _verified_unit_source(fact, fact.evidence or "")
+            if converted:
+                represented_numbers.extend(converted)
     missing_numbers = [
         token
         for token, value in supplied_numbers
@@ -100,6 +137,33 @@ def validate_intake_provenance(spec: CFDIntakeSpec, request: UserRequest) -> Non
         }:
             raise ValueError("classification.problem_type has an unsupported value.")
 
+
+
+def _verified_unit_source(fact, evidence):
+    """Only credit a source number after an explicit, dimension-checked conversion.
+
+    This is a scalar literal conversion, not inference of region/patch semantics.
+    Multiple quantities in one evidence span require separate facts.
+    """
+    quantity = fact.quantity
+    if quantity is None:
+        return []
+    units = "|".join(re.escape(unit) for unit in sorted(UNITS, key=len, reverse=True))
+    pattern = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*(" + units + r")(?![A-Za-z0-9/])"
+    pairs = re.findall(pattern, evidence)
+    if len(pairs) != 1:
+        return []
+    value, unit = pairs[0]
+    scale, offset, dimensions = UNITS[unit]
+    if dimensions != quantity.dimensions:
+        return []
+    if not math.isclose(float(value)*scale+offset, si_value(quantity), rel_tol=1e-10, abs_tol=1e-12):
+        return []
+    if fact.unit is not None and fact.unit != quantity.unit:
+        raise ValueError("Normalized fact unit disagrees with its typed quantity.")
+    if not any(math.isclose(v,quantity.value,rel_tol=1e-10,abs_tol=1e-12) for _,v in _finite_numbers(fact.value)):
+        raise ValueError("Normalized fact value disagrees with its typed quantity.")
+    return [(value,float(value))]
 
 _CLASSIFICATION_DIRECT_CUES: dict[str, tuple[str, ...]] = {
     "internal_flow": (

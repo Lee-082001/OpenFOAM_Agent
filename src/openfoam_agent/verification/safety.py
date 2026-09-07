@@ -299,6 +299,33 @@ class DeterministicSafetyGate:
 
 def parse_check_mesh_evidence(result: ToolResult) -> MeshEvidence:
     text = _combined_output(result)
+    raw_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    log_failures = []
+    if result.log_path:
+        selected = []
+        digest = hashlib.sha256()
+        try:
+            path = Path(result.log_path)
+            if path.stat().st_size > 256 * 1024 * 1024:
+                raise ValueError("checkMesh log exceeds bounded inspection size.")
+            with path.open("rb") as stream:
+                while raw := stream.readline(65537):
+                    digest.update(raw)
+                    if len(raw) > 65536:
+                        raise ValueError("checkMesh log contains an overlong line.")
+                    line = raw.decode("utf-8", errors="replace")
+                    if any(pattern.search(line) for pattern in (_CELL_COUNT, _NON_ORTHO, _SKEW, *_NEGATIVE, _MESH_OK)):
+                        selected.append(line)
+                    if "FOAM FATAL" in line or re.search(r"Failed\s+\d+\s+mesh checks", line):
+                        log_failures.append("checkMesh logged a fatal or failed mesh check.")
+                    if len(selected) > 1000:
+                        raise ValueError("Too many mesh summaries; region-specific inspection is required.")
+            text = "".join(selected)
+            raw_hash = digest.hexdigest()
+            if result.log_sha256 and raw_hash != result.log_sha256:
+                log_failures.append("checkMesh log changed after capture.")
+        except (OSError, ValueError) as exc:
+            log_failures.append(str(exc))
     negative: int | None = None
     for pattern in _NEGATIVE:
         matched = pattern.search(text)
@@ -308,7 +335,7 @@ def parse_check_mesh_evidence(result: ToolResult) -> MeshEvidence:
     cells = _int_match(_CELL_COUNT, text)
     non_ortho = _float_match(_NON_ORTHO, text)
     skew = _float_match(_SKEW, text)
-    warnings: list[str] = []
+    warnings: list[str] = list(log_failures)
     if cells is None:
         warnings.append("checkMesh output did not expose a cell count.")
     if non_ortho is None:
@@ -316,13 +343,13 @@ def parse_check_mesh_evidence(result: ToolResult) -> MeshEvidence:
     if skew is None:
         warnings.append("checkMesh output did not expose maximum skewness.")
     return MeshEvidence(
-        command_succeeded=result.success,
+        command_succeeded=result.success and not log_failures,
         mesh_ok=bool(_MESH_OK.search(text)),
         cell_count=cells,
         max_non_orthogonality=non_ortho,
         max_skewness=skew,
         negative_volume_cells=negative,
-        raw_log_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        raw_log_sha256=raw_hash,
         warnings=warnings,
     )
 

@@ -92,9 +92,12 @@ def test_sourced_installation_discovers_every_trusted_application_not_static_all
     assert "solid" not in runner.installation.solver_modules  # docs are not installed evidence
 
     tools = OpenFOAMTools(runner)
-    result = tools.run_native_command("brandNewUtility", workspace, arguments=["hello"])
+    from openfoam_agent.tools.safe_runner import UnsafeCommandError
+    with pytest.raises(UnsafeCommandError, match="unknown"):
+        tools.run_native_command("brandNewUtility", workspace, arguments=["hello"])
+    result = tools.run_native_command("brandNewUtility", workspace, arguments=["-help"])
     assert result.success
-    assert result.stdout.strip() == "hello"
+    assert result.stdout.strip() == "-help"
 
 
 @pytest.mark.parametrize("version", ["13", "14"])
@@ -162,7 +165,7 @@ def test_sourced_installation_discovers_runtime_selection_types_from_openfoam_so
     )
     installed = catalog.provider("installed.fv_model.customLatentModel")
     assert installed is not None
-    assert installed.verification_level == "installed"
+    assert installed.verification_level == "source_discovered"
     assert catalog.provider("installed.fv_model.customLookupModel") is not None
 
 def test_native_generic_tool_cannot_escape_case_or_override_case_root(tmp_path):
@@ -192,7 +195,22 @@ def test_execution_ir_supports_single_and_multi_region_foundation_drivers(tmp_pa
         solver_module="incompressibleFluid",
         solver_provider_id="solver.incompressibleFluid",
     )
-    result = tools.run_execution(workspace, single)
+    from conftest import make_state, make_plan, control_dict
+    from openfoam_agent.tools.workspace import CaseWorkspace
+    from openfoam_agent.tools.execution_policy import ExecutionContext
+    from openfoam_agent.workflow.states import State
+    ws = CaseWorkspace(workspace)
+    state = make_state()
+    def approved(execution):
+        plan = make_plan(state.intake).model_copy(update={"execution": execution})
+        ws.write_text("system/controlDict", control_dict())
+        state.engineering_plan = plan
+        state.case_seal = ws.seal(plan)
+        state.current_state = State.SOLVE_READY
+        state.approve_solve()
+        return tools.runner.approved_execution(ExecutionContext(state.execution_approval, plan, state.case_seal, ws))
+    with approved(single):
+        result = tools.run_execution(ws.case_dir, single)
     assert result.success
     assert result.stdout.splitlines()[:2] == ["-solver", "incompressibleFluid"]
 
@@ -204,7 +222,8 @@ def test_execution_ir_supports_single_and_multi_region_foundation_drivers(tmp_pa
             RegionSolverAssignment(region="battery", solver_module="solid", provider_id="solver.solid"),
         ],
     )
-    result = tools.run_execution(workspace, multi)
+    with approved(multi):
+        result = tools.run_execution(ws.case_dir, multi)
     assert result.success
     assert result.stdout.strip() == ""  # regionSolvers comes from controlDict, no fake -solver argument
 

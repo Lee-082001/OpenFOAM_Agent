@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from conftest import configure_mock_completed_run
+
+from openfoam_agent.contracts.models import CompletionContract
+from conftest import fixture_verified_output
+
 import math
 
 import pytest
@@ -165,7 +170,7 @@ def test_postprocess_config_hash_binding_detects_out_of_band_change(tmp_path, gr
     from openfoam_agent.schemas.simulation import RuntimeReport, SimulationAttempt
     from openfoam_agent.tools.parsers import parse_runtime_log
 
-    runtime_result = parse_runtime_log("Time = 1s\nEnd\n", return_code=0)
+    runtime_result = fixture_verified_output(parse_runtime_log("Time = 1s\nEnd\n", return_code=0, contract=CompletionContract(mode="transient", start_time=0, end_time=1.0)))
     state.runtime_report = RuntimeReport(
         success=True,
         attempts=[SimulationAttempt(attempt=1, result=runtime_result)],
@@ -323,6 +328,7 @@ def test_runtime_success_automatically_continues_into_postprocessing(tmp_path, g
     vort_path.parent.mkdir(parents=True, exist_ok=True)
     vort_path.write_text("FoamFile {}\ninternalField uniform (0 0 0);\n", encoding="utf-8")
 
+    configure_mock_completed_run(state, prep_agent, end_time=20.0)
     state.approve_solve()
     workflow = CFDWorkflow(
         llm=llm,
@@ -395,6 +401,7 @@ def test_postprocessing_llm_failure_does_not_erase_successful_solver_result(tmp_
         policy=EngineeringPolicy(max_agent_steps=12),
     )
     prep_agent.prepare(state, native_execution=True)
+    configure_mock_completed_run(state, prep_agent, end_time=1.0)
     state.approve_solve()
 
     class FailingPostLLM:

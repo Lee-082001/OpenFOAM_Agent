@@ -1,0 +1,34 @@
+{
+  "release": "4.0.0rc1",
+  "sources": [
+    {
+      "name": "OpenFOAM_Agent_v3.6.0_SHA256SUMS.txt",
+      "size_bytes": 239,
+      "sha256": "f806066295d2937e43c0d3c10509698361e01c795d9538bf110f255f146fc23c"
+    },
+    {
+      "name": "OpenFOAM_Agent_v3.6.0_bounded_staged_context.zip",
+      "size_bytes": 434683,
+      "sha256": "3d9d99c8b186db5ed429ac36a6c49104052ae2b0c5c4b25b73e61a3b7eefb9ac"
+    },
+    {
+      "name": "붙여넣은 텍스트 (1)(8).txt",
+      "size_bytes": 50644,
+      "sha256": "8ee68ecb07959c57f92c715fce0e9c88bcdcad0faf9bdcecb2d14db0bdba6cab"
+    }
+  ],
+  "prior_v4_recovery": {
+    "local_runtime_before_work": "No residual v4 tree found",
+    "library_exact_and_refined_search": "No matching prior v4 artifact found",
+    "scope_limit": "This is not an exhaustive search of all external services or inaccessible files."
+  },
+  "original_sources_preserved": true,
+  "working_tree_from": "v3.6.0 archive copy, not overwritten original",
+  "intermediate_snapshot": {
+    "name": "v4_work_before_final_verification.zip",
+    "sha256": "105a53ca7983ae6cbf406e7ed3647392104553da4bbd3a37147e547e2096b2ba",
+    "role": "Snapshot created during this turn; not a recovered previous v4"
+  },
+  "audit_original_context": "Audit refers to WSL v3.6.0 commit c11e4c4; this work's authoritative patch base is the exact retrieved ZIP, not an assumed identical live Git checkout.",
+  "base_archive_generated_cache_count": 0
+}

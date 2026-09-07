@@ -63,6 +63,8 @@ class CFDWorkflow:
         self.postprocessing_enabled = postprocessing_enabled
 
     def step(self, state: CFDState) -> CFDState:
+        self.engineering.bind_checkpoint(state)
+        self.engineering.checkpoint(state, "workflow-step-start")
         match state.current_state:
             case State.INIT:
                 state.transition(State.INTAKE_ANALYSIS, "Workflow started.")
@@ -115,6 +117,7 @@ class CFDWorkflow:
                 )
             case _:
                 state.transition(State.FAILED, f"No v2 handler for {state.current_state.value}.")
+        self.engineering.checkpoint(state, "workflow-step-finished")
         return state
 
     def run(self, state: CFDState, max_steps: int = 12) -> CFDState:

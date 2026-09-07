@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from openfoam_agent.contracts.models import CompletionContract
+from conftest import fixture_verified_output
+
 from io import StringIO
 
 from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
@@ -278,7 +281,7 @@ def test_foampostprocess_failure_reaches_user_and_next_postprocess_turn(tmp_path
         ],
     )
     state, _, _, _ = _prepare_mesh_ready(tmp_path, graph_path, tools)
-    runtime_result = parse_runtime_log("Time = 1s\nEnd\n", return_code=0)
+    runtime_result = fixture_verified_output(parse_runtime_log("Time = 1s\nEnd\n", return_code=0, contract=CompletionContract(mode="transient", start_time=0, end_time=1.0)))
     state.runtime_report = RuntimeReport(
         success=True,
         attempts=[SimulationAttempt(attempt=1, result=runtime_result)],

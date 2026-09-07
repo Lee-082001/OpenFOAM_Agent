@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from conftest import configure_mock_completed_run
+
 from pathlib import Path
 
 from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
@@ -367,6 +369,7 @@ def test_hard_dynamic_mesh_failure_repair_runtime_repair_and_native_seal(
     assert sealed["constant/dynamicMeshDict"].origin == "agent"
     pre_runtime_manifest = state.case_seal.manifest_sha256
 
+    configure_mock_completed_run(state, agent, end_time=0.02)
     state.approve_solve()
 
     # Mirror the interactive /solve path: reconstruct the engineering agent from the

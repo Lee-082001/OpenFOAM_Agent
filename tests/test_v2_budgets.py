@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from conftest import configure_mock_completed_run
+
 from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
 from openfoam_agent.schemas.engineering import (
     BlockAction,
@@ -381,6 +383,7 @@ def test_runtime_default_allows_three_repair_cycles(tmp_path, graph_path):
     agent.prepare(state, native_execution=True)
     assert state.current_state == State.MESH_READY
 
+    configure_mock_completed_run(state, agent, end_time=0.4)
     state.approve_solve()
     runtime = RuntimeOrchestrator(tools, agent, RuntimePolicy(solver_timeout_seconds=30))
     runtime.run(state)

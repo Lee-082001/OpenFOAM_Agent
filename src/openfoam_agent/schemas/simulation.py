@@ -43,6 +43,17 @@ class SimulationResult(_RuntimeModel):
     success: bool
     completed: bool
     return_code: int
+    process_success: bool = False
+    progressed: bool = False
+    termination_verified: bool = False
+    outputs_verified: bool | None = None
+    numerical_quality_verified: bool = False
+    physical_goal_verified: bool = False
+    termination_reason: str = "exited"
+    first_time: float | None = None
+    progress_steps: int = 0
+    residual_sample_count: int = 0
+    residuals_truncated: bool = False
     last_time: float | None = None
     residuals: list[ResidualSample] = Field(default_factory=list)
     courant_max: float | None = None

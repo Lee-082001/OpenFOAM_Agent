@@ -1,3 +1,13 @@
+# v4.0.0rc1 security qualification notice
+
+The v4 native runner enforces command effects, explicit execution approvals, sealed inputs, direct subprocess budgets and bounded logs. These are application-level controls, **not an OS sandbox**. They do not isolate filesystem reads or networking. Use one agent process per workspace and only trusted native binaries.
+
+Synthetic-process tests exercised approval, counts, CPU, timeout and output limits. Real OpenFOAM/MPI, aggregate resource quotas, adversarial binaries, multi-process workspace locking, and full process-tree termination were not qualified. Codex tool-event inspection is post-execution detection, not a pre-execution no-tools guarantee. Checkpoint hashes are integrity checks, not signatures.
+
+See `docs/V4_IMPLEMENTATION_VERIFICATION_KO.md` for scoped test evidence and open limitations. Historical content below does not override these v4 qualifications.
+
+---
+
 # v2.4 Security and Trust Boundary
 
 ## Semantic-fidelity assertions (v2.15)

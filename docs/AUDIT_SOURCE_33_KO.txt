@@ -1,0 +1,1107 @@
+
+  이전 로그에서 보였던 “LLM이 OpenFOAM 파일을 만들어 실행하는 도구”를 넘어, 범용 CFD 에이전트의 구조를 갖추는 방향으로 발전하고 있어. 다만 현재는 기능 표현 범위에 비해 검증·실행·복구 계층의 범용화가 덜 따라온
+  상태야.
+
+  가장 중요한 건 solver 종류를 더 추가하는 것보다 새로운 물리 문제를 받아도 요구사항과 실행 권한, 검증 근거가 모든 단계에서 유지되게 만드는 것이야.
+
+  길지만, 실제로 고칠 때 사용할 수 있도록 재현 결과 → 원인 → 개선 방향 순서로 정리할게.
+
+  ## 1. 검토 범위와 핵심 결과
+
+  검토 대상은 WSL의 /home/mlfm/OpenFOAM_Agent, v3.6.0, 커밋 c11e4c4야.
+
+  - 기존 테스트: 298개 통과, 재실행에서도 통과.
+  - 추가 검사: 모의 LLM·모의 OpenFOAM 실행기를 사용한 경계 조건 검사.
+  - 실제 OpenAI API 호출, 실제 CFD 계산, post-processing은 실행하지 않았어.
+  - 프로젝트 소스는 수정하지 않았어.
+  - 따라서 아래 평가는 구현과 검증 구조에 대한 평가이지, 실제 CFD 문제들의 성공률을 측정한 결과는 아니야.
+
+  추가 검사에서는 다음을 재현했어.
+
+   검사                                   확인 결과                                               의미
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   /solve 승인 없는 일반 native action    foamRun 호출이 모의 실행기까지 도달                     승인 경계 우회 가능
+  ─────────────────────────────────────  ──────────────────────────────────────────────────────  ───────────────────────────────
+   허용되지 않은 libs 항목                줄 시작에서는 거부, 인라인에서는 허용                   내용 검사 우회
+  ─────────────────────────────────────  ──────────────────────────────────────────────────────  ───────────────────────────────
+   다중 영역 파일 배치                    루트 fvSchemes, fvSolution, polyMesh/boundary를 요구    단일 영역 가정 잔존
+  ─────────────────────────────────────  ──────────────────────────────────────────────────────  ───────────────────────────────
+   영역별 mesh 파일 변경                  mesh 영향 경로로 인식하지 못함                          mesh 검증 근거의 재사용 위험
+  ─────────────────────────────────────  ──────────────────────────────────────────────────────  ───────────────────────────────
+   native budget 1                        실제 모의 dictionary 호출 4회, 이벤트는 1회             예산 집계 단위 불일치
+  ─────────────────────────────────────  ──────────────────────────────────────────────────────  ───────────────────────────────
+   Re=1000 이후 2000으로 변경             이전 값 1000이 없다고 거부                              대화형 요구사항 수정 오류
+  ─────────────────────────────────────  ──────────────────────────────────────────────────────  ───────────────────────────────
+   Time = 0과 End만 있는 성공 로그        completed=True                                          계산 진행·목표 도달 확인 부족
+  ─────────────────────────────────────  ──────────────────────────────────────────────────────  ───────────────────────────────
+   긴 확정 조건 목록                      200개 중 80개만 모델에 전달                             확정 요구사항도 축약 대상
+  ─────────────────────────────────────  ──────────────────────────────────────────────────────  ───────────────────────────────
+   Codex 인증 검사                        API-key 로그인이라는 모의 응답도 통과                   구독 인증 경로 보장 불충분
+
+  여기서 “호출이 도달했다”는 건 모의 실행기로 재현했다는 뜻이야. 실제 solver를 승인 없이 돌린 건 아니야.
+
+  ## 2. 잘 만든 부분—이 방향은 유지하는 게 좋아
+
+  문제부터 많이 지적하겠지만, 기반 자체에는 좋은 선택이 많아.
+
+  ### ① 물리 판단과 실행 검증을 분리하려는 설계
+
+  LLM이 solver·mesh·수치 설정을 선택하고, Python이 출처·안전·파일·실행 근거를 검증하는 방향은 범용성에 적합해.
+
+  새로운 문제마다 Python에 다음과 같은 분기를 늘리는 방식은 피하는 게 좋아.
+
+  원통이면 이 solver
+  열전달이면 이 template
+  다상이면 저 dictionary
+
+  지금 구조의 장점을 유지하면서 공통 검증 계약을 강화하는 게 맞아.
+
+  ### ② 확정 intake와 case seal
+
+  사용자가 확정한 문제 정의를 digest로 묶고, 최종 실행 입력을 seal로 검증하는 구조는 중요한 자산이야.
+
+  다만 뒤에서 설명하듯, 파일 무결성과 물리적 타당성은 별도의 문제야. 둘을 분리해서 더 발전시키면 돼.
+
+  ### ③ v3.6의 설계→파일 작성 분리
+
+  큰 응답 하나에 설계·근거·파일을 전부 넣지 않고 나눈 건 좋은 개선이야.
+
+  현재 문제는 분리 자체가 아니라 두 단계 사이에 무엇을 반드시 전달해야 하는지가 불완전한 것이야.
+
+  ### ④ 설치 환경 기반 기능 탐색
+
+  정적 capability graph에만 의존하지 않고 실제 설치된 실행 파일과 소스를 보는 방향도 좋아.
+
+  다만 “소스에서 발견됨”과 “현재 환경에서 실제로 생성·실행 가능함”의 차이를 더 엄격하게 표현해야 해.
+
+  ### ⑤ 실제 실패 로그를 같은 engineering agent에 반환
+
+  오류 문자열을 보고 무조건 정해진 패치를 적용하기보다, 실제 실패 근거를 바탕으로 수리하는 구조는 범용 문제에서 필요해.
+
+  이 구조를 유지하되 자동 수리가 바꿔도 되는 범위를 더 명확하게 해야 해.
+
+  ———
+
+  ## 3. 가장 먼저 고쳐야 할 실행·안전 문제
+
+  ### 1) /solve 승인 검사가 일반 native 실행 경로에는 없다
+
+  우선순위: 최상. 모의 검사로 재현.
+
+  일반적인 runtime orchestrator에는 solve_approved 검사가 있어. 그런데 engineering의 RunNativeOpenFOAMAction은 그 경로를 거치지 않고 native command를 호출해.
+
+  현재 이 분기는 대략 다음을 확인해.
+
+  native 실행 활성화?
+  파일 내용/문법 검사 통과?
+  특정 mesh 도구의 선행 조건 충족?
+  → 명령 실행
+
+  여기에 **“지금 이 명령이 승인된 본 계산인가?”**가 빠져 있어.
+
+  실제로 solve_approved=False, phase="prepare", role="utility"인 상태에서 foamRun을 전달했더니 모의 실행기까지 호출됐어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/engineering/agent.py:3442, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/schemas/engineering.py:368
+
+  개선 방향
+
+  명령의 권한을 LLM이 적어 준 role만으로 판단하면 안 돼.
+
+  공통 실행 계층에서 다음을 검사해야 해.
+
+  - 현재 workflow phase.
+  - 실제 명령의 효과: 조회, 파일 생성, mesh 변경, 초기화, 본 계산, 삭제.
+  - 해당 효과에 필요한 승인.
+  - 승인된 execution spec과 case seal.
+  - 실행 시간·CPU·메모리·디스크 예산.
+
+  단순히 “solver처럼 생긴 명령은 전부 차단”하면 potentialFoam 같은 초기화 용도까지 불편해질 수 있어. 명령 이름뿐 아니라 사용 목적과 효과를 검증하는 구조가 필요해.
+
+  완료 기준: prepare·repair·일반 native pipeline 어디에서 호출하든 승인 없는 본 계산은 프로세스 생성 전에 차단.
+
+  ### 2) 자동 수리의 승인 범위가 plan.solver 문자열에 치우쳐 있다
+
+  우선순위: 높음. 정적 분석.
+
+  runtime repair에서 승인된 solver와 비교하는 부분은 다음 형태야.
+
+  if plan.solver != approved_solver:
+      ...
+
+  그런데 이제 실행 구조는 단일 solver 문자열보다 훨씬 복잡해졌어.
+
+  - driver.
+  - solver module.
+  - region별 module.
+  - 실행 arguments.
+
+  예를 들어 최상위 solver가 계속 foamMultiRun이면, 영역별 solver 배치가 달라져도 문자열 비교만으로는 그 차이를 잡지 못해.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/engineering/agent.py:1617, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/engineering/agent.py:2306
+
+  개선 방향
+
+  승인 대상은 solver 이름이 아니라 실행 계약 전체여야 해.
+
+  다만 모든 파일 수정마다 재승인을 요구할 필요는 없어. 변경을 구분하면 돼.
+
+  - 문법 오류, solver 설정 오타: 허용된 자동 수리.
+  - 물성·경계조건·영역 연결 변경: 물리 문제 변경 여부 검토.
+  - driver·module·계산 규모의 큰 변경: 재승인.
+
+  seal은 “현재 파일이 무엇인가”를 증명하고, approval은 “그 변경을 사용자가 어디까지 허용했는가”를 증명하도록 분리하는 게 좋아.
+
+  ### 3) libs 검사가 줄 배치에 따라 우회된다
+
+  우선순위: 높음. 재현.
+
+  현재 정규식은 줄 시작의 libs (...)를 검사해.
+
+  그래서 다음은 거부되지만:
+
+  libs ("libUnknownAudit.so");
+
+  다음처럼 같은 줄 안에 있으면 검사에서 빠졌어.
+
+  functions { audit { libs ("libUnknownAudit.so"); } }
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/workspace.py:54, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/workspace.py:536
+
+  개선 방향
+
+  보안상 중요한 항목은 줄 기반 정규식보다 토큰/구문 구조를 기준으로 검사해야 해.
+
+  특히 다음 형태를 같은 의미로 처리해야 해.
+
+  - 여러 줄.
+  - 인라인.
+  - 중첩 dictionary.
+  - 주석을 섞은 표현.
+  - quoted/unquoted 표현.
+
+  여기서 실제 라이브러리 로드까지 실행해 본 건 아니야. 하지만 의도한 allowlist 정책을 검사기가 일관되게 적용하지 못한다는 점은 재현됐어.
+
+  ### 4) 안전 정책이 한편으로는 좁고, 다른 한편으로는 실행 효과를 충분히 제한하지 않는다
+
+  우선순위: 높음. 구조적 문제.
+
+  현재 허용 라이브러리 기본값은 네 개로 좁고, #include 계열은 내용 문자열에서 광범위하게 차단해.
+
+  반면 trusted OpenFOAM 경로에서 발견한 실행 파일은 폭넓게 native 실행 대상으로 확장돼.
+
+  이 조합은 다음 문제를 만들어.
+
+  - 정상적인 복잡한 case 재사용은 막힐 수 있음.
+  - 설치된 도구가 만드는 변경·삭제 효과는 충분히 구분되지 않음.
+
+  “설치된 도구”와 “현재 단계에서 실행해도 되는 도구”는 다른 개념이야.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/workspace.py:38, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/installation.py:78
+
+  개선 방향
+
+  안전 정책을 두 층으로 나누는 게 좋아.
+
+  1. 문서/파일 정책: include 대상 경로, 해시, 순환 참조, 확장 크기, 신뢰된 라이브러리.
+  2. 프로세스 정책: 명령 효과, 승인, 파일 접근, 자원 제한, 격리.
+
+  include를 허용하려면 case 내부나 검증된 설치 자료만 안전하게 해석하고, 동적 코드 실행과 일반 파일 포함을 구분해야 해. 무조건 전부 허용하자는 뜻은 아니야.
+
+  또한 shell=False와 경로 검사는 유용하지만, 그것만으로 OS 수준의 격리가 되는 건 아니야. 외부 사용자에게 서비스할 계획이라면 비특권 실행·호스트 읽기 제한·네트워크 정책도 필요해.
+
+  ### 5) native budget이 실제 subprocess 수를 세지 않는다
+
+  우선순위: 높음. 재현.
+
+  현재 _native_command_count()는 native_command_executed=True인 이벤트 수를 세어.
+
+  그런데 하나의 pre-solve action이 여러 파일에 대해 foamDictionary를 호출해.
+
+  모의 검사에서는:
+
+  설정 native budget: 1
+  dictionary 호출: 4
+  기록된 native event: 1
+
+  이었어.
+
+  또한 validate_native_inputs()는 authored dictionary들을 반복 검사하므로, mesh 명령 하나를 실행하기 위한 사전 검사에서도 여러 subprocess가 발생해.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/engineering/agent.py:1900, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/verification/safety.py:279
+
+  개선 방향
+
+  예산은 실제 프로세스를 생성하는 runner에서 차감해야 해.
+
+  별도 지표로 다음을 구분하면 좋아.
+
+  - LLM action 수.
+  - 실제 native process 수.
+  - 검증용 process 수.
+  - 계산용 process 시간.
+
+  문법 검사 결과는 파일 hash + OpenFOAM 환경 fingerprint + 검사 옵션으로 캐시하면 돼. 이렇게 해야 범용 case의 파일 수가 늘어도 검증 비용이 불필요하게 폭증하지 않아.
+
+  ———
+
+  ## 4. 범용 물리 문제를 막는 가장 큰 구조적 한계
+
+  ### 6) multi-region은 실행 명세에 들어왔지만 pre-solve는 아직 단일 영역 중심이다
+
+  우선순위: 높음. 재현.
+
+  OpenFOAMExecutionSpec은 region별 solver를 표현할 수 있어.
+
+  그런데 pre-solve는 항상 다음을 요구해.
+
+  system/fvSchemes
+  system/fvSolution
+  constant/polyMesh/boundary
+
+  그리고 0/ 아래의 필드들을 하나의 boundary 목록에 대조해.
+
+  모의 다중 영역 fixture에 다음처럼 파일을 준비했는데도:
+
+  system/fluid/fvSchemes
+  system/solid/fvSchemes
+  constant/fluid/polyMesh/boundary
+  constant/solid/polyMesh/boundary
+  0/fluid/T
+  0/solid/T
+
+  루트 파일이 없다는 이유로 실패했어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/verification/presolve.py:18, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/verification/presolve.py:98
+
+  개선 방향
+
+  RegionCaseLayout 같은 공통 표현이 필요해.
+
+  각 region마다:
+
+  - mesh 위치.
+  - 필드 위치.
+  - dictionary 위치.
+  - solver module.
+  - 필수 필드.
+  - patch 목록.
+  - 다른 region과 연결된 interface.
+
+  를 정의하고, authoring·pre-solve·mesh evidence·runtime·post-processing이 모두 같은 정보를 사용해야 해.
+
+  여기에 루트 dummy 파일을 추가해 검사를 통과시키는 식으로 해결하면 안 돼. 검사기의 영역 모델을 바로잡아야 해.
+
+  ### 7) region별 mesh 변경이 mesh 검증 무효화에 반영되지 않는다
+
+  우선순위: 높음. 재현.
+
+  검사 결과:
+
+  constant/polyMesh/points          → mesh 영향 있음
+  constant/fluid/polyMesh/points    → mesh 영향 없음
+  system/fluid/blockMeshDict        → mesh 영향 없음
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/workspace.py:260
+
+  주의할 점은 최종 전체 파일 seal이 무조건 이 파일들을 누락한다는 뜻은 아니야. 문제는 mesh 관련 변경 감지와 이전 checkMesh 근거의 재사용 판단이야.
+
+  개선 방향
+
+  경로 문자열 몇 개를 추가하는 수준을 넘어서:
+
+  mesh 산출물
+  ← 영향을 주는 geometry·dictionary·native action
+  ← 검증 결과
+
+  의 의존 관계를 기록해야 해.
+
+  영역이 여러 개라면 mesh_evidence도 하나의 값보다 region별 목록이어야 하고, 공통 검증 결과에는 모든 필수 영역이 검사됐는지가 들어가야 해.
+
+  ### 8) 실제 geometry·데이터 입력 연결이 부족하다
+
+  우선순위: 높음. 정적 분석.
+
+  UserRequest에는 geometry_files, additional_files가 있지만, 현재 소스에서 확인한 사용은 intake에 파일 이름을 전달하는 쪽에 집중되어 있어.
+
+  실제 내용을 가져와 case 자산으로 등록하는 일관된 경로는 확인하지 못했어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/schemas/request.py:12, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/agents/intake.py:15
+
+  이건 범용 실사용에서 아주 큰 차이야.
+
+  사용자는 보통 “원통 하나 만들어 줘”만 요청하지 않아.
+
+  - 내가 만든 STL로 계산.
+  - 기존 mesh 재사용.
+  - 실험 유량 시계열을 inlet으로 사용.
+  - 온도 의존 물성표 적용.
+  - 기존 case의 일부 조건 변경.
+
+  개선 방향
+
+  LLM의 문자열 파일 생성과 실제 자산 가져오기를 분리해 AssetRegistry를 두는 게 좋아.
+
+  기록할 정보는 다음 정도야.
+
+  - 사용자 승인 원본 경로.
+  - 원본 hash와 case 내부 사본.
+  - 형식·크기·단위·좌표계.
+  - geometry의 영역/표면 이름.
+  - 기본 품질 검사 결과.
+  - 필드나 boundary와의 연결 관계.
+
+  LLM에게 큰 STL 본문을 생성하거나 읽게 하는 것보다 검증된 자산과 필요한 요약을 제공하는 방식이 훨씬 범용적이야.
+
+  ### 9) checkpoint와 재개가 일급 기능이 아니다
+
+  우선순위: 중상. 정적 분석.
+
+  현재 상태 데이터는 풍부하지만, 중간 설계나 실행 계획 일부가 agent의 메모리 안에 있어.
+
+  예를 들어 staged draft plan과 pending execution 정보가 전부 지속 가능한 공통 상태 모델로 모여 있지는 않아.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/workflow/state.py:25, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/engineering/agent.py:554
+
+  범용 case는 짧게 끝나지 않을 수 있어. 터미널 종료·WSL 재시작·API 장애 후에 처음부터 다시 만드는 건 비용이 커.
+
+  개선 방향
+
+  다음 경계마다 checkpoint를 저장하는 게 좋아.
+
+  - intake 확정.
+  - design 확정.
+  - 파일 bundle 반영.
+  - native command 완료.
+  - case seal.
+  - solver 시작/종료.
+  - repair 반영.
+
+  재개 시에는 “다음 step 번호”만 복원하면 안 돼. 파일 hash, 설치 환경, 실행 중인 process, action 완료 여부를 대조해야 해.
+
+  장기적으로는 resume(run_id)와 fork(run_id, changes)가 범용 사용성에 큰 도움이 될 거야.
+
+  ### 10) 병렬/HPC 실행은 명시적 계약이 필요하다
+
+  우선순위: 중상. 확장 제안.
+
+  현재 execution spec은 driver·module·arguments를 표현하지만, rank 수·launcher·decomposition·재구성까지 묶은 실행 모델은 확인하지 못했어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/openfoam.py:133
+
+  OpenFOAM 병렬 실행은 solver에 옵션 하나를 붙이는 것뿐 아니라 영역 분할과 병렬 실행 절차가 연결되는 작업이야. 공식 병렬 실행 문서
+
+  개선 방향
+
+  임의의 mpirun 문자열을 LLM이 만들게 하기보다 다음을 구조화하면 좋아.
+
+  - serial / local MPI / scheduler.
+  - rank 수와 자원 상한.
+  - decomposition 방법과 근거.
+  - 실행 전후 필요한 작업.
+  - 실패 시 rank 전체 종료.
+  - 결과 재구성 여부.
+  - 영역별 병렬 산출물 검증.
+
+  처음부터 Slurm까지 할 필요는 없어. 로컬 serial→로컬 MPI를 먼저 끝까지 연결하는 게 현실적이야.
+
+  ———
+
+  ## 5. 자연어 요구사항을 보존하는 방식의 개선
+
+  ### 11) 사용자 숫자를 보존하려다 정상적인 수정 요청을 거부한다
+
+  우선순위: 높음. 재현.
+
+  현재 숫자 검증은 전체 대화에 등장한 숫자가 최종 user fact에도 있어야 한다는 방식이야.
+
+  그래서:
+
+  처음: Re=1000
+  나중: Re=2000으로 변경해줘
+  최종 fact: Re=2000
+
+  이면 1000이 사라졌다고 실패해.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/agents/intake.py:46
+
+  개선 방향
+
+  요구사항을 단순한 최종 목록이 아니라 변경 이력이 있는 fact로 관리해야 해.
+
+  예를 들면:
+
+  Re=1000: superseded
+  Re=2000: active
+  변경 근거: 사용자 발화 2
+
+  검사는 “과거 숫자를 모두 남겼는가”가 아니라 현재 유효한 요구사항이 구현됐는가를 확인해야 해.
+
+  같은 문제가 파일명 속 숫자, 예시 숫자, 거절한 대안에서도 생길 수 있으므로 함께 테스트해야 해.
+
+  ### 12) 숫자·단위·대상 간의 의미 연결이 더 필요하다
+
+  우선순위: 높음. 설계 제안.
+
+  숫자가 그대로 남았다고 올바른 물리 조건이 보존되는 건 아니야.
+
+  - 같은 300이 inlet 온도인지 고체 초기 온도인지.
+  - 1 bar를 100000 Pa로 변환했는지.
+  - Reynolds 수의 기준 길이가 직경인지 다른 길이인지.
+  - 값이 상수인지 시간 함수인지.
+
+  를 구분해야 해.
+
+  현재 숫자 관계 assertion은 좋은 출발점이지만, 일반 문자열과 모델이 선언한 관계만으로는 이런 의미를 충분히 강제하기 어려워.
+
+  개선 방향
+
+  물리량에 최소한 다음이 붙어야 해.
+
+  quantity / value / unit / dimensions
+  region / patch / material / time dependence
+  source / active status / reference definition
+
+  Python이 물리 모델을 대신 고르는 것이 아니라, 모델이 고른 관계의 차원·대상·산술 일관성을 검증하도록 만드는 거야.
+
+  ### 13) 모호한 문장을 바로 물리 경계조건으로 확정하지 않도록 해야 한다
+
+  우선순위: 중상. 개선 제안.
+
+  이전 네 로그에서 “직사각형 안의 원통”이 internal flow로 분류되고 상하 no-slip 벽이 만들어졌던 문제가 있었지.
+
+  현재 버전에는 이런 출처 오판을 user에서 derived로 내리는 코드가 들어와 있어. 이건 개선됐어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/agents/intake.py:155
+
+  다만 derived라고 표시하는 것과 사용자의 의도를 확인하는 것은 다르다는 점이 남아.
+
+  범용 agent는 모든 사소한 값을 물어보면 불편해지고, 아무것도 묻지 않으면 다른 문제를 풀게 돼.
+
+  따라서 질문은 다음처럼 영향도가 큰 모호성에 집중하는 게 좋아.
+
+  - 외곽이 실제 벽인가, 계산 영역 경계인가?
+  - 입구 값이 평균인가, 최대값인가?
+  - 열원 값이 총 발열량인가, 체적당 값인가?
+  - 압력이 gauge인가, absolute인가?
+
+  easy mode에서도 이 차이는 짧고 구체적으로 보여주는 편이 좋아.
+
+  ———
+
+  ## 6. v3.6 컨텍스트 최적화에서 보완할 점
+
+  ### 14) 파일 작성 단계에서 앞서 찾은 문법 근거가 빠진다
+
+  우선순위: 높음. 정적 분석.
+
+  현재 staged author_case에서는 evidence_records=[]가 되고, 실제 payload에도 앞서 찾은 reference 본문이 들어가지 않아.
+
+  대신 전달되는 것은 주로:
+
+  - frozen plan.
+  - 최대 1,200자 authoring brief.
+  - environment hint.
+  - tool contracts.
+  - 파일 목록과 hash.
+
+  야.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/engineering/agent.py:3918, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/engineering/agent.py:4020
+
+  설계에 필요한 근거와 파일 문법을 작성하는 데 필요한 근거는 다르다는 게 핵심이야.
+
+  stateless 호출에서는 이전 단계에서 읽은 OpenFOAM 문법을 다음 호출이 자동으로 기억하지 않아. plan에 reference ID만 남아 있어도 실제 문법 본문을 대신할 수 없어.
+
+  개선 방향
+
+  authoring 단계에 전체 검색 이력을 보내지는 말고, 다음으로 구성된 작은 ImplementationEvidencePack을 전달하면 좋아.
+
+  - 선택된 module의 필수 dictionary 예시.
+  - 선택된 model/BC의 version-specific 문법.
+  - 이번에 작성할 파일에 필요한 근거.
+  - 관련 확정 fact.
+  - 자료 출처와 hash.
+
+  검색 이력은 줄이되, 구현에 필요한 증거는 남기는 것이 중요해.
+
+  ### 15) 일반 컨텍스트 축약기가 확정 요구사항까지 자른다
+
+  우선순위: 높음. 재현.
+
+  현재 _compact_json_value()는 어떤 목록이든 길면 앞부분과 뒷부분만 남겨.
+
+  따라서 검색 결과뿐 아니라:
+
+  - 확정 facts.
+  - frozen plan 내부 목록.
+  - required files.
+  - 구조화된 geometry 데이터.
+
+  도 같은 정책의 영향을 받을 수 있어.
+
+  검사에서는 200개 fact가 80개로 줄었고, 가운데 fact는 전달되지 않았어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/llm/context.py:156, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/llm/context.py:249
+
+  생략 표시를 남기는 건 좋지만, 생략됐다고 알려주는 것만으로 필수 조건 손실이 해결되지는 않아.
+
+  개선 방향
+
+  컨텍스트를 중요도에 따라 분리해야 해.
+
+  - 반드시 보존: 현재 단계에 필요한 확정 조건·실행 계약·파일 간 연결.
+  - 요약 가능: 반복 로그·이미 해결한 오류.
+  - 선택 가능: 후보 검색 결과·보조 설명.
+
+  필수 부분만으로 예산을 넘으면 전체를 잘라 보내지 말고 작업을 파일/영역 단위로 분할해야 해.
+
+  ### 16) design 단계에서 검사할 수 있는 오류를 너무 늦게 검사한다
+
+  우선순위: 중상. 정적 분석.
+
+  현재 stage 1은 intake digest, capability provenance, default policy 등을 검사해.
+
+  하지만 확정 fact의 완전한 대응 관계처럼 파일이 없어도 검사할 수 있는 불변 조건까지 모두 이 단계에서 검사하는 구조는 아니야.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/engineering/agent.py:554
+
+  개선 방향
+
+  검증을 세 종류로 분리하면 좋아.
+
+  1. 설계만으로 가능한 검사.
+  2. 파일이 있어야 가능한 검사.
+  3. native 실행이 있어야 가능한 검사.
+
+  설계 단계에서 누락된 region·fact·필수 파일·실행 topology를 잡으면, 이미 파일과 mesh를 다 만든 뒤 계획이 거부되는 비용을 줄일 수 있어.
+
+  ### 17) 고정된 검색 횟수보다 “근거가 충분한가”를 더 잘 판단해야 한다
+
+  우선순위: 중상. 제안.
+
+  기본 검색 두 사이클은 단순한 문제의 비용을 줄이는 데 효과적일 수 있어. 설정으로 조정할 수 있다는 점도 좋아.
+
+  하지만 범용 문제에서는 다음이 달라.
+
+  - 흔한 단일 영역 유동.
+  - 처음 보는 열물성 모델.
+  - 여러 영역이 연결된 열전달.
+  - 반응·다상·이동 mesh 조합.
+
+  개선 방향
+
+  전체 예산 상한은 유지하되, 검색 종료 판단을 다음과 연결하면 좋아.
+
+  - 선택된 기능의 가용성 근거가 있는가?
+  - 필수 파일 문법이 확보됐는가?
+  - interface/물성 모델의 호환성 근거가 있는가?
+  - 같은 검색을 반복 중인가?
+  - 추가 검색이 실제로 새로운 근거를 주고 있는가?
+
+  검색 횟수를 무조건 늘리자는 뜻은 아니야. 위험한 빈칸에는 예산을 쓰고, 반복 검색에는 쓰지 않는 구조가 더 중요해.
+
+  ———
+
+  ## 7. capability와 reference 탐색의 범용성
+
+  ### 18) function object를 발견해 놓고 catalog로 연결하지 않는다
+
+  우선순위: 중상. 정적 분석.
+
+  설치 탐색은 function_object를 수집해.
+
+  하지만 _installed_providers()의 component 처리에서는 solver_module, fv_model 외의 항목이 continue로 빠져.
+
+  따라서 탐색 결과 일부가 실제 capability 검색에 연결되지 않아.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/installation.py:123, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/capability_catalog.py:122
+
+  개선 방향
+
+  발견 → catalog 등록 → 모델 노출 → 사용 검증까지를 하나의 테스트로 묶어야 해.
+
+  그리고 다음 category도 같은 확장 구조를 쓰도록 하면 좋아.
+
+  - boundary condition.
+  - thermophysical model.
+  - momentum transport model.
+  - fvConstraint.
+  - function object.
+  - geometry/mesh 관련 selectable type.
+
+  ### 19) installed 근거가 실제 생성 가능성을 과하게 암시할 수 있다
+
+  우선순위: 중상. 정적 분석.
+
+  소스 디렉터리나 등록 macro에서 이름을 찾는 것은 유용하지만, 그것만으로 현재 라이브러리가 빌드됐고 로드 가능하다는 보장은 없어.
+
+  현재는 이런 provider에도 verified=True, verification_level="installed"가 붙어.
+
+  개선 방향
+
+  검증 단계를 더 구분하면 좋아.
+
+  문서에 존재
+  → 설치 소스에서 발견
+  → 실행 파일/라이브러리 존재
+  → runtime table에 등록
+  → 작은 검증 실행 성공
+
+  OpenFOAM의 foamToC는 컴파일된 라이브러리의 runtime-selection table을 직접 조회하는 도구라, 이 용도에 적합한 근거를 제공해. 공식 case management 문서
+
+  중요한 건 발견 실패를 곧 지원 불가능이라고 단정하지 않고, 발견 성공을 실행 보장으로도 단정하지 않는 것이야.
+
+  ### 20) reference 검색에 순서 편향과 언어 한계가 있다
+
+  우선순위: 중간. 정적 분석.
+
+  현재 검색은 ASCII 토큰 중심이야.
+
+  - 순수 한국어 reference query는 토큰이 없어 결과가 없을 수 있음.
+  - capability 검색은 토큰이 없으면 일정한 앞쪽 결과를 돌려줄 수 있음.
+
+  또 scope=all은 root를 정렬하고 전체 파일 수 제한을 공유해. etc → source → tutorials 순서라 source 탐색이 예산을 소진하면 tutorials가 충분히 검색되지 않을 수 있어.
+
+  FOAM_MODULES도 reference root에 직접 포함되어 있지 않아.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/references.py:17, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/references.py:51, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/
+  capability_catalog.py:45
+
+  개선 방향
+
+  - 사용자 언어→OpenFOAM 용어의 검색 정규화.
+  - scope별 최소 탐색 예산.
+  - 선택된 provider에서 source/tutorial로 직접 연결.
+  - 설치 fingerprint별 검색 인덱스 캐시.
+  - 이름 검색과 내용 검색의 분리.
+  - 검색이 잘렸는지, 어떤 scope가 빠졌는지 결과에 명시.
+
+  처음부터 거대한 vector DB가 필요한 건 아니야. 결정적인 자료가 검색 범위에서 빠지지 않게 하는 것부터 효과가 클 거야.
+
+  ———
+
+  ## 8. “실행 성공”과 “요청한 계산을 제대로 수행함”의 구분
+
+  ### 21) 현재 runtime 완료 판정은 너무 약하다
+
+  우선순위: 높음. 재현.
+
+  현재 parser는 대체로 다음을 본다.
+
+  - return code 0.
+  - End 존재.
+  - Time 기록 존재.
+  - fatal/non-finite 오류 없음.
+
+  그래서:
+
+  Time = 0
+  End
+
+  만 있어도 success=True, completed=True가 됐어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/parsers.py:32
+
+  이 함수에는 목표 종료 시간이나 초기 시간 같은 계약이 전달되지 않으니, 요청한 시간 구간을 계산했는지 알 수 없어.
+
+  개선 방향
+
+  성공을 한 단계가 아니라 여러 단계로 표현하면 좋아.
+
+  프로세스 정상 종료
+  → 의도한 계산 진행
+  → 종료 조건 충족
+  → 결과 파일 존재/유한성 확인
+  → 수치 품질 확인
+  → 물리 목표 확인
+
+  비정상 계산은 시간 구간을, 정상 계산은 적절한 수렴/종료 조건을 확인해야 해. 모든 문제에 동일한 endTime 판정을 강제하면 또 다른 범용성 문제가 생겨.
+
+  특히 “vortex shedding을 보고 싶다”는 요청에서는 solver 종료와 shedding 관측을 구분해야 해.
+
+  ### 22) timeout이 실행 결과로 정리되지 않는 경로가 있다
+
+  우선순위: 중상. 정적 분석.
+
+  streaming runner는 timeout에서 process를 kill하고 TimeoutExpired를 발생시켜.
+
+  이 경우 정상 ToolResult와 같은 방식으로 부분 로그·종료 원인·복구 가능성을 넘기는 경로가 약해져.
+
+  또 runtime policy는 최대 86,400초를 허용하지만 runner 기본 상한은 3,600초야.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/safe_runner.py:94, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/safe_runner.py:332, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/schemas/
+  simulation.py:31
+
+  개선 방향
+
+  timeout을 “알 수 없는 Python 예외”가 아니라 구조화된 실행 결과로 반환해야 해.
+
+  - 종료 이유.
+  - 부분 로그 위치.
+  - 마지막 계산 시간.
+  - 남아 있는 process 여부.
+  - restart 가능한 결과 존재 여부.
+  - 재시도해도 되는지.
+
+  명령 전체 process group을 관리하는 구조도 병렬 실행 전에 필요해.
+
+  ### 23) 긴 계산의 로그 메모리 사용이 커질 수 있다
+
+  우선순위: 중상. 정적 분석.
+
+  streaming runner는 출력 queue와 chunks를 메모리에 축적하고, 최종 문자열을 만들어 parser에 전달해. parser도 줄 목록과 residual 목록을 만든다.
+
+  긴 계산에서는 로그 크기가 곧 agent 메모리 부담이 될 수 있어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/tools/safe_runner.py:352
+
+  개선 방향
+
+  - 로그 원문은 디스크에 streaming 저장.
+  - 메모리는 bounded tail만 유지.
+  - residual/시간/Courant는 증분 parser로 처리.
+  - 원본 로그 hash를 증분 계산.
+  - 상세 시계열은 별도 artifact.
+  - 출력 과다·디스크 부족도 명시적 중단 사유로 처리.
+
+  이건 성능 최적화이기도 하지만, 대형 case를 안정적으로 돌리기 위한 기본 기능이야.
+
+  ### 24) post-processing 실행도 새 execution 구조를 따라가지 못한다
+
+  우선순위: 중상. 정적 분석.
+
+  현재 use_solver_context가 켜지면 engineering_plan.solver를 그대로 foam_post_process()에 전달해.
+
+  그런데 이제 그 값은 module 이름이 아니라 foamMultiRun 같은 driver나 direct solver application일 수 있어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/postprocessing/agent.py:335
+
+  개선 방향
+
+  post-processing도 다음을 명시적으로 받아야 해.
+
+  - 대상 region.
+  - 해당 region의 solver module.
+  - 필요한 field와 물성 context.
+  - 시간 선택.
+  - 병렬 결과 처리 방식.
+
+  이번 리뷰에서 post-processing을 실행한 건 아니고, 소스상 실행 연결 문제를 확인한 것이야.
+
+  ### 25) 정량 후처리가 force coefficient 중심이다
+
+  우선순위: 중상. 범용성 개선.
+
+  현재 deterministic 분석은 Cd, Cl, shedding frequency/Strouhal 쪽이 중심이야.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/postprocessing/analysis.py:16, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/workflow/state.py:49
+
+  원통 shedding에는 좋지만, 범용 목표에는 다른 결과가 필요해.
+
+  - 압력 손실.
+  - 질량 유량.
+  - 열유속과 에너지 수지.
+  - 최대/평균 온도.
+  - 영역 간 열 전달.
+  - 종 농도·혼합 정도.
+  - 상별 체적/질량 변화.
+
+  개선 방향
+
+  force_analysis 하나를 키우기보다 일반적인 QuantityOfInterest 계약을 두는 게 좋아.
+
+  어떤 물리량?
+  어느 region/patch/volume?
+  어느 시간 구간?
+  어떤 연산?
+  어떤 단위?
+  어떤 품질 기준?
+  어느 결과 파일에서 계산?
+
+  LLM은 목표와 연산을 고르고, deterministic code는 계산과 데이터 연결을 검증하도록 하면 돼.
+
+  ### 26) 비균일 시간 간격의 통계 처리가 필요하다
+
+  우선순위: 중간. 정적 분석.
+
+  현재 force coefficient 평균은 statistics.fmean()이야.
+
+  출력 샘플 간격이 일정하면 자연스럽지만, 비균일한 시간 간격에서는 샘플 평균과 시간 평균이 달라져.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/postprocessing/analysis.py:63
+
+  개선 방향
+
+  - 균일/비균일 시간 간격 감지.
+  - 시간 가중 평균과 RMS.
+  - 중복 시각 처리.
+  - restart로 이어 붙은 데이터 정리.
+  - 초기 과도 구간 제거 기준.
+  - 주파수 추정의 관측 구간·주기 수·불확실성 표시.
+
+  Strouhal 숫자 하나를 보여주는 것보다 그 숫자가 얼마나 믿을 만한지를 함께 보여주는 게 중요해.
+
+  ———
+
+  ## 9. 바로 수정 효과를 볼 수 있는 CLI·backend 문제
+
+  ### 27) one-shot --solve의 상태 조건이 오래된 상태를 본다
+
+  우선순위: 높음. 정적 분석.
+
+  run_prompt()는 다음 상태일 때만 solver를 승인하고 다시 workflow를 실행해.
+
+  if execute_solver and final_state.current_state == State.MESH_READY:
+
+  그런데 solve-ready gate를 사용하는 정상 경로는 SOLVE_READY로 끝나.
+
+  그래서 그 조합에서는 --solve를 줘도 조건에 들어가지 않아.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/cli.py:1109
+
+  완료 기준: interactive와 one-shot이 같은 승인/실행 상태 전이 함수를 사용하고, SOLVE_READY + --solve 회귀 테스트가 있어야 해.
+
+  ### 28) SOLVE_READY에서 안내하는 /feedback이 거부될 수 있다
+
+  우선순위: 높음. 정적 분석.
+
+  _feedback_session()은 현재:
+
+  MESH_READY
+  RESULT_REVIEW_REQUIRED
+
+  만 허용해.
+
+  정작 사용자가 계산 전에 검토하는 SOLVE_READY가 빠져 있어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/cli.py:1239
+
+  이건 특히 범용 agent에서 중요해. 사용자는 mesh·영역 크기·경계조건을 보고 계산 전에 수정할 수 있어야 해.
+
+  개선 방향: 명령별 상태 조건을 여러 함수에 흩어놓지 말고, 중앙 상태 전이 규칙으로 관리해.
+
+  ### 29) Codex backend가 구독 인증 사용을 확실히 판별하지 않는다
+
+  우선순위: 높음. 모의 검사로 재현.
+
+  현재 check_codex_cli()는 login status에 "logged in"이 들어 있으면 통과시켜.
+
+  그래서 다음과 같은 모의 응답도 통과했어.
+
+  Logged in using an API key - ...
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/llm/codex_client.py:67, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/llm/codex_client.py:124
+
+  이전에 네가 물었던 **“API 말고 Codex 사용량으로 돌릴 수 있나”**와 직접 관련된 부분이야.
+
+  환경변수에서 API key를 제거하는 것과, CLI의 기존 인증이 어떤 방식인지 확인하는 것은 별개야.
+
+  개선 방향
+
+  - 인증 완료 여부와 인증 종류를 분리.
+  - 구독 인증을 요구하는 모드에서는 API-key 인증을 명시적으로 거부.
+  - 판별 불가 시 “구독 사용 보장”이라고 표시하지 않기.
+  - 버전별 status 출력 차이를 fixture로 검사.
+
+  실제 네 계정 인증이나 과금 경로를 확인한 것은 아니야. 현재 판별 코드의 허점을 모의 응답으로 확인한 것이야.
+
+  ### 30) Codex adapter의 “모델 전용 transport” 의도를 더 강하게 보장해야 한다
+
+  우선순위: 중상. 정적 분석.
+
+  현재 adapter는 empty temp directory, read-only sandbox, ephemeral 호출 등을 사용해. 격리하려는 의도는 좋아.
+
+  다만 코드 차원에서는:
+
+  - 환경변수 대부분을 상속.
+  - 일부 routing 변수만 제거.
+  - --ignore-user-config 지원 여부에 따라 동작 차이.
+  - last_usage는 수집되지 않음.
+
+  이 남아 있어.
+
+  근거: /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/llm/codex_client.py:60, /home/mlfm/OpenFOAM_Agent/src/openfoam_agent/llm/codex_client.py:147
+
+  개선 방향
+
+  - 필요한 환경변수만 전달하는 allowlist.
+  - 지원하는 CLI 버전/기능 계약 명시.
+  - 모델 응답 외 실행 이벤트가 발생했는지 관찰 가능한 transport.
+  - usage를 얻을 수 없으면 0이 아니라 unknown.
+  - 인증·구조화 출력·취소·재시도·usage에 대한 backend 공통 계약 테스트.
+
+  read-only 설정과 도구를 전혀 사용하지 않는 모델 호출은 같은 보장이 아니므로, 문서 표현도 구현 수준에 맞추는 게 좋아.
+
+  ———
+
+  ## 10. 유지보수와 평가 체계
+
+  ### 31) 중심 agent 파일에 책임이 너무 많이 모여 있다
+
+  engineering/agent.py가 약 5천 줄이야.
+
+  줄 수 자체가 버그는 아니지만, 이번에 본 문제들이 왜 생겼는지와 연결돼.
+
+  - execution spec은 확장됐는데 approval 비교는 예전 solver 문자열.
+  - multi-region은 schema에 들어왔는데 pre-solve 경로는 단일 영역.
+  - 상태는 SOLVE_READY가 생겼는데 CLI 조건은 MESH_READY.
+  - staged authoring은 생겼는데 evidence 전달 계약은 빠짐.
+
+  새 기능이 들어갈 때 수정해야 하는 지점이 너무 분산되어 있다는 신호야.
+
+  추천 분리는 다음 정도야.
+
+  요구사항/설계 계약
+  컨텍스트 구성
+  파일 bundle 작성·반영
+  native 실행 정책
+  검증·근거 관리
+  수리 범위 판단
+  workflow 상태 전이
+
+  무조건 파일만 나누기보다는, 각 책임이 입력과 출력 계약을 하나씩 가지게 하는 것이 중요해.
+
+  ### 32) 생성물이 Git에 많이 추적되어 있다
+
+  현재 Git이 추적하는 .pyc가 111개였고, egg-info 변경도 worktree에 있어.
+
+  이건 핵심 CFD 문제보다 우선순위는 낮지만, 리뷰와 배포 재현성을 해쳐.
+
+  개선 방향
+
+  - .pyc, __pycache__, 빌드 산출물 정리.
+  - source checkout과 설치 산출물 분리.
+  - wheel 설치 후 CLI 실행 검사.
+  - OpenFOAM 13/14 config가 패키지에서 실제로 발견되는지 검사.
+  - 개발/배포용 의존성 재현 방법 마련.
+
+  참고로 13/14 capability graph를 모두 패키지에 포함하는 설정은 현재 들어 있어. 이 부분을 예전 문제로 다시 지적할 이유는 없어.
+
+  ### 33) 298개 테스트와 “범용 CFD 성공률” 사이를 연결해야 한다
+
+  이번에 기존 테스트가 모두 통과하면서도 경계 조건 오류가 나온 건, 테스트가 무의미하다는 뜻이 아니야.
+
+  현재 테스트가 보장하는 것과 제품이 주장하려는 범위가 다르다는 뜻이야.
+
+  기존 평가 계획 (/home/mlfm/OpenFOAM_Agent/research/V2_EVAL_PLAN.md)에는 사용자 조건 보존·버전 정확성·승인 무결성·과학적 품질을 분리해 평가한다는 좋은 방향이 이미 적혀 있어. 이제 이를 실행 가능한 평가 묶음으
+  로 만드는 게 중요해.
+
+  추천은 세 층이야.
+
+  첫째, 빠른 회귀 검사
+
+  이번에 재현한 오류를 전부 포함해.
+
+  - 모든 경로에서 무승인 solver 차단.
+  - 숫자 수정·취소·단위 변환.
+  - 인라인/중첩 dictionary 안전 검사.
+  - region별 mesh 무효화.
+  - 컨텍스트 축약 후 필수 조건 보존.
+  - CLI 상태 전이.
+  - timeout과 부분 로그.
+  - backend 인증 구분.
+
+  둘째, 실제 OpenFOAM native 통합 검사
+
+  LLM 응답은 고정해도 되지만, 도구는 진짜 실행해.
+
+  - 작성된 dictionary.
+  - mesh 생성.
+  - checkMesh.
+  - 작은 solver 실행.
+  - 결과 파일 검사.
+
+  이 층이 있어야 “mock에서는 됐는데 native 문법은 틀린” 문제를 잡을 수 있어.
+
+  셋째, 실제 모델을 사용하는 미공개 문제 평가
+
+  튜토리얼 이름 그대로 요청하는 문제만으로 평가하지 말고, 표현과 조건을 바꿔야 해.
+
+   평가군                      확인할 능력
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━
+   단일 영역 정상 유동         기본 완결성
+  ──────────────────────────  ─────────────────────────
+   비정상 외부 유동            시간 설정·목표 관측
+  ──────────────────────────  ─────────────────────────
+   열전달                      에너지/물성 설정
+  ──────────────────────────  ─────────────────────────
+   유체–고체 복합 열전달       region/interface 연결
+  ──────────────────────────  ─────────────────────────
+   다상 문제                   상별 필드·모델 호환성
+  ──────────────────────────  ─────────────────────────
+   실제 STL 입력               자산 가져오기·mesh 전략
+  ──────────────────────────  ─────────────────────────
+   기존 case 수정·재개         상태 보존·restart
+  ──────────────────────────  ─────────────────────────
+   잘못되거나 불충분한 요청    적절한 질문·차단
+
+  성공률도 하나로 합치지 않는 게 좋아.
+
+  - intake 해석 성공.
+  - 설계 유효성.
+  - case 생성 성공.
+  - mesh 성공.
+  - solver 기동 성공.
+  - 목표 구간 계산 성공.
+  - 수치 품질.
+  - 사용자 목표 달성.
+  - 사용 비용과 사람 개입 횟수.
+
+  그리고 실패 run도 분모에서 빼지 말아야 해. 그래야 개선이 실제로 보인다.
+
+  ———
+
+  ## 11. 내가 추천하는 개발 순서
+
+  한 번에 전부 고치기보다 다음 순서가 좋아.
+
+  ### 1단계: 현재 약속을 확실히 지키기
+
+  가장 먼저 할 것:
+
+  1. 모든 native 실행 경로의 승인 검사 통합.
+  2. libs 구문 검사 수정.
+  3. --solve, /feedback 상태 전이 수정.
+  4. 실제 subprocess 기반 예산 집계.
+  5. 숫자 override 처리.
+  6. Codex 인증 종류 검사.
+  7. 위 항목 회귀 테스트.
+
+  새 물리 기능을 늘리지 않아도 안정성이 크게 올라가는 작업들이야.
+
+  ### 2단계: 공통 계약을 끝까지 연결하기
+
+  그다음:
+
+  1. region-aware case layout.
+  2. 영역별 mesh evidence와 무효화.
+  3. 실행 계약 전체에 대한 승인·수리 정책.
+  4. authoring evidence pack.
+  5. 필수 조건을 자르지 않는 context compiler.
+  6. checkpoint/resume.
+
+  이 단계가 범용성의 핵심이라고 봐.
+
+  ### 3단계: 현실적인 사용 범위 넓히기
+
+  그다음에:
+
+  1. 실제 geometry/데이터 가져오기.
+  2. 기존 case 수정·restart.
+  3. 로컬 MPI.
+  4. 일반화된 정량 목표와 검증.
+  5. 버전별 native 통합 평가.
+
+  이 순서면 기능을 추가할수록 기존 구조가 흔들리는 현상을 줄일 수 있어.
+
+  ## 최종 평가
+
+  현재 프로젝트를 나는 이렇게 평가해.
+
+  > 범용 CFD 에이전트를 지향하는 설계는 상당히 구체화됐다. 다만 일부 공통 계층이 여전히 단일 영역·단일 solver·짧은 실행·단순한 요구사항을 전제로 하고 있어, 새로 늘어난 표현 범위를 끝까지 받쳐주지는 못한다.
+
+  그래서 다음 버전의 핵심 목표는 “더 많은 OpenFOAM 기능을 알게 하기”보다 다음이었으면 해.
+
+  “어떤 문제를 선택하든, 사용자 조건·영역 구조·실행 권한·검증 근거가 intake부터 결과까지 일관되게 유지되게 하기.”
+
+  그 기반을 만들면 새로운 solver나 물리 모델은 비교적 자연스럽게 붙을 거야. 반대로 그 기반 없이 capability 수만 늘리면, 모델이 선택할 수 있는 것은 많아져도 끝까지 성공시키는 비율은 잘 올라가지 않을 가능성이

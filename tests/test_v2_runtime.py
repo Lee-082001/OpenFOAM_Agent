@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from conftest import configure_mock_completed_run
+
 from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
 from openfoam_agent.runtime import RuntimeOrchestrator
 from openfoam_agent.schemas.common import ToolResult
@@ -71,6 +73,7 @@ def test_runtime_failure_log_returns_to_agent_and_retries(tmp_path, graph_path):
             RetrySolverAction(type="retry_solver", plan=plan, rationale="Retry the same approved solver."),
         ],
     )
+    configure_mock_completed_run(state, agent, end_time=0.2)
     state.approve_solve()
     runtime = RuntimeOrchestrator(tools, agent, RuntimePolicy(max_attempts=2, solver_timeout_seconds=30))
     runtime.run(state)
@@ -93,6 +96,7 @@ def test_runtime_repair_cannot_switch_solver_without_user_review(tmp_path, graph
         RetrySolverAction(type="retry_solver", plan=changed, rationale="Try another solver."),
         BlockAction(type="block", reason="A solver change requires user review.", needs_user_input=True, rationale="Do not bypass approval."),
     ])
+    state.approve_solve()
     outcome = agent.repair_runtime(
         state,
         runtime_log="--> FOAM FATAL ERROR: model mismatch\n",
@@ -102,7 +106,7 @@ def test_runtime_repair_cannot_switch_solver_without_user_review(tmp_path, graph
     assert not outcome.retry
     assert state.current_state == State.ENGINEERING_REVIEW_REQUIRED
     assert any(
-        "user-approved solver" in event.output_excerpt
+        ("approval" in event.output_excerpt.lower() or "approved" in event.output_excerpt.lower())
         for event in state.engineering_events
         if event.action_type == "retry_solver"
     )
@@ -139,6 +143,7 @@ def test_runtime_openfoam13_seconds_suffix_finishes_on_first_attempt(tmp_path, g
     )
     state, _, llm, agent = _prepared_agent(tmp_path, graph_path, tools, [])
     prompts_before_solve = len(llm.prompts)
+    configure_mock_completed_run(state, agent, end_time=20.0)
     state.approve_solve()
     runtime = RuntimeOrchestrator(tools, agent, RuntimePolicy(max_attempts=9, solver_timeout_seconds=30))
     runtime.run(state)

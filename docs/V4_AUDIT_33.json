@@ -1,0 +1,1231 @@
+{
+  "release": "4.0.0rc1",
+  "qualification": "NOT production/native-CFD qualified",
+  "date": "2026-09-07",
+  "basis": "Exact retrieved v3.6.0 archive and user's 33-item audit; no missing prior v4 recovered",
+  "status_legend": {
+    "reproduced_defect_verified": "재현된 소프트웨어 결함의 수정은 명시된 단위·모의·합성 프로세스 범위에서 확인. 실제 CFD 또는 전체 기능 완료를 뜻하지 않음.",
+    "partial": "일부 구현과 통과한 검사가 있으나 감사 요구 전체의 구현 또는 실환경 검증이 남아 있음."
+  },
+  "sources": [
+    {
+      "name": "OpenFOAM_Agent_v3.6.0_SHA256SUMS.txt",
+      "size_bytes": 239,
+      "sha256": "f806066295d2937e43c0d3c10509698361e01c795d9538bf110f255f146fc23c"
+    },
+    {
+      "name": "OpenFOAM_Agent_v3.6.0_bounded_staged_context.zip",
+      "size_bytes": 434683,
+      "sha256": "3d9d99c8b186db5ed429ac36a6c49104052ae2b0c5c4b25b73e61a3b7eefb9ac"
+    },
+    {
+      "name": "붙여넣은 텍스트 (1)(8).txt",
+      "size_bytes": 50644,
+      "sha256": "8ee68ecb07959c57f92c715fce0e9c88bcdcad0faf9bdcecb2d14db0bdba6cab"
+    }
+  ],
+  "test_summary": {
+    "passed": 359,
+    "legacy_passed": 298,
+    "new_v4_passed": 61,
+    "failed": 0,
+    "skipped": 0,
+    "two_partition_exact_collection_coverage": true
+  },
+  "all_33_completed": false,
+  "native_or_live_model_test_count": 0,
+  "audit_items": [
+    {
+      "id": 1,
+      "title_ko": "모든 native 경로의 실행 승인",
+      "audit_closure": "reproduced_defect_verified",
+      "implementation_paths": [
+        "src/openfoam_agent/tools/execution_policy.py",
+        "src/openfoam_agent/tools/safe_runner.py",
+        "src/openfoam_agent/contracts/execution.py",
+        "src/openfoam_agent/engineering/agent.py"
+      ],
+      "implementation_ko": "명령 효과를 runner가 판정한다. LLM의 role 문자열을 권한으로 쓰지 않는다. 준비·runtime repair·사용자 revision의 일반 native 경로에서도 승인 없는 본 계산은 프로세스 생성 전에 차단한다. 실제 argv, 실행 위치, 승인 계약과 case 입력을 대조한다.",
+      "executed_verification_ko": "세 engineering phase에서 모의 실행기까지 도달하지 않는지 검사했다. 실제 SafeRunner에서도 미승인 호출을 막고, 승인된 합성 실행 파일만 시작하는 경계를 검사했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_execution_contracts.py::test_a01_unapproved_generic_native_cannot_reach_even_fake_runner[prepare]",
+        "tests/test_v400_execution_contracts.py::test_a01_unapproved_generic_native_cannot_reach_even_fake_runner[runtime_repair]",
+        "tests/test_v400_execution_contracts.py::test_a01_unapproved_generic_native_cannot_reach_even_fake_runner[human_revision]",
+        "tests/test_v400_execution_contracts.py::test_a01_real_runner_requires_contract_before_spawn"
+      ],
+      "verification_level": "unit/mock + synthetic subprocess",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "검사한 Python 진입점의 정책 경계에 대한 확인이다. 실제 OpenFOAM 실행, 악의적인 설치 바이너리, OS 권한 격리까지 검증한 것은 아니다.",
+      "source_audit_title_ko": "/solve 승인 검사가 일반 native 실행 경로에는 없다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/tools/execution_policy.py": "2989f5c7ca528730d7b5ae520a61893fd27c76178cc472218faf0079cbc170b4",
+        "src/openfoam_agent/tools/safe_runner.py": "24d6aff4435c6cb6bc35973c21afcf94943d0afe9fb1faa311402921108732a6",
+        "src/openfoam_agent/contracts/execution.py": "d15ccdb2909db8a955f6fa83c122bf2f912096dd7b5ec0d73252318ca4190a59",
+        "src/openfoam_agent/engineering/agent.py": "72a7b55ab0c9e842f4af81a2be69ab00a1f1ad08de99a4eb41ca7a6a13ee3814"
+      }
+    },
+    {
+      "id": 2,
+      "title_ko": "전체 execution spec과 자동 수리 승인 범위",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/contracts/execution.py",
+        "src/openfoam_agent/runtime/orchestrator.py",
+        "src/openfoam_agent/engineering/agent.py"
+      ],
+      "implementation_ko": "driver, module, 영역별 배치, arguments, MPI 계약, 물리 구현, QoI, 자원 제한을 승인 문서에 묶는다. 자동 수리는 제한된 fvSchemes/fvSolution 파일 변경만 허용하고 물리·자산·실행 계약 변경은 재승인 대상으로 다룬다. mesh 수정은 seal과 실행 승인을 무효화한다.",
+      "executed_verification_ko": "argv 불일치, 승인 후 목표 변경, 승인 자원 상한, 허용·불허 수리 경로를 비교했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_execution_contracts.py::test_a02_actual_argv_and_repair_scope_are_bound",
+        "tests/test_v400_release_edges.py::test_a02_approval_binds_postprocessing_goals_and_resource_limits"
+      ],
+      "verification_level": "unit/mock + synthetic subprocess",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "문법과 물리 의미를 완전하게 구별하는 자동 판별기는 아니다. 실제 OpenFOAM 수리 재시도와 multi-region module 교체 전체 흐름은 native 미검증이다.",
+      "source_audit_title_ko": "자동 수리의 승인 범위가 plan.solver 문자열에 치우쳐 있다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/contracts/execution.py": "d15ccdb2909db8a955f6fa83c122bf2f912096dd7b5ec0d73252318ca4190a59",
+        "src/openfoam_agent/runtime/orchestrator.py": "84fd00888c1cbd185430b05818dd5252907fd77f5d977e90abb05574176f1cea",
+        "src/openfoam_agent/engineering/agent.py": "72a7b55ab0c9e842f4af81a2be69ab00a1f1ad08de99a4eb41ca7a6a13ee3814"
+      }
+    },
+    {
+      "id": 3,
+      "title_ko": "인라인·중첩·주석 libs 검사",
+      "audit_closure": "reproduced_defect_verified",
+      "implementation_paths": [
+        "src/openfoam_agent/tools/dictionary_policy.py",
+        "src/openfoam_agent/tools/workspace.py"
+      ],
+      "implementation_ko": "줄 시작 정규식 대신 token 단위로 libs를 검사한다. 인라인, 중첩, quoted key/value, 여러 줄, 공백 없는 주석 삽입에도 같은 allowlist를 적용한다. 경로 지정 및 미허용 라이브러리는 거부한다.",
+      "executed_verification_ko": "감사 재현 형태와 libs/*comment*/(...) 우회, 주석에만 있는 문자열을 구분하는 회귀 검사를 수행했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_execution_contracts.py::test_a03_libs_inline_nested_comments_cannot_bypass[libs (\"libUnknownAudit.so\");]",
+        "tests/test_v400_execution_contracts.py::test_a03_libs_inline_nested_comments_cannot_bypass[functions { audit { libs (libUnknownAudit.so); } }]",
+        "tests/test_v400_execution_contracts.py::test_a03_libs_inline_nested_comments_cannot_bypass[functions{audit{libs/*comment*/(\\n\"libUnknownAudit.so\"\\n);}}]",
+        "tests/test_v400_execution_contracts.py::test_a03_libs_inline_nested_comments_cannot_bypass[functions { audit { \"libs\" (\"libUnknownAudit.so\"); } }]",
+        "tests/test_v400_execution_contracts.py::test_a03_comment_only_unknown_library_is_not_loaded"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "검사 대상은 지원하는 dictionary 문법 범위이며 native 라이브러리를 실제 로드하거나 임의 OpenFOAM 문법 전체를 형식 검증한 것은 아니다.",
+      "source_audit_title_ko": "libs 검사가 줄 배치에 따라 우회된다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/tools/dictionary_policy.py": "cde71ee44aed222119927fe7d30007f8dd148ddb4296524ef9d77a3a3c12508c",
+        "src/openfoam_agent/tools/workspace.py": "4aad527b44a5b9c1f06d46f4ab56b1193900742181373f2c9a9cf6d9e2348e12"
+      }
+    },
+    {
+      "id": 4,
+      "title_ko": "파일 정책과 프로세스 정책 분리",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/tools/dictionary_policy.py",
+        "src/openfoam_agent/tools/execution_policy.py",
+        "src/openfoam_agent/tools/exec_guard.py"
+      ],
+      "implementation_ko": "문서 검사와 명령 효과·승인을 분리했다. literal local include를 명시적으로 처리할 수 있는 helper에 해시·경로·순환·크기 제한을 추가했다. 동적 코드와 위험 명령/옵션은 거부하고 POSIX CPU·주소 공간·개별 파일 제한을 지원한다.",
+      "executed_verification_ko": "include 정상 해시, 순환, 외부 경로 거부를 검사했다. 합성 CPU 부하 subprocess에서 CPU 상한 종료를 관찰했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_release_edges.py::test_a04_local_include_hash_cycle_and_escape",
+        "tests/test_v400_release_edges.py::test_a04_actual_cpu_limit_is_enforced_on_synthetic_process"
+      ],
+      "verification_level": "unit + synthetic subprocess",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "include helper는 모든 기존 case 가져오기/작성 경로에 자동 연결되어 있지 않다. 메모리 상한 스트레스 검증, 전체 디스크 quota, MPI 전체 합산 CPU·메모리, filesystem/network namespace 격리는 미완성 또는 미검증이다. 서비스용 보안 sandbox로 보증하지 않는다.",
+      "source_audit_title_ko": "안전 정책이 한편으로는 좁고, 다른 한편으로는 실행 효과를 충분히 제한하지 않는다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/tools/dictionary_policy.py": "cde71ee44aed222119927fe7d30007f8dd148ddb4296524ef9d77a3a3c12508c",
+        "src/openfoam_agent/tools/execution_policy.py": "2989f5c7ca528730d7b5ae520a61893fd27c76178cc472218faf0079cbc170b4",
+        "src/openfoam_agent/tools/exec_guard.py": "731902ca4ef6916b7afc456df065d634afc7d62e2098333887011f90051a6d59"
+      }
+    },
+    {
+      "id": 5,
+      "title_ko": "실제 subprocess 예산과 문법 검사 캐시",
+      "audit_closure": "reproduced_defect_verified",
+      "implementation_paths": [
+        "src/openfoam_agent/tools/safe_runner.py",
+        "src/openfoam_agent/tools/openfoam.py",
+        "src/openfoam_agent/engineering/agent.py",
+        "src/openfoam_agent/cli.py"
+      ],
+      "implementation_ko": "실제 Popen 진입에서 spawn intent와 pid를 기록하고 예산을 소모한다. 여러 dictionary를 확인하는 한 action도 각각의 프로세스가 계수된다. 파일 해시·실행 파일·환경·옵션 기반 캐시를 적용하고 승인된 한도와 runner 한도 중 더 엄격한 값을 따른다. CLI는 legacy event 수와 실제 spawn 수를 구분한다.",
+      "executed_verification_ko": "budget 1에서 두 번째 실제 프로세스 차단, cache hit의 무차감, 파일 변경 시 재검사, 승인 한도의 우선 적용을 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_execution_contracts.py::test_a05_budget_is_actual_spawns_and_cache_hits_do_not_spend",
+        "tests/test_v400_execution_contracts.py::test_a05_file_hash_invalidates_dictionary_cache",
+        "tests/test_v400_release_edges.py::test_a05_approval_budget_is_stricter_than_runner_budget"
+      ],
+      "verification_level": "synthetic subprocess",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "직접 시작한 native subprocess 수이며 MPI 내부 rank/손자 프로세스 개수를 같은 계수로 세지 않는다. rank 수는 별도 계약이다. 원장 동시 접근은 단일 agent 프로세스 전제로, 다중 프로세스 workspace lock은 없다.",
+      "source_audit_title_ko": "native budget이 실제 subprocess 수를 세지 않는다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/tools/safe_runner.py": "24d6aff4435c6cb6bc35973c21afcf94943d0afe9fb1faa311402921108732a6",
+        "src/openfoam_agent/tools/openfoam.py": "2d672caf6608ad647e2e8bcc548e90ec120f344549186c309a4143dce60bfc2b",
+        "src/openfoam_agent/engineering/agent.py": "72a7b55ab0c9e842f4af81a2be69ab00a1f1ad08de99a4eb41ca7a6a13ee3814",
+        "src/openfoam_agent/cli.py": "21564005512e4d7207801b6d389ac6886608d82af303d9d9abd4ae6ea86007fe"
+      }
+    },
+    {
+      "id": 6,
+      "title_ko": "영역별 case layout과 pre-solve",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/contracts/models.py",
+        "src/openfoam_agent/contracts/regions.py",
+        "src/openfoam_agent/verification/presolve.py"
+      ],
+      "implementation_ko": "RegionCaseLayout을 공통 계약으로 두고 각 영역의 mesh, 초기 필드, fvSchemes/fvSolution과 interface patch를 검사한다. 다중 영역에 dummy root 수치 dictionary를 요구하지 않는다.",
+      "executed_verification_ko": "fluid/solid fixture에서 루트 fv 파일 없이 성공하고 solid 필드 누락은 fluid 필드로 대체되지 않음을 확인했다. interface의 존재와 연결 대상을 검사했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a06_two_regions_need_no_dummy_root_fv_files",
+        "tests/test_v400_audit_domains.py::test_a06_missing_solid_field_is_not_satisfied_by_fluid_field",
+        "tests/test_v400_audit_domains.py::test_a06_interface_checks_membership_not_flux_truth"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "실제 conjugate heat transfer solver 실행, 영역 사이 열유속 연속성·보존성, 모든 필수 물성 model 호환성은 검증하지 않았다. 정적 layout 통과는 물리적으로 올바른 CHT case의 보증이 아니다.",
+      "source_audit_title_ko": "multi-region은 실행 명세에 들어왔지만 pre-solve는 아직 단일 영역 중심이다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/contracts/models.py": "04d27266c7f92dc6281faa0082fb26cc8ae637d08f85db88dfbf2b2559155e0e",
+        "src/openfoam_agent/contracts/regions.py": "06932154928031127e0d57cda8f10fa913c88c95cffb683394caa78b6db2e6d8",
+        "src/openfoam_agent/verification/presolve.py": "07071ea25b75852515f814d939944bdcfafafdd8060738cb8fd47c73fdab3394"
+      }
+    },
+    {
+      "id": 7,
+      "title_ko": "영역별 mesh 검증 무효화",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/contracts/regions.py",
+        "src/openfoam_agent/tools/workspace.py",
+        "src/openfoam_agent/engineering/agent.py",
+        "src/openfoam_agent/verification/safety.py"
+      ],
+      "implementation_ko": "영역별 mesh evidence와 입력 digest를 사용한다. region polyMesh·region mesh dictionary·공유 geometry 변경을 반영하고 native mesh 변경 후 seal/approval을 무효화한다. checkMesh 근거는 제한된 UI tail 대신 해시가 연결된 전체 디스크 로그에서 읽는다.",
+      "executed_verification_ko": "영역별 독립 변경, 공유 geometry의 공통 무효화, 긴 합성 checkMesh 로그의 원문 처리와 경계 검사를 수행했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a07_mesh_digest_separates_regions_and_tracks_shared_geometry"
+      ],
+      "verification_level": "unit + synthetic subprocess",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "보수적인 경로 기반 의존성 모델이다. 모든 임의 native 도구의 입력·출력 관계를 학습하는 완전한 dependency DAG는 아니다. 실제 OpenFOAM checkMesh는 실행하지 않았다.",
+      "source_audit_title_ko": "region별 mesh 변경이 mesh 검증 무효화에 반영되지 않는다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/contracts/regions.py": "06932154928031127e0d57cda8f10fa913c88c95cffb683394caa78b6db2e6d8",
+        "src/openfoam_agent/tools/workspace.py": "4aad527b44a5b9c1f06d46f4ab56b1193900742181373f2c9a9cf6d9e2348e12",
+        "src/openfoam_agent/engineering/agent.py": "72a7b55ab0c9e842f4af81a2be69ab00a1f1ad08de99a4eb41ca7a6a13ee3814",
+        "src/openfoam_agent/verification/safety.py": "208f6501292842800c1c69d1b6c1110535f469699ed87858abe7b2e2c4c8a53e"
+      }
+    },
+    {
+      "id": 8,
+      "title_ko": "사용자 geometry·데이터 AssetRegistry",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/tools/assets.py",
+        "src/openfoam_agent/tools/workspace.py",
+        "src/openfoam_agent/schemas/request.py",
+        "src/openfoam_agent/cli.py"
+      ],
+      "implementation_ko": "명시적으로 승인한 원본만 case에 복사하고 원본/사본 해시, 형식, 크기 및 선언된 단위·좌표계·연결 정보를 기록한다. LLM 작성 경로와 사용자 자산을 분리해 덮어쓰기와 symlink/경로 이탈을 막는다. binary STL의 좌표 유한성과 삼각형 구조, CSV 기본 형식을 검사한다.",
+      "executed_verification_ko": "binary 자산의 내용 보존·승인·불변성, symlink와 case 외부 경로 거부를 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a08_binary_asset_hash_approval_and_immutability",
+        "tests/test_v400_audit_domains.py::test_a08_asset_symlink_and_outside_case_rejected"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "STL manifold/교차/법선 품질 및 실제 meshing은 미검증이다. 단위·표면·BC 연결은 선언 정보이며 자동 의미 검증이 아니다. 기존 case 가져오기는 입력 중심으로, 계산 시간 디렉터리의 정식 restart를 지원한 것으로 보지 않는다. import 실패 시 부분 사본 자동 rollback은 없다.",
+      "source_audit_title_ko": "실제 geometry·데이터 입력 연결이 부족하다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/tools/assets.py": "e482dbfa91d87e4bd1a2e9b3dd7353b98b7f45eed9192da85a5bf3f79e70ba69",
+        "src/openfoam_agent/tools/workspace.py": "4aad527b44a5b9c1f06d46f4ab56b1193900742181373f2c9a9cf6d9e2348e12",
+        "src/openfoam_agent/schemas/request.py": "330d27ef7be050d7e1bf4e0893fb3bcd846cf88ae8bfeb590f89e002a3187a48",
+        "src/openfoam_agent/cli.py": "21564005512e4d7207801b6d389ac6886608d82af303d9d9abd4ae6ea86007fe"
+      }
+    },
+    {
+      "id": 9,
+      "title_ko": "체크포인트와 보수적 재개",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/workflow/checkpoint.py",
+        "src/openfoam_agent/workflow/state.py",
+        "src/openfoam_agent/engineering/agent.py",
+        "src/openfoam_agent/cli.py"
+      ],
+      "implementation_ko": "확정 state뿐 아니라 staged draft, pending authoring, evidence, 실행 원장을 versioned/checksummed atomic checkpoint에 저장한다. 입력 해시와 환경을 대조하고, 불명확한 action/transaction/실행 중 프로세스는 자동 replay하지 않는다. 재개 시 실행 승인은 폐기한다.",
+      "executed_verification_ko": "draft·예산 복원, 파일 변경, 환경 변경, pending action, 중단된 transaction을 주입해 보존·거부 동작을 검사했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a09_draft_and_budget_checkpoint_restore",
+        "tests/test_v400_audit_domains.py::test_a09_uncertain_or_changed_state_is_preserved_not_replayed[bytes]",
+        "tests/test_v400_audit_domains.py::test_a09_uncertain_or_changed_state_is_preserved_not_replayed[environment]",
+        "tests/test_v400_audit_domains.py::test_a09_uncertain_or_changed_state_is_preserved_not_replayed[pending]",
+        "tests/test_v400_audit_domains.py::test_a09_uncertain_or_changed_state_is_preserved_not_replayed[transaction]"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "WSL 재시작, 실제 장기 solver 중단 후 process attach/restart, schema migration, fork CLI, 여러 agent의 동시 접근은 검증·완성되지 않았다. 환경 fingerprint는 전체 shared-library closure를 해시하는 방식이 아니다.",
+      "source_audit_title_ko": "checkpoint와 재개가 일급 기능이 아니다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/workflow/checkpoint.py": "66ac62bfea6c33d95b30d1fe9b04753d25926ab6ccb20b9a4fb8602c4e92aeff",
+        "src/openfoam_agent/workflow/state.py": "ea210ca79a38c062d9d0d28f61c1c7a11d55396446c70e6c48750e85bdba3d6d",
+        "src/openfoam_agent/engineering/agent.py": "72a7b55ab0c9e842f4af81a2be69ab00a1f1ad08de99a4eb41ca7a6a13ee3814",
+        "src/openfoam_agent/cli.py": "21564005512e4d7207801b6d389ac6886608d82af303d9d9abd4ae6ea86007fe"
+      }
+    },
+    {
+      "id": 10,
+      "title_ko": "구조화된 로컬 MPI",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/contracts/models.py",
+        "src/openfoam_agent/runtime/parallel.py",
+        "src/openfoam_agent/tools/safe_runner.py",
+        "src/openfoam_agent/runtime/orchestrator.py"
+      ],
+      "implementation_ko": "serial/local MPI, rank 상한, launcher, decomposition method, 재구성 여부를 계약화했다. decomposePar 입력과 rank별 산출물 해시를 확인하고 승인된 argv만 실행한다. 기존 processor 산출물은 강제 삭제하지 않으며 마지막 시각 확인 후 reconstructPar로 연결한다.",
+      "executed_verification_ko": "모의 transport로 분할 계약, rank별 파일, 기존 산출물 보존과 오류 경로를 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a10_mpi_structure_and_existing_outputs_preserved"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "실제 mpirun/분할/병렬 계산/재구성은 모두 미실행이다. collated/distributed I/O, hostfile, scheduler/Slurm, 병렬 restart와 모든 rank 일괄 종료는 미지원 또는 미검증이다. MPI 완료로 표시하지 않는다.",
+      "source_audit_title_ko": "병렬/HPC 실행은 명시적 계약이 필요하다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/contracts/models.py": "04d27266c7f92dc6281faa0082fb26cc8ae637d08f85db88dfbf2b2559155e0e",
+        "src/openfoam_agent/runtime/parallel.py": "ec649d63f39c0bae1a8dd18d334ba80ed51748a88a185882136ef4a85469af1d",
+        "src/openfoam_agent/tools/safe_runner.py": "24d6aff4435c6cb6bc35973c21afcf94943d0afe9fb1faa311402921108732a6",
+        "src/openfoam_agent/runtime/orchestrator.py": "84fd00888c1cbd185430b05818dd5252907fd77f5d977e90abb05574176f1cea"
+      }
+    },
+    {
+      "id": 11,
+      "title_ko": "숫자 override·취소·현재 유효 요구사항",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/contracts/requirements.py",
+        "src/openfoam_agent/agents/intake.py",
+        "src/openfoam_agent/schemas/intake.py"
+      ],
+      "implementation_ko": "대화의 명시적 대상별 scalar assignment를 시간순으로 다루어 과거 숫자 전체를 최종 fact에 요구하지 않는다. 알려진 Re alias와 명시적 fact ID를 정규화하고 active/superseded/cancelled 이력을 보존한다. 질문이나 다른 대상 숫자를 자동 override로 취급하지 않는다.",
+      "executed_verification_ko": "Re 1000→2000, 다른 압력 대상, 질문형 발화, 취소, 파일명/근거 구분 관련 회귀를 수행했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a11_numeric_override_preserves_latest_not_historical",
+        "tests/test_v400_audit_domains.py::test_a11_different_targets_questions_and_cancellation_are_not_silent_overrides"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "일반 자연어 모든 표현을 이해하는 deterministic 요구사항 해석기는 아니다. 지원하는 명시적 scalar 표현 밖에서는 모델 해석 또는 사용자 재확인이 필요하다. live intake 모델 정확도는 미검증이다.",
+      "source_audit_title_ko": "사용자 숫자를 보존하려다 정상적인 수정 요청을 거부한다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/contracts/requirements.py": "3d691bcc491efc7ad20cf024c9f491e4a6de9f01795c783fc5836c7aa20c1d1e",
+        "src/openfoam_agent/agents/intake.py": "f60e3b0d7cd637093a4b595b0b2f85c393368027df8c130f2f189f9cc4ae821f",
+        "src/openfoam_agent/schemas/intake.py": "5d0d414b4aaf28e735897fd46f789cd7ad5b01e7d1d523da29d39d9edd29fbdd"
+      }
+    },
+    {
+      "id": 12,
+      "title_ko": "물리량·단위·대상 연결",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/contracts/models.py",
+        "src/openfoam_agent/contracts/quantities.py",
+        "src/openfoam_agent/agents/intake.py"
+      ],
+      "implementation_ko": "quantity/value/unit/dimensions와 region/patch/material/reference를 표현하고 제한된 SI 변환 및 차원·대상 일관성을 검증한다. 숫자만 같아도 대상이 다르면 같은 조건으로 인정하지 않는다.",
+      "executed_verification_ko": "단위 변환 및 대상 불일치 거부를 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a12_units_and_targets_must_both_be_preserved"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "단위 표는 제한적이며 모든 물성·시간 함수·비선형 관계를 지원하지 않는다. 모든 typed quantity를 실제 native dictionary 값과 끝까지 대조하는 연결은 불완전하다.",
+      "source_audit_title_ko": "숫자·단위·대상 간의 의미 연결이 더 필요하다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/contracts/models.py": "04d27266c7f92dc6281faa0082fb26cc8ae637d08f85db88dfbf2b2559155e0e",
+        "src/openfoam_agent/contracts/quantities.py": "58a928dbdb3abdf0f8fbf043fc2b29f878dea4a0260e975154e0c2e2dc2ec187",
+        "src/openfoam_agent/agents/intake.py": "f60e3b0d7cd637093a4b595b0b2f85c393368027df8c130f2f189f9cc4ae821f"
+      }
+    },
+    {
+      "id": 13,
+      "title_ko": "결과에 큰 영향을 주는 모호성",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/schemas/intake.py",
+        "src/openfoam_agent/agents/intake.py",
+        "src/openfoam_agent/workflow/state.py"
+      ],
+      "implementation_ko": "critical ambiguity를 계약에 두고 해결되지 않은 영향도 높은 해석은 review-ready/confirm 경계를 통과하지 못하게 한다. 사용자 근거를 통해 해소하도록 한다.",
+      "executed_verification_ko": "물리적으로 중요한 미해결 ambiguity가 남으면 review-ready 생성이 거부되는지 검사했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a13_unresolved_physics_ambiguity_cannot_be_review_ready"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "벽/외곽, gauge/absolute, 총열량/체적열원 등의 모호성을 모델이 얼마나 잘 발견하는지는 실제 모델 평가를 하지 않았다. 구조적 차단 장치와 발견 능력은 별개다.",
+      "source_audit_title_ko": "모호한 문장을 바로 물리 경계조건으로 확정하지 않도록 해야 한다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/schemas/intake.py": "5d0d414b4aaf28e735897fd46f789cd7ad5b01e7d1d523da29d39d9edd29fbdd",
+        "src/openfoam_agent/agents/intake.py": "f60e3b0d7cd637093a4b595b0b2f85c393368027df8c130f2f189f9cc4ae821f",
+        "src/openfoam_agent/workflow/state.py": "ea210ca79a38c062d9d0d28f61c1c7a11d55396446c70e6c48750e85bdba3d6d"
+      }
+    },
+    {
+      "id": 14,
+      "title_ko": "작성 단계의 실제 문법 근거",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/contracts/evidence.py",
+        "src/openfoam_agent/engineering/agent.py",
+        "src/openfoam_agent/llm/context.py"
+      ],
+      "implementation_ko": "staged authoring에 ImplementationEvidencePack을 넣는다. 실제 읽은 reference 본문, 출처·해시, 대상 파일 연결을 전달하며 검색 결과 요약이나 reference ID만으로 문법 근거를 대체하지 않는다.",
+      "executed_verification_ko": "실제 read 본문이 authoring payload에 남고 검색 요약만으로는 같은 증거를 만들지 못하는지 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a14_read_syntax_is_projected_with_hash_not_just_search_summary"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "staged DesignCaseAction 경로 중심으로 강제된다. legacy one-shot author 경로 전부를 같은 수준으로 강화하지는 않았다. 근거의 내용이 선택 model과 실제로 호환되는지에 대한 native 검증도 없다.",
+      "source_audit_title_ko": "파일 작성 단계에서 앞서 찾은 문법 근거가 빠진다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/contracts/evidence.py": "78defa4c4b7a915f2236abd1d1a1ec64382846be2e116aefbe5e2a58c4b6eb2d",
+        "src/openfoam_agent/engineering/agent.py": "72a7b55ab0c9e842f4af81a2be69ab00a1f1ad08de99a4eb41ca7a6a13ee3814",
+        "src/openfoam_agent/llm/context.py": "c79118480b0170c5af0c6cc93961831c60b59476962faa0b2aa66d3a638070a8"
+      }
+    },
+    {
+      "id": 15,
+      "title_ko": "확정 조건을 자르지 않는 컨텍스트",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/llm/context.py",
+        "src/openfoam_agent/engineering/agent.py"
+      ],
+      "implementation_ko": "확정 facts, 실행 계약, 필수 파일 연결, 자산과 문법 pack을 보호한다. 선택적 검색·로그만 축약하며 필수 정보 자체가 예산을 넘으면 조용히 자르지 않고 호출 전에 실패한다.",
+      "executed_verification_ko": "200개 확정 항목을 포함한 mandatory context 보존과 예산 초과의 fail-closed 경로를 검사했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a15_mandatory_context_is_not_truncated"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "자동 파일/영역 단위 작업 분할은 구현하지 않았다. 큰 요청은 예산 조정 또는 명시적 분할이 필요하다. 토큰 비용이 항상 감소한다는 주장은 하지 않는다.",
+      "source_audit_title_ko": "일반 컨텍스트 축약기가 확정 요구사항까지 자른다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/llm/context.py": "c79118480b0170c5af0c6cc93961831c60b59476962faa0b2aa66d3a638070a8",
+        "src/openfoam_agent/engineering/agent.py": "72a7b55ab0c9e842f4af81a2be69ab00a1f1ad08de99a4eb41ca7a6a13ee3814"
+      }
+    },
+    {
+      "id": 16,
+      "title_ko": "파일 작성 전 설계 불변 조건 검사",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/contracts/regions.py",
+        "src/openfoam_agent/contracts/evidence.py",
+        "src/openfoam_agent/engineering/agent.py"
+      ],
+      "implementation_ko": "staged design 단계에서 확정 fact 대응, 미선언 binding, 중복 region, 필수 파일·문법 근거 연결 등 파일 없이 가능한 검사를 앞당겼다.",
+      "executed_verification_ko": "누락·미선언 binding과 중복 region을 설계 단계에서 거부하는지 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a16_early_design_rejects_undeclared_binding_and_duplicate_regions"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "물리 모델의 완전한 호환성, 모든 legacy author 경로, 실제 생성 dictionary 의미 검사까지 early design 단계로 이동한 것은 아니다.",
+      "source_audit_title_ko": "design 단계에서 검사할 수 있는 오류를 너무 늦게 검사한다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/contracts/regions.py": "06932154928031127e0d57cda8f10fa913c88c95cffb683394caa78b6db2e6d8",
+        "src/openfoam_agent/contracts/evidence.py": "78defa4c4b7a915f2236abd1d1a1ec64382846be2e116aefbe5e2a58c4b6eb2d",
+        "src/openfoam_agent/engineering/agent.py": "72a7b55ab0c9e842f4af81a2be69ab00a1f1ad08de99a4eb41ca7a6a13ee3814"
+      }
+    },
+    {
+      "id": 17,
+      "title_ko": "검색 횟수 대신 필요한 근거 충족 여부",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/contracts/evidence.py",
+        "src/openfoam_agent/engineering/agent.py"
+      ],
+      "implementation_ko": "staged 설계/작성의 파일별 근거 연결과 실제 읽기 증거를 요구한다. 검색 상한과 반복 억제는 유지하되 횟수 소진 자체를 근거 충족으로 취급하지 않는다.",
+      "executed_verification_ko": "bounded retrieval 및 staged 전환의 기존 회귀에 더해 작성 근거 연결을 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a14_read_syntax_is_projected_with_hash_not_just_search_summary",
+        "tests/test_v360_bounded_staged_context.py::test_two_retrieval_cycles_stay_bounded_and_switch_to_small_decision_schema",
+        "tests/test_v360_bounded_staged_context.py::test_staged_cli_style_flow_reaches_solve_ready_with_two_small_contracts"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "모든 물리 조합의 availability/model/interface 호환성을 포괄하는 범용 evidence sufficiency planner는 미완성이다. 하드 상한에 도달했을 때 자동으로 다른 탐색 전략을 구성한다고 보장하지 않는다.",
+      "source_audit_title_ko": "고정된 검색 횟수보다 “근거가 충분한가”를 더 잘 판단해야 한다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/contracts/evidence.py": "78defa4c4b7a915f2236abd1d1a1ec64382846be2e116aefbe5e2a58c4b6eb2d",
+        "src/openfoam_agent/engineering/agent.py": "72a7b55ab0c9e842f4af81a2be69ab00a1f1ad08de99a4eb41ca7a6a13ee3814"
+      }
+    },
+    {
+      "id": 18,
+      "title_ko": "발견한 function object의 catalog 연결",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/tools/installation.py",
+        "src/openfoam_agent/tools/capability_catalog.py"
+      ],
+      "implementation_ko": "설치 소스에서 발견한 function object 등 component를 catalog와 모델 노출 경로로 연결하고 탐색 근거를 유지한다.",
+      "executed_verification_ko": "source-discovered function object의 catalog 등록과 노출을 fixture로 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a18_19_source_discovery_is_not_runtime_registration"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "boundary condition, thermophysical/momentum transport model 등 모든 runtime selectable category의 완전한 catalog 통합 및 실제 사용 성공 검증은 남아 있다.",
+      "source_audit_title_ko": "function object를 발견해 놓고 catalog로 연결하지 않는다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/tools/installation.py": "0984ec745df39bd9424f47570b7bdc6c9e4143cc0d9284e6881465a4b71d63c0",
+        "src/openfoam_agent/tools/capability_catalog.py": "5a1366cd4b041231a6294f0d4e97545c8e096a71c8c977e00d17c8da4a8fdad4"
+      }
+    },
+    {
+      "id": 19,
+      "title_ko": "가용성 근거의 강도 구분",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/tools/installation.py",
+        "src/openfoam_agent/tools/capability_catalog.py",
+        "src/openfoam_agent/schemas/capability.py"
+      ],
+      "implementation_ko": "source_discovered와 binary_present 등을 구분하고 소스 이름 발견을 runtime load/실행 검증으로 보고하지 않는다.",
+      "executed_verification_ko": "소스 발견 provider가 실제 등록·native 실행 성공으로 승격되지 않는지 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a18_19_source_discovery_is_not_runtime_registration"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "foamToC 또는 작은 실제 생성 실행에 의한 runtime table 등록·loadability probe는 구현 완료/검증으로 볼 수 없다. 소스가 있다는 사실만 확인한 경우 그대로 제한적으로 표시한다.",
+      "source_audit_title_ko": "installed 근거가 실제 생성 가능성을 과하게 암시할 수 있다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/tools/installation.py": "0984ec745df39bd9424f47570b7bdc6c9e4143cc0d9284e6881465a4b71d63c0",
+        "src/openfoam_agent/tools/capability_catalog.py": "5a1366cd4b041231a6294f0d4e97545c8e096a71c8c977e00d17c8da4a8fdad4",
+        "src/openfoam_agent/schemas/capability.py": "5de4ade54652cd687cb33e58748a5a6e0b016e0f94fe904a0418abebb95d5e03"
+      }
+    },
+    {
+      "id": 20,
+      "title_ko": "검색 scope·언어·편향",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/tools/references.py",
+        "src/openfoam_agent/tools/capability_catalog.py"
+      ],
+      "implementation_ko": "Unicode/NFKC 토큰과 제한된 한국어 용어 alias, source/tutorials/etc/modules의 균형 탐색, bounded cache 및 실제 read hash를 추가했다. 잘림·scope 소진을 결과에 명시한다.",
+      "executed_verification_ko": "한국어 query, FOAM_MODULES, scope별 자료 접근과 실제 read 해시를 fixture로 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a20_unicode_search_fair_scopes_and_actual_read_hash"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "일반 다국어 의미 검색, 모든 query의 최적 자료 순위, 대규모 persistent 설치 인덱스는 구현·평가하지 않았다. 제한된 용어 정규화 개선이다.",
+      "source_audit_title_ko": "reference 검색에 순서 편향과 언어 한계가 있다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/tools/references.py": "16b8f96396606d21bbcd6b642b06cdaf08962f7d572a9adf86e43a4342c293c3",
+        "src/openfoam_agent/tools/capability_catalog.py": "5a1366cd4b041231a6294f0d4e97545c8e096a71c8c977e00d17c8da4a8fdad4"
+      }
+    },
+    {
+      "id": 21,
+      "title_ko": "프로세스 종료와 계산 완료 분리",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/runtime/completion.py",
+        "src/openfoam_agent/tools/parsers.py",
+        "src/openfoam_agent/runtime/orchestrator.py",
+        "src/openfoam_agent/workflow/state.py"
+      ],
+      "implementation_ko": "정상 exit, 실제 진행, transient 목표 구간 또는 steady 수렴 조건, 결과 파일 확인을 분리한다. literal controlDict 목표와 완료 계약을 대조한다. 결과의 존재·유한성·해시 및 실행 전후 변경 여부를 검사하고 미완료 결과는 /accept로 COMPLETE가 되지 않는다.",
+      "executed_verification_ko": "Time=0/End 및 짧은 계산 거부, steady outer residual 기준, 목표 축소 거부, 결과 누락·비유한·기존 stale 파일, 미완료 accept 거부를 검사했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_execution_contracts.py::test_a21_exit_is_not_requested_completion[Time = 0\\nEnd\\n]",
+        "tests/test_v400_execution_contracts.py::test_a21_exit_is_not_requested_completion[Time = 0.5\\nEnd\\n]",
+        "tests/test_v400_execution_contracts.py::test_a21_exit_is_not_requested_completion[End\\n]",
+        "tests/test_v400_execution_contracts.py::test_a21_contract_progress_and_bounded_parser",
+        "tests/test_v400_execution_contracts.py::test_a21_steady_requires_outer_not_inner_residual_convergence",
+        "tests/test_v400_release_edges.py::test_a21_completion_cannot_shorten_literal_control_target",
+        "tests/test_v400_release_edges.py::test_a21_outputs_must_be_fresh_present_and_finite",
+        "tests/test_v400_release_edges.py::test_a21_accept_cannot_turn_incomplete_calculation_into_complete"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "native CFD 정확성·보존성·사용자 물리 목표는 검증하지 않았다. 결과 parser는 제한된 ASCII/gzip 검증으로 모든 OpenFOAM binary field/차원/원소 개수를 보증하지 않는다. restart startFrom 지원도 제한적이며 불명확하면 차단한다.",
+      "source_audit_title_ko": "현재 runtime 완료 판정은 너무 약하다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/runtime/completion.py": "f0b1ecbae502a83e936c8ec660f3df7f7154c722846845acf911f9cdbac72f05",
+        "src/openfoam_agent/tools/parsers.py": "8df462d5b3c16eb17fa6a65fa49a6363e6ffca7fa0a9604c93404989a253918c",
+        "src/openfoam_agent/runtime/orchestrator.py": "84fd00888c1cbd185430b05818dd5252907fd77f5d977e90abb05574176f1cea",
+        "src/openfoam_agent/workflow/state.py": "ea210ca79a38c062d9d0d28f61c1c7a11d55396446c70e6c48750e85bdba3d6d"
+      }
+    },
+    {
+      "id": 22,
+      "title_ko": "timeout의 구조화 및 부분 로그",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/tools/safe_runner.py",
+        "src/openfoam_agent/schemas/common.py",
+        "src/openfoam_agent/runtime/orchestrator.py"
+      ],
+      "implementation_ko": "timeout을 종료 이유, 부분 디스크 로그, 마지막 관측치와 프로세스 정보가 남는 ToolResult로 반환한다. POSIX process group 정리 경로와 승인 timeout 한도를 연결했다.",
+      "executed_verification_ko": "실제 합성 subprocess를 timeout으로 종료하고 부분 로그와 하나의 spawn 원장을 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_execution_contracts.py::test_a22_timeout_returns_partial_disk_log_and_counts_one_spawn"
+      ],
+      "verification_level": "synthetic subprocess",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "실제 MPI/복잡한 자식 프로세스 트리의 모든 종료 및 장기 solver restart 가능성은 검증하지 않았다. runner의 구조화된 실패 결과가 자동으로 재시작 안전성을 보장하지는 않는다.",
+      "source_audit_title_ko": "timeout이 실행 결과로 정리되지 않는 경로가 있다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/tools/safe_runner.py": "24d6aff4435c6cb6bc35973c21afcf94943d0afe9fb1faa311402921108732a6",
+        "src/openfoam_agent/schemas/common.py": "dcfc750818a0b1dbe32601d0a28a2f54ffd2cef438ec7c1c65f99a5cb737c9fa",
+        "src/openfoam_agent/runtime/orchestrator.py": "84fd00888c1cbd185430b05818dd5252907fd77f5d977e90abb05574176f1cea"
+      }
+    },
+    {
+      "id": 23,
+      "title_ko": "긴 로그의 bounded 메모리",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/tools/safe_runner.py",
+        "src/openfoam_agent/tools/parsers.py",
+        "src/openfoam_agent/verification/safety.py"
+      ],
+      "implementation_ko": "원문은 디스크로 streaming 저장하고 해시를 계산한다. 메모리 tail/queue/부분 줄과 parser 시계열을 제한한다. 출력 상한 초과는 명시적 종료 사유이며 checkMesh는 원문 파일에서 제한된 검사로 근거를 수집한다.",
+      "executed_verification_ko": "1MB 이상 합성 출력, bounded tail과 전체 로그, 출력 예산 중단, tail에서 사라진 checkMesh 결과의 전체 로그 처리를 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_execution_contracts.py::test_a23_large_log_is_bounded_in_memory_and_complete_on_disk",
+        "tests/test_v400_execution_contracts.py::test_a23_output_budget_stops_process",
+        "tests/test_v400_release_edges.py::test_a23_checkmesh_reads_full_bounded_disk_log_not_tail"
+      ],
+      "verification_level": "synthetic subprocess",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "모든 코드 경로가 O(1) 메모리라는 보증은 아니다. 특히 Codex subprocess.run의 stdout는 JSON parse 상한 검사 전에 capture된다. 실제 장기 native 계산, 디스크 부족, 네트워크 filesystem 장애는 미검증이다.",
+      "source_audit_title_ko": "긴 계산의 로그 메모리 사용이 커질 수 있다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/tools/safe_runner.py": "24d6aff4435c6cb6bc35973c21afcf94943d0afe9fb1faa311402921108732a6",
+        "src/openfoam_agent/tools/parsers.py": "8df462d5b3c16eb17fa6a65fa49a6363e6ffca7fa0a9604c93404989a253918c",
+        "src/openfoam_agent/verification/safety.py": "208f6501292842800c1c69d1b6c1110535f469699ed87858abe7b2e2c4c8a53e"
+      }
+    },
+    {
+      "id": 24,
+      "title_ko": "execution·region 기반 후처리 context",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/postprocessing/context.py",
+        "src/openfoam_agent/postprocessing/agent.py",
+        "src/openfoam_agent/tools/openfoam.py"
+      ],
+      "implementation_ko": "후처리에는 driver 문자열 대신 선택한 영역의 solver module을 전달한다. region이 모호하거나 direct application의 module context가 확인되지 않으면 거부한다.",
+      "executed_verification_ko": "다중 영역의 올바른 module 선택, driver와 module 구분 및 모호한 선택의 거부를 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a24_postprocessing_uses_region_module_not_driver"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "실제 foamPostProcess와 solver-context function object 실행은 미검증이다. 지원하지 않는 direct application이나 병렬 결과 형태를 자동 추정하여 실행하지 않는다.",
+      "source_audit_title_ko": "post-processing 실행도 새 execution 구조를 따라가지 못한다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/postprocessing/context.py": "bec285ebddeccdf367fdecf186c893c30377c60265536e7c82e91e575421986d",
+        "src/openfoam_agent/postprocessing/agent.py": "fe4d8481c139d42f0e0540463ddb8dc6445ddf3a98bcb403485f6991753ff977",
+        "src/openfoam_agent/tools/openfoam.py": "2d672caf6608ad647e2e8bcc548e90ec120f344549186c309a4143dce60bfc2b"
+      }
+    },
+    {
+      "id": 25,
+      "title_ko": "범용 QuantityOfInterest",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/contracts/models.py",
+        "src/openfoam_agent/postprocessing/quantities.py",
+        "src/openfoam_agent/postprocessing/agent.py",
+        "src/openfoam_agent/workflow/state.py"
+      ],
+      "implementation_ko": "물리량·region/selection·단위·시간 구간·연산·입력 파일 계약을 추가했다. scalar CSV/텍스트의 평균·RMS·적분·극값·차이/수지 산술과 원문 hash를 기록하고 승인된 QoI만 실행한다. 산술 검증과 물리 의미 검증을 분리해 보고한다.",
+      "executed_verification_ko": "서로 다른 scalar quantity, source hash, 선언된 단위/영역 및 비유한 입력 경계를 검사했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a25_generic_scalar_quantities_provenance_and_declared_semantics"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "공간 적분/patch flux/energy balance의 native 생성과 물리 의미 검증은 하지 않는다. 차이/수지 연산 성공이 질량·에너지 보존 증명은 아니다. physical_semantics_verified=False를 유지한다.",
+      "source_audit_title_ko": "정량 후처리가 force coefficient 중심이다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/contracts/models.py": "04d27266c7f92dc6281faa0082fb26cc8ae637d08f85db88dfbf2b2559155e0e",
+        "src/openfoam_agent/postprocessing/quantities.py": "f691767e803d20c99f822945d2ebe17891d46eea40936144d33fb71aeda8cfed",
+        "src/openfoam_agent/postprocessing/agent.py": "fe4d8481c139d42f0e0540463ddb8dc6445ddf3a98bcb403485f6991753ff977",
+        "src/openfoam_agent/workflow/state.py": "ea210ca79a38c062d9d0d28f61c1c7a11d55396446c70e6c48750e85bdba3d6d"
+      }
+    },
+    {
+      "id": 26,
+      "title_ko": "비균일 시각·재시작 통계",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/postprocessing/quantities.py",
+        "src/openfoam_agent/postprocessing/analysis.py"
+      ],
+      "implementation_ko": "piecewise-linear 시간 가중 평균·적분·RMS, 중복 시각과 latest restart segment 정리, 시간 구간 보간 및 관측 길이 기반 주파수 해상도 정보를 추가했다.",
+      "executed_verification_ko": "비균일 간격에서 샘플 평균과 시간 평균을 구분하고 재시작·중복 데이터를 정리하는 산술 검사를 수행했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a26_nonuniform_time_weighting_and_restart_reconciliation"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "적분은 명시된 보간 가정에 따른 값이다. 자동 정상성 판정·과도 구간 선택과 엄밀한 주파수 신뢰구간/다중 창 불확실성 분석은 완료하지 않았다.",
+      "source_audit_title_ko": "비균일 시간 간격의 통계 처리가 필요하다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/postprocessing/quantities.py": "f691767e803d20c99f822945d2ebe17891d46eea40936144d33fb71aeda8cfed",
+        "src/openfoam_agent/postprocessing/analysis.py": "3a26b83ebca8ee9866de20dea6b0ece65c7428f789d2a8ca0547052644b46754"
+      }
+    },
+    {
+      "id": 27,
+      "title_ko": "one-shot --solve의 SOLVE_READY 전이",
+      "audit_closure": "reproduced_defect_verified",
+      "implementation_paths": [
+        "src/openfoam_agent/workflow/states.py",
+        "src/openfoam_agent/cli.py",
+        "src/openfoam_agent/workflow/state.py"
+      ],
+      "implementation_ko": "interactive와 one-shot이 공통 solve 승인 상태 집합과 계약 생성 경로를 사용한다. SOLVE_READY를 승인 가능한 상태에 포함하고 runtime policy를 승인 전에 준비한다.",
+      "executed_verification_ko": "one-shot --solve에서 workflow가 승인 후 재진입하는지, interactive가 같은 승인 계약을 만드는지 검사했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_release_edges.py::test_a27_one_shot_solve_ready_reenters_workflow_after_common_approval",
+        "tests/test_v400_release_edges.py::test_a27_interactive_solve_uses_same_approval_contract"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "상태 전이는 모의 workflow로 검증했다. CLI를 통한 실제 OpenFOAM solver 실행은 별도 미검증이다.",
+      "source_audit_title_ko": "one-shot --solve의 상태 조건이 오래된 상태를 본다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/workflow/states.py": "d6aa9a1f5293569baedf9c6588f09a82cb5a43847fff49b209df64875aa6b55c",
+        "src/openfoam_agent/cli.py": "21564005512e4d7207801b6d389ac6886608d82af303d9d9abd4ae6ea86007fe",
+        "src/openfoam_agent/workflow/state.py": "ea210ca79a38c062d9d0d28f61c1c7a11d55396446c70e6c48750e85bdba3d6d"
+      }
+    },
+    {
+      "id": 28,
+      "title_ko": "SOLVE_READY에서 /feedback",
+      "audit_closure": "reproduced_defect_verified",
+      "implementation_paths": [
+        "src/openfoam_agent/cli.py",
+        "src/openfoam_agent/review/agent.py",
+        "src/openfoam_agent/workflow/states.py"
+      ],
+      "implementation_ko": "공통 feedback 허용 상태에 SOLVE_READY를 포함하고 실제 review agent까지 연결한다. 오류 시 승인/검토 상태를 안전하게 유지한다.",
+      "executed_verification_ko": "명령 안내만 바꾸는 검사가 아니라 SOLVE_READY에서 실제 review 경로에 도달함을 확인했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_release_edges.py::test_a28_solve_ready_feedback_reaches_actual_review_agent"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "사용자의 자연어 결과 피드백을 모델이 정확하게 반영하고 native case를 올바르게 수정하는 능력은 평가하지 않았다.",
+      "source_audit_title_ko": "SOLVE_READY에서 안내하는 /feedback이 거부될 수 있다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/cli.py": "21564005512e4d7207801b6d389ac6886608d82af303d9d9abd4ae6ea86007fe",
+        "src/openfoam_agent/review/agent.py": "fe413e3002b08c0218353df11fa4e6c15e47b309e1ed3ce31c537c4075d276f1",
+        "src/openfoam_agent/workflow/states.py": "d6aa9a1f5293569baedf9c6588f09a82cb5a43847fff49b209df64875aa6b55c"
+      }
+    },
+    {
+      "id": 29,
+      "title_ko": "Codex ChatGPT/API-key 인증 구분",
+      "audit_closure": "reproduced_defect_verified",
+      "implementation_paths": [
+        "src/openfoam_agent/llm/codex_transport.py",
+        "src/openfoam_agent/llm/codex_client.py"
+      ],
+      "implementation_ko": "ChatGPT 로그인임이 명확한 status만 허용한다. API-key 또는 판별 불가 응답은 거부하고 강제 ChatGPT 로그인 설정을 전달한다. 환경변수 제거만으로 인증 경로를 보장하지 않는다.",
+      "executed_verification_ko": "ChatGPT, API-key, 단순 Logged in, Not logged in status fixture 및 기존 adapter 회귀를 검사했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a29_auth_kind_is_not_any_logged_in_message[Logged in using ChatGPT-chatgpt]",
+        "tests/test_v400_audit_domains.py::test_a29_auth_kind_is_not_any_logged_in_message[Logged in using an API key-api_key]",
+        "tests/test_v400_audit_domains.py::test_a29_auth_kind_is_not_any_logged_in_message[Logged in-unknown]",
+        "tests/test_v400_audit_domains.py::test_a29_auth_kind_is_not_any_logged_in_message[Not logged in using ChatGPT-unknown]"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "실제 사용자의 Codex 로그인 상태, CLI 버전별 모든 출력, 구독 사용량/과금 경로는 확인하지 않았다. 모의 판별 검사 통과를 구독 사용 보장이라고 표시하지 않는다.",
+      "source_audit_title_ko": "Codex backend가 구독 인증 사용을 확실히 판별하지 않는다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/llm/codex_transport.py": "1eba8dab5d7ccfa6b9863450f30d8de2c3a68444a59cf2620def6f17e024f212",
+        "src/openfoam_agent/llm/codex_client.py": "e66d3d8a0fcb7fa91f83503b43f58451c434a6cad116a292d81f431a2fc71637"
+      }
+    },
+    {
+      "id": 30,
+      "title_ko": "Codex transport 환경·이벤트·usage",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/llm/codex_transport.py",
+        "src/openfoam_agent/llm/codex_client.py"
+      ],
+      "implementation_ko": "환경변수 allowlist와 --json/--ignore-user-config 기능 계약을 사용한다. 완료 이벤트와 응답을 대조하고 도구 사용/미지원 이벤트가 관측되면 결과를 채택하지 않는다. usage가 없으면 unknown으로 남긴다.",
+      "executed_verification_ko": "환경 필터, JSONL 완료/도구 이벤트, usage 유무와 auth 경계를 fixture로 검사했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_audit_domains.py::test_a30_environment_allowlist_and_event_usage"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "이벤트 검사는 사후 감지이며 도구 실행을 사전에 봉쇄하는 격리가 아니다. stdout capture의 선제 메모리 제한과 모든 backend 공통 계약은 미완성이다. 실제 Codex/Claude/Ollama/OpenAI 호출은 실행하지 않았다.",
+      "source_audit_title_ko": "Codex adapter의 “모델 전용 transport” 의도를 더 강하게 보장해야 한다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/llm/codex_transport.py": "1eba8dab5d7ccfa6b9863450f30d8de2c3a68444a59cf2620def6f17e024f212",
+        "src/openfoam_agent/llm/codex_client.py": "e66d3d8a0fcb7fa91f83503b43f58451c434a6cad116a292d81f431a2fc71637"
+      }
+    },
+    {
+      "id": 31,
+      "title_ko": "중심 agent의 책임 분리",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "src/openfoam_agent/engineering/agent.py",
+        "src/openfoam_agent/contracts/execution.py",
+        "src/openfoam_agent/contracts/evidence.py",
+        "src/openfoam_agent/runtime/completion.py",
+        "src/openfoam_agent/workflow/checkpoint.py"
+      ],
+      "implementation_ko": "승인·영역·요구사항·근거·자산·실행·완료·체크포인트·후처리 context를 별도 계약/모듈로 분리했다. 공통 상태 전이와 보고 필드를 일부 중앙화했다.",
+      "executed_verification_ko": "이동한 기능의 경계 테스트와 기존 298개 전체 회귀를 수행했다.",
+      "passed_test_nodeids": [
+        "tests/test_v360_bounded_staged_context.py::test_staged_cli_style_flow_reaches_solve_ready_with_two_small_contracts"
+      ],
+      "verification_level": "unit/mock",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "engineering/agent.py는 여전히 큰 조정자이며 책임·의존성의 전면 재설계는 끝나지 않았다. 테스트 통과가 유지보수 구조 완성도를 증명하지 않는다.",
+      "source_audit_title_ko": "중심 agent 파일에 책임이 너무 많이 모여 있다",
+      "implementation_files_sha256": {
+        "src/openfoam_agent/engineering/agent.py": "72a7b55ab0c9e842f4af81a2be69ab00a1f1ad08de99a4eb41ca7a6a13ee3814",
+        "src/openfoam_agent/contracts/execution.py": "d15ccdb2909db8a955f6fa83c122bf2f912096dd7b5ec0d73252318ca4190a59",
+        "src/openfoam_agent/contracts/evidence.py": "78defa4c4b7a915f2236abd1d1a1ec64382846be2e116aefbe5e2a58c4b6eb2d",
+        "src/openfoam_agent/runtime/completion.py": "f0b1ecbae502a83e936c8ec660f3df7f7154c722846845acf911f9cdbac72f05",
+        "src/openfoam_agent/workflow/checkpoint.py": "66ac62bfea6c33d95b30d1fe9b04753d25926ab6ccb20b9a4fb8602c4e92aeff"
+      }
+    },
+    {
+      "id": 32,
+      "title_ko": "깨끗한 배포와 설치 resource",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        ".gitignore",
+        "pyproject.toml",
+        "src/openfoam_agent/cli.py",
+        "src/openfoam_agent/data/openfoam13_capability_graph.json",
+        "src/openfoam_agent/data/openfoam14_capability_graph.json"
+      ],
+      "implementation_ko": "4.0.0rc1로 버전 구분하고 13/14 config를 package resource로 포함했다. 최종 배포에서 cache/pyc/egg-info/build/.git를 제외한다. 정확한 원본 ZIP 기준으로 patch를 만들고 재적용하여 파일 단위 일치를 검사한다.",
+      "executed_verification_ko": "wheel 빌드, 소스 밖 별도 venv의 설치 CLI --help, 13/14 resource JSON 및 해시를 확인했다. package/source config 동일성 테스트를 수행했다.",
+      "passed_test_nodeids": [
+        "tests/test_v400_release_edges.py::test_a32_packaged_profiles_match_source_bytes"
+      ],
+      "verification_level": "unit + wheel build/install CLI/resource smoke",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "wheel은 --no-deps로 설치하고 기존 의존성을 재사용했다. 깨끗한 의존성 resolve, 실제 OpenAI SDK/backend, Python 3.12, Windows/WSL 설치 검증은 하지 않았다. 감사 원문의 WSL tracked pyc 111개는 이 기준 ZIP에는 없었다.",
+      "source_audit_title_ko": "생성물이 Git에 많이 추적되어 있다",
+      "implementation_files_sha256": {
+        ".gitignore": "1ef4505b90eecfb44d082ab83fb90ee51f74fd0206f433013e8366590c98ed6e",
+        "pyproject.toml": "7b15e2ca30614cf5800dda4b09d643f4da2e9d2a0242957ee559fc9e6e348b8f",
+        "src/openfoam_agent/cli.py": "21564005512e4d7207801b6d389ac6886608d82af303d9d9abd4ae6ea86007fe",
+        "src/openfoam_agent/data/openfoam13_capability_graph.json": "5dd4a5ae685509ebb4cdf4acea8dd8ecaea9c83cad222fccfe72bfa1c9948ce8",
+        "src/openfoam_agent/data/openfoam14_capability_graph.json": "63758fe07497fd3689815c8f5a38e90724feb3cd9ee62d68dd43e53f03c42ad7"
+      }
+    },
+    {
+      "id": 33,
+      "title_ko": "테스트 수준과 CFD 성공률 분리",
+      "audit_closure": "partial",
+      "implementation_paths": [
+        "tests/test_v400_execution_contracts.py",
+        "tests/test_v400_audit_domains.py",
+        "tests/test_v400_release_edges.py"
+      ],
+      "implementation_ko": "기존 회귀와 감사 경계 검사를 분리하고 JUnit 로그 및 테스트 ID를 보존한다. 실패 없이 통과한 두 partition의 합집합이 수집한 전체 359개와 정확히 일치함을 확인했다. native/live-model qualification은 별도 미실행 목록으로 남긴다.",
+      "executed_verification_ko": "기준본 298개 통과. 수정본 기존 298개와 신규 61개가 각각 통과했으며 누락/중복/skip=0을 XML과 collection으로 대조했다.",
+      "passed_test_nodeids": [
+        "tests/test_v210_semantic_bindings.py::test_confirmed_fact_binding_uses_structured_case_and_plan_fields",
+        "tests/test_v210_semantic_bindings.py::test_confirmed_fact_binding_accepts_legacy_prefixed_refs_when_loading_state",
+        "tests/test_v210_token_optimization.py::test_typed_serializer_owns_openfoam_braces_and_semicolons",
+        "tests/test_v210_token_optimization.py::test_compact_prepare_schema_and_typed_plan_reach_solve_ready_in_one_turn",
+        "tests/test_v210_token_optimization.py::test_failure_uses_repair_turn_exact_patch_and_delta_state",
+        "tests/test_v210_token_optimization.py::test_postprocessing_execution_plan_finishes_in_one_llm_turn",
+        "tests/test_v210_token_optimization.py::test_compact_phase_schemas_are_strict_output_compatible_and_smaller",
+        "tests/test_v210_token_optimization.py::test_openai_prompt_cache_key_previous_response_and_cache_usage",
+        "tests/test_v210_token_optimization.py::test_all_compact_engineering_prompts_preserve_semantic_invariants",
+        "tests/test_v210_token_optimization.py::test_typed_serializer_ignores_redundant_container_placeholder",
+        "tests/test_v210_token_optimization.py::test_typed_serializer_failure_becomes_next_prepare_turn_not_workflow_failure",
+        "tests/test_v210_token_optimization.py::test_plan_only_repair_can_fix_solver_metadata_after_successful_case_execution",
+        "tests/test_v210_token_optimization.py::test_repair_case_plan_allows_plan_only_and_protocol_noop_for_controlled_executor_handling",
+        "tests/test_v210_token_optimization.py::test_case_bundle_preflight_retains_candidate_and_accepts_delta_repair_before_first_write",
+        "tests/test_v210_token_optimization.py::test_case_plan_retry_schema_allows_only_candidate_delta_or_block",
+        "tests/test_v210_token_optimization.py::test_repeated_case_bundle_authoring_failures_are_bounded_without_partial_case",
+        "tests/test_v210_token_optimization.py::test_case_plan_retry_schema_is_compact_candidate_delta_contract",
+        "tests/test_v210_token_optimization.py::test_candidate_repair_schema_accepts_true_noop_for_controlled_executor_handling",
+        "tests/test_v213_evidence_gap_and_runtime_delta.py::test_prepare_batch_retrieval_tracks_novelty_and_stagnation",
+        "tests/test_v213_evidence_gap_and_runtime_delta.py::test_prepare_gather_evidence_batches_multiple_independent_gaps",
+        "tests/test_v213_evidence_gap_and_runtime_delta.py::test_runtime_grouped_patch_allows_multiple_edits_to_same_file_and_retries",
+        "tests/test_v213_evidence_gap_and_runtime_delta.py::test_legacy_delta_schema_allows_multiple_exact_patches_same_file",
+        "tests/test_v214_protocol_resilience.py::test_evidence_gap_normalizes_soft_protocol_fields_instead_of_failing_validation",
+        "tests/test_v214_protocol_resilience.py::test_prepare_turn_accepts_overlong_or_blank_evidence_queries_after_normalization",
+        "tests/test_v214_protocol_resilience.py::test_gather_evidence_preserves_duplicate_requested_ids_for_ledger_authority",
+        "tests/test_v214_protocol_resilience.py::test_evidence_gap_lifecycle_closes_on_proceed_and_blocks_refining_satisfied_gap",
+        "tests/test_v214_protocol_resilience.py::test_runtime_noop_repair_is_controlled_outcome_not_pydantic_failure",
+        "tests/test_v214_protocol_resilience.py::test_prepare_noop_repair_is_controlled_event_not_schema_failure",
+        "tests/test_v214_protocol_resilience.py::test_openai_adapter_repairs_one_pydantic_protocol_failure_before_giving_up",
+        "tests/test_v215_semantic_fidelity.py::test_review_critical_user_misattribution_is_demoted_before_confirmation",
+        "tests/test_v215_semantic_fidelity.py::test_new_intake_agent_runs_upgrade_to_semantic_contract_v2",
+        "tests/test_v215_semantic_fidelity.py::test_semantic_contract_v2_accepts_case_assertions_and_recomputes_numeric_relation",
+        "tests/test_v215_semantic_fidelity.py::test_semantic_contract_v2_rejects_numeric_drift_even_when_fact_id_and_files_exist",
+        "tests/test_v215_semantic_fidelity.py::test_semantic_contract_v2_rejects_stale_case_snippet_assertion",
+        "tests/test_v215_semantic_fidelity.py::test_legacy_v1_intake_digest_ignores_new_contract_default_for_rehydration",
+        "tests/test_v215_semantic_fidelity.py::test_legacy_plan_digest_ignores_empty_v215_assertion_defaults",
+        "tests/test_v215_semantic_fidelity.py::test_explicit_external_and_transient_language_remains_direct_user_provenance",
+        "tests/test_v215_semantic_fidelity.py::test_incomplete_semantic_assertion_shape_becomes_safety_failure_not_schema_crash",
+        "tests/test_v215_semantic_fidelity.py::test_semantic_assertions_do_not_accept_comment_only_self_claims",
+        "tests/test_v216_compact_semantic_evidence.py::test_compact_artifact_pointers_verify_current_case_without_repeated_value_tokens",
+        "tests/test_v216_compact_semantic_evidence.py::test_compact_numeric_pointer_rejects_drift_from_actual_artifact",
+        "tests/test_v216_compact_semantic_evidence.py::test_semantic_evidence_pointer_path_counts_as_case_implementation_ref",
+        "tests/test_v216_compact_semantic_evidence.py::test_compact_numeric_encoding_is_smaller_than_v215_excerpt_encoding",
+        "tests/test_v216_compact_semantic_evidence.py::test_v215_semantic_plan_digest_ignores_empty_v216_pointer_defaults",
+        "tests/test_v216_compact_semantic_evidence.py::test_llm_schema_hides_legacy_excerpt_fields_and_redundant_binding_prose",
+        "tests/test_v216_compact_semantic_evidence.py::test_multiple_semantic_pointers_may_reference_the_same_case_file",
+        "tests/test_v217_mesh_strategy.py::test_block_mesh_serializer_renders_boundary_as_list_not_nested_mapping",
+        "tests/test_v217_mesh_strategy.py::test_snappy_precondition_detects_empty_patch_without_native_execution",
+        "tests/test_v217_mesh_strategy.py::test_tool_precondition_escalates_to_strategy_revision_and_reaches_solve_ready",
+        "tests/test_v217_mesh_strategy.py::test_repeated_identical_native_mesh_failure_requests_strategy_revision",
+        "tests/test_v217_mesh_strategy.py::test_strategy_revision_schema_is_strict_output_compatible",
+        "tests/test_v218_runtime_boundary_codex.py::test_runtime_repair_decision_closes_transient_state_in_orchestrator",
+        "tests/test_v218_runtime_boundary_codex.py::test_runtime_repair_outcome_uses_explicit_decision_enum",
+        "tests/test_v218_runtime_boundary_codex.py::test_presolve_rejects_mesh_field_constraint_patch_mismatch",
+        "tests/test_v218_runtime_boundary_codex.py::test_createpatch_invalidates_mesh_presolve_and_runtime_seal",
+        "tests/test_v218_runtime_boundary_codex.py::test_codex_cli_check_requires_structured_exec_and_chatgpt_login",
+        "tests/test_v218_runtime_boundary_codex.py::test_codex_llm_isolated_readonly_exec_strips_api_env_and_revalidates",
+        "tests/test_v218_runtime_boundary_codex.py::test_cli_codex_requires_confirmation_and_builds_no_openai_adapter",
+        "tests/test_v219_claude_backend.py::test_claude_cli_check_requires_subscription_auth_and_strips_api_routing",
+        "tests/test_v219_claude_backend.py::test_claude_cli_rejects_api_key_auth",
+        "tests/test_v219_claude_backend.py::test_claude_llm_disables_tools_mcp_persistence_and_revalidates",
+        "tests/test_v219_claude_backend.py::test_claude_llm_rejects_missing_structured_output",
+        "tests/test_v219_claude_backend.py::test_claude_model_routing_precedence_and_cli_construction",
+        "tests/test_v219_claude_backend.py::test_cli_claude_requires_explicit_cloud_authorization",
+        "tests/test_v21_postprocessing.py::test_postprocessing_turn_is_strict_structured_output_compatible",
+        "tests/test_v21_postprocessing.py::test_force_coefficients_analysis_estimates_frequency_and_strouhal",
+        "tests/test_v21_postprocessing.py::test_postprocess_config_does_not_mutate_solve_input_seal",
+        "tests/test_v21_postprocessing.py::test_postprocess_config_hash_binding_detects_out_of_band_change",
+        "tests/test_v21_postprocessing.py::test_runtime_success_automatically_continues_into_postprocessing",
+        "tests/test_v21_postprocessing.py::test_postprocessing_llm_failure_does_not_erase_successful_solver_result",
+        "tests/test_v21_postprocessing.py::test_postprocess_config_reuses_content_safety_and_result_reads_are_read_only",
+        "tests/test_v21_postprocessing.py::test_result_text_read_is_bounded",
+        "tests/test_v22_human_feedback.py::test_feedback_assessment_schema_is_strict_output_compatible",
+        "tests/test_v22_human_feedback.py::test_result_feedback_creates_proposal_without_mutating_sealed_case",
+        "tests/test_v22_human_feedback.py::test_confirmed_revision_changes_case_records_diff_and_requires_new_solve",
+        "tests/test_v22_human_feedback.py::test_revision_proposal_is_hash_bound_to_case_before_any_edit",
+        "tests/test_v22_human_feedback.py::test_required_case_revision_cannot_finish_with_unchanged_manifest",
+        "tests/test_v22_human_feedback.py::test_feedback_that_changes_confirmed_fact_routes_back_to_intake_review",
+        "tests/test_v22_human_feedback.py::test_only_human_acceptance_transitions_reviewed_result_to_complete",
+        "tests/test_v22_human_feedback.py::test_user_can_reject_revision_without_changing_case",
+        "tests/test_v22_human_feedback.py::test_review_model_failure_returns_to_original_gate_without_mutating_case",
+        "tests/test_v22_human_feedback.py::test_feedback_can_conclude_no_case_revision_without_forcing_mutation",
+        "tests/test_v231_checkmesh_preflight.py::test_native_prepare_blocks_before_llm_when_checkmesh_is_unavailable",
+        "tests/test_v231_checkmesh_preflight.py::test_dry_run_skips_native_checkmesh_preflight",
+        "tests/test_v231_checkmesh_preflight.py::test_real_openfoam_tools_preflight_reports_missing_checkmesh",
+        "tests/test_v23_progress.py::test_cli_progress_normal_filters_verbose_events",
+        "tests/test_v23_progress.py::test_cli_progress_quiet_emits_nothing",
+        "tests/test_v23_progress.py::test_verbose_progress_includes_verbose_events",
+        "tests/test_v23_progress.py::test_confirm_engineering_emits_live_actions_and_checkmesh_metrics",
+        "tests/test_v23_progress.py::test_normal_progress_hides_read_case_file_action",
+        "tests/test_v23_progress.py::test_solver_progress_parses_of13_time_suffix_and_courant",
+        "tests/test_v23_progress.py::test_solver_progress_residuals_are_verbose_only",
+        "tests/test_v23_progress.py::test_safe_runner_progress_callback_cannot_abort_native_process",
+        "tests/test_v23_progress.py::test_runtime_orchestrator_emits_of13_live_progress",
+        "tests/test_v23_progress.py::test_postprocessing_emits_live_progress",
+        "tests/test_v23_progress.py::test_feedback_review_emits_progress_without_exposing_model_rationale",
+        "tests/test_v23_progress.py::test_cli_progress_failure_renders_reasons",
+        "tests/test_v23_progress.py::test_finish_preview_failure_surfaces_deterministic_reason",
+        "tests/test_v241_canonical_evidence.py::test_engineering_evidence_accepts_only_canonical_ids",
+        "tests/test_v241_canonical_evidence.py::test_capability_search_issues_canonical_evidence_records",
+        "tests/test_v241_canonical_evidence.py::test_prompt_exposes_registry_but_keeps_python_bindings_separate",
+        "tests/test_v241_canonical_evidence.py::test_unissued_canonical_evidence_id_is_rejected_without_free_form_matching",
+        "tests/test_v241_canonical_evidence.py::test_finish_preview_needs_no_llm_claim_for_checkmesh_or_confirmed_intake",
+        "tests/test_v242_blockmesh_diagnostics.py::test_blockmesh_diagnostic_extracts_fatal_block_and_bounds_noise",
+        "tests/test_v242_blockmesh_diagnostics.py::test_blockmesh_failure_is_shown_to_user_and_next_agent_turn",
+        "tests/test_v24_context_compaction.py::test_runtime_compaction_replaces_full_residual_history",
+        "tests/test_v24_context_compaction.py::test_engineering_prompt_stays_bounded_with_large_recent_observations",
+        "tests/test_v24_context_compaction.py::test_postprocessing_prompt_does_not_transmit_full_runtime_residuals",
+        "tests/test_v24_context_compaction.py::test_feedback_review_compacts_large_runtime_report",
+        "tests/test_v24_context_compaction.py::test_bounded_prompt_has_deterministic_hard_cap_and_request_estimate",
+        "tests/test_v24_context_compaction.py::test_openai_adapter_sends_explicit_output_token_cap",
+        "tests/test_v24_context_compaction.py::test_cli_defaults_to_bounded_llm_output_tokens",
+        "tests/test_v250_native_failure_diagnostics.py::test_native_failure_diagnostic_classifies_command_and_fatal_kind",
+        "tests/test_v250_native_failure_diagnostics.py::test_snappy_failure_reaches_user_and_next_engineering_turn",
+        "tests/test_v250_native_failure_diagnostics.py::test_dictionary_and_surface_failures_use_same_native_diagnostic_path",
+        "tests/test_v250_native_failure_diagnostics.py::test_foamrun_failure_progress_and_repair_prompt_use_native_diagnostic",
+        "tests/test_v250_native_failure_diagnostics.py::test_foampostprocess_failure_reaches_user_and_next_postprocess_turn",
+        "tests/test_v251_presolve_completeness.py::test_presolve_detects_missing_required_file_and_patch_coverage",
+        "tests/test_v251_presolve_completeness.py::test_presolve_passes_complete_declared_case",
+        "tests/test_v251_presolve_completeness.py::test_cli_policy_style_engineering_reaches_solve_ready_only_after_presolve",
+        "tests/test_v251_presolve_completeness.py::test_sigfpe_startup_banner_does_not_mask_later_foam_fatal_error",
+        "tests/test_v260_model_routing.py::test_workflow_llms_uniform_preserves_backward_compatibility",
+        "tests/test_v260_model_routing.py::test_workflow_routes_each_agent_and_runtime_repair_to_engineering",
+        "tests/test_v260_model_routing.py::test_role_cli_override_beats_role_env_and_global_default",
+        "tests/test_v260_model_routing.py::test_role_models_can_be_fully_configured_without_global_default",
+        "tests/test_v260_model_routing.py::test_missing_role_without_global_default_is_rejected",
+        "tests/test_v260_model_routing.py::test_cli_exposes_role_specific_model_flags",
+        "tests/test_v260_model_routing.py::test_build_llm_reuses_adapter_per_unique_model",
+        "tests/test_v270_ollama_backend.py::test_ollama_defaults_and_role_env_routing",
+        "tests/test_v270_ollama_backend.py::test_ollama_health_check_uses_openai_compatible_models_endpoint",
+        "tests/test_v270_ollama_backend.py::test_ollama_health_check_reports_missing_model_clearly",
+        "tests/test_v270_ollama_backend.py::test_ollama_health_check_reports_missing_tunnel_clearly",
+        "tests/test_v270_ollama_backend.py::test_ollama_rejects_direct_remote_base_url",
+        "tests/test_v270_ollama_backend.py::test_ollama_structured_adapter_uses_json_mode_then_python_validation",
+        "tests/test_v270_ollama_backend.py::test_ollama_repairs_invalid_json_with_pydantic_errors_and_sums_usage",
+        "tests/test_v270_ollama_backend.py::test_ollama_structured_repair_stops_after_three_total_attempts",
+        "tests/test_v270_ollama_backend.py::test_ollama_engineering_turn_avoids_complex_schema_grammar",
+        "tests/test_v270_ollama_backend.py::test_ollama_generate_connection_failure_never_falls_back_to_openai",
+        "tests/test_v270_ollama_backend.py::test_build_llm_ollama_reuses_adapter_and_does_not_create_openai",
+        "tests/test_v270_ollama_backend.py::test_cli_accepts_ollama_without_cloud_confirmation_and_exposes_base_url",
+        "tests/test_v271_mesh_freshness.py::test_mesh_manifest_ignores_solver_inputs_but_tracks_mesh_artifacts",
+        "tests/test_v271_mesh_freshness.py::test_mesh_path_classifier_is_narrow_and_explicit",
+        "tests/test_v271_mesh_freshness.py::test_runtime_solver_input_repair_does_not_require_checkmesh_rerun",
+        "tests/test_v271_mesh_freshness.py::test_runtime_mesh_repair_still_requires_fresh_checkmesh",
+        "tests/test_v271_mesh_freshness.py::test_rehydrated_runtime_agent_restores_mesh_freshness_from_sealed_case",
+        "tests/test_v273_ollama_intake_provenance.py::test_ollama_advertises_two_semantic_intake_validation_repairs",
+        "tests/test_v273_ollama_intake_provenance.py::test_local_intake_repairs_multi_turn_paraphrased_user_evidence_until_derived_summary",
+        "tests/test_v273_ollama_intake_provenance.py::test_openai_like_adapter_keeps_historical_single_semantic_retry",
+        "tests/test_v273_ollama_intake_provenance.py::test_local_provenance_repair_does_not_weaken_verbatim_gate",
+        "tests/test_v280_engineering_sequences.py::test_sequence_schema_rejects_repeat_write_without_validation",
+        "tests/test_v280_engineering_sequences.py::test_prepare_sequence_reduces_llm_turns_and_preserves_raw_events",
+        "tests/test_v280_engineering_sequences.py::test_sequence_stops_on_first_native_failure_and_compacts_next_prompt",
+        "tests/test_v280_engineering_sequences.py::test_solver_input_sequence_runs_presolve_readiness_without_checkmesh",
+        "tests/test_v280_engineering_sequences.py::test_runtime_repair_sequence_validates_then_retries_in_one_llm_turn",
+        "tests/test_v280_engineering_sequences.py::test_engineering_sequence_schema_remains_strict_output_compatible",
+        "tests/test_v290_execution_plan.py::test_execute_case_plan_reaches_solve_ready_in_one_llm_turn",
+        "tests/test_v290_execution_plan.py::test_execute_case_plan_failure_returns_to_llm_then_repairs",
+        "tests/test_v290_execution_plan.py::test_execute_case_plan_long_goal_does_not_overflow_internal_rationale",
+        "tests/test_v290_execution_plan.py::test_execute_case_plan_schema_is_strict_output_compatible",
+        "tests/test_v2_adversarial_integration.py::test_hard_dynamic_mesh_failure_repair_runtime_repair_and_native_seal",
+        "tests/test_v2_architecture.py::test_release_version",
+        "tests/test_v2_architecture.py::test_legacy_engineering_modules_are_deleted",
+        "tests/test_v2_architecture.py::test_production_source_has_no_known_phase27_case_contracts",
+        "tests/test_v2_architecture.py::test_command_allowlist_is_narrow_openfoam_only",
+        "tests/test_v2_budgets.py::test_default_budgets_are_production_sized",
+        "tests/test_v2_budgets.py::test_progress_at_soft_boundary_extends_engineering_window",
+        "tests/test_v2_budgets.py::test_repeated_action_result_loop_does_not_receive_extension",
+        "tests/test_v2_budgets.py::test_progress_never_extends_past_hard_cap",
+        "tests/test_v2_budgets.py::test_native_command_budget_is_independent_from_agent_turn_budget",
+        "tests/test_v2_budgets.py::test_mesh_repair_cycle_budget_blocks_eleventh_style_repair_group",
+        "tests/test_v2_budgets.py::test_runtime_default_allows_three_repair_cycles",
+        "tests/test_v2_budgets.py::test_cli_budget_flags_build_the_same_policy_defaults",
+        "tests/test_v2_budgets.py::test_cli_budget_flags_are_configurable",
+        "tests/test_v2_budgets.py::test_checkmesh_return_code_zero_with_failed_evidence_counts_as_mesh_failure",
+        "tests/test_v2_budgets.py::test_resource_accounting_survives_engineering_agent_rehydration",
+        "tests/test_v2_budgets.py::test_default_soft_boundary_20_extends_to_30_on_new_artifact",
+        "tests/test_v2_budgets.py::test_default_soft_boundary_20_rejects_stagnant_loop",
+        "tests/test_v2_capabilities.py::test_capability_graph_loads_as_evidence",
+        "tests/test_v2_capabilities.py::test_capability_catalog_retrieves_but_does_not_choose",
+        "tests/test_v2_engineering_agent.py::test_agent_can_author_non_template_case_preview",
+        "tests/test_v2_engineering_agent.py::test_failed_mesh_command_is_observation_then_agent_repairs",
+        "tests/test_v2_engineering_agent.py::test_solver_input_change_preserves_previous_checkmesh_evidence",
+        "tests/test_v2_engineering_agent.py::test_mesh_input_change_invalidates_previous_checkmesh_evidence",
+        "tests/test_v2_engineering_agent.py::test_generic_cell_budget_blocks_oversized_mesh",
+        "tests/test_v2_engineering_agent.py::test_passing_checkmesh_on_last_tool_step_gets_bounded_finalization_window",
+        "tests/test_v2_engineering_agent.py::test_long_run_keeps_compact_capability_provenance_visible_to_model",
+        "tests/test_v2_engineering_agent.py::test_exact_step_40_checkmesh_can_finalize_on_step_41",
+        "tests/test_v2_intake.py::test_exploratory_authorization_is_policy_not_cfd_default",
+        "tests/test_v2_intake.py::test_explicit_rejection_overrides_exploratory_default",
+        "tests/test_v2_intake.py::test_rule_based_backend_is_intake_only",
+        "tests/test_v2_intake.py::test_rule_based_intake_preserves_user_reynolds_number",
+        "tests/test_v2_intake.py::test_intake_schema_has_no_default_fact_source",
+        "tests/test_v2_parsers_and_schema.py::test_engineering_turn_is_strict_structured_output_compatible",
+        "tests/test_v2_parsers_and_schema.py::test_engineering_turn_plain_union_dispatches_by_literal_type",
+        "tests/test_v2_parsers_and_schema.py::test_runtime_parser_accepts_clean_completed_log",
+        "tests/test_v2_parsers_and_schema.py::test_runtime_parser_accepts_openfoam13_seconds_suffix",
+        "tests/test_v2_parsers_and_schema.py::test_runtime_parser_accepts_seconds_suffix_with_whitespace_and_exponent",
+        "tests/test_v2_parsers_and_schema.py::test_runtime_parser_rejects_nonfinite_or_fatal_log",
+        "tests/test_v2_parsers_and_schema.py::test_preflight_rejects_discriminated_union_one_of",
+        "tests/test_v2_runtime.py::test_runtime_failure_log_returns_to_agent_and_retries",
+        "tests/test_v2_runtime.py::test_runtime_repair_cannot_switch_solver_without_user_review",
+        "tests/test_v2_runtime.py::test_solver_execution_requires_explicit_approval",
+        "tests/test_v2_runtime.py::test_runtime_openfoam13_seconds_suffix_finishes_on_first_attempt",
+        "tests/test_v2_safety.py::test_safety_gate_does_not_require_template_files",
+        "tests/test_v2_safety.py::test_safety_gate_rejects_solver_case_mismatch",
+        "tests/test_v2_safety.py::test_safety_gate_requires_exact_confirmed_fact_provenance",
+        "tests/test_v2_safety.py::test_checkmesh_parser_records_evidence_without_engineering_thresholds",
+        "tests/test_v2_safety.py::test_safety_gate_binds_plan_to_exact_confirmed_intake_digest",
+        "tests/test_v2_safety.py::test_safety_gate_requires_confirmed_fact_binding_coverage",
+        "tests/test_v2_safety.py::test_safety_gate_rejects_binding_to_missing_case_file",
+        "tests/test_v2_security_hardening.py::test_safe_runner_does_not_inherit_api_key_or_user_library_paths",
+        "tests/test_v2_security_hardening.py::test_safe_runner_ignores_path_shadow_outside_trusted_installation",
+        "tests/test_v2_security_hardening.py::test_environment_reference_roots_cannot_escape_wm_project_dir",
+        "tests/test_v2_security_hardening.py::test_environment_snapshot_does_not_expose_absolute_openfoam_paths",
+        "tests/test_v2_security_hardening.py::test_model_prompt_redacts_known_local_paths",
+        "tests/test_v2_security_hardening.py::test_runtime_end_marker_without_time_progress_is_not_success",
+        "tests/test_v2_security_hardening.py::test_finish_preview_cannot_claim_unobserved_solver_capability",
+        "tests/test_v2_security_hardening.py::test_workspace_directories_are_private",
+        "tests/test_v2_workspace.py::test_workspace_rejects_path_escape",
+        "tests/test_v2_workspace.py::test_workspace_rejects_runtime_code_directives",
+        "tests/test_v2_workspace.py::test_workspace_rejects_untrusted_dynamic_library",
+        "tests/test_v2_workspace.py::test_workspace_seal_detects_tampering",
+        "tests/test_v2_workspace.py::test_safe_runner_rejects_non_allowlisted_executable",
+        "tests/test_v2_workspace.py::test_safe_runner_rejects_cwd_escape",
+        "tests/test_v2_workspace.py::test_seal_includes_native_generated_mesh_inputs",
+        "tests/test_v300_foam_semantics.py::test_mesh_ir_preserves_patch_type_groups_and_order",
+        "tests/test_v300_foam_semantics.py::test_quoted_literal_is_not_automatically_regex",
+        "tests/test_v300_foam_semantics.py::test_parenthesized_regex_covers_multiple_patches",
+        "tests/test_v300_foam_semantics.py::test_exact_overrides_later_regex",
+        "tests/test_v300_foam_semantics.py::test_group_overrides_later_regex",
+        "tests/test_v300_foam_semantics.py::test_exact_overrides_group",
+        "tests/test_v300_foam_semantics.py::test_later_group_wins_within_group_tier",
+        "tests/test_v300_foam_semantics.py::test_later_regex_wins_within_regex_tier",
+        "tests/test_v300_foam_semantics.py::test_auto_empty_precedes_regex_fallback",
+        "tests/test_v300_foam_semantics.py::test_same_non_pattern_entry_can_match_exact_and_group",
+        "tests/test_v300_foam_semantics.py::test_dynamic_selector_becomes_indeterminate_not_missing",
+        "tests/test_v300_foam_semantics.py::test_dynamic_expansion_keeps_visible_regex_candidate_indeterminate",
+        "tests/test_v300_foam_semantics.py::test_presolve_uses_semantic_resolution_for_coverage_and_constraints",
+        "tests/test_v300_foam_semantics.py::test_presolve_reports_indeterminate_as_warning_not_false_missing",
+        "tests/test_v300_foam_semantics.py::test_top_level_field_projection_ignores_comment_substrings",
+        "tests/test_v300_foam_semantics.py::test_top_level_field_projection_marks_dynamic_include_indeterminate_without_swallowing_later_keys",
+        "tests/test_v301_structured_schema_compiler.py::test_codex_compiler_makes_every_object_property_required_and_removes_defaults",
+        "tests/test_v301_structured_schema_compiler.py::test_claude_compiler_rewrites_pydantic_prefix_items_without_changing_fixed_lengths",
+        "tests/test_v301_structured_schema_compiler.py::test_codex_compiler_also_normalizes_engineering_tuples",
+        "tests/test_v301_structured_schema_compiler.py::test_claude_client_passes_compiled_schema_to_cli",
+        "tests/test_v301_structured_schema_compiler.py::test_codex_client_writes_openai_strict_compiled_schema",
+        "tests/test_v302_case_file_contract.py::test_typed_serializer_emits_canonical_dictionary_header_and_owns_object_location",
+        "tests/test_v302_case_file_contract.py::test_typed_serializer_infers_initial_field_class_from_internal_field",
+        "tests/test_v302_case_file_contract.py::test_typed_serializer_accepts_matching_legacy_header_metadata_but_does_not_duplicate_it",
+        "tests/test_v302_case_file_contract.py::test_typed_serializer_rejects_header_metadata_that_conflicts_with_path",
+        "tests/test_v302_case_file_contract.py::test_typed_serializer_requires_explicit_class_when_field_shape_is_indeterminate",
+        "tests/test_v302_case_file_contract.py::test_header_validator_rejects_headerless_and_wrong_object_files",
+        "tests/test_v302_case_file_contract.py::test_presolve_blocks_headerless_file_before_native_dictionary_check",
+        "tests/test_v302_case_file_contract.py::test_runtime_contract_scan_reports_systematic_header_failures_together",
+        "tests/test_v310_block_mesh_topology_contract.py::test_topology_ir_rejects_internal_shared_face_as_boundary",
+        "tests/test_v310_block_mesh_topology_contract.py::test_serializer_never_emits_topologically_invalid_block_mesh",
+        "tests/test_v310_block_mesh_topology_contract.py::test_valid_external_face_passes_topology_contract",
+        "tests/test_v310_block_mesh_topology_contract.py::test_candidate_repair_context_preserves_failed_structured_block_mesh",
+        "tests/test_v310_block_mesh_topology_contract.py::test_candidate_repair_can_replace_block_mesh_semantically",
+        "tests/test_v310_block_mesh_topology_contract.py::test_committed_mesh_repair_contract_accepts_full_block_mesh_replacement",
+        "tests/test_v310_block_mesh_topology_contract.py::test_block_mesh_serialization_failure_enters_candidate_replan_route",
+        "tests/test_v310_block_mesh_topology_contract.py::test_specialized_block_mesh_repair_schemas_are_backend_portable_and_compact",
+        "tests/test_v310_block_mesh_topology_contract.py::test_block_mesh_failure_signature_ignores_transient_face_vertex_labels",
+        "tests/test_v320_engineering_evidence_assumption_contract.py::test_large_evidence_payload_is_stored_outside_engineering_event",
+        "tests/test_v320_engineering_evidence_assumption_contract.py::test_event_truncation_never_exceeds_pydantic_limit",
+        "tests/test_v320_engineering_evidence_assumption_contract.py::test_evidence_infrastructure_failure_disables_retrieval_and_escalates_phase",
+        "tests/test_v320_engineering_evidence_assumption_contract.py::test_authorized_engineering_defaults_have_explicit_provenance",
+        "tests/test_v320_engineering_evidence_assumption_contract.py::test_delegated_engineering_choice_block_is_rejected_when_assumptions_authorized",
+        "tests/test_v320_engineering_evidence_assumption_contract.py::test_prepare_contract_tells_model_to_use_defaults_and_compiles_for_cli_backends",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_sourced_installation_discovers_every_trusted_application_not_static_allowlist[13]",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_sourced_installation_discovers_every_trusted_application_not_static_allowlist[14]",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_discovered_catalog_merges_installed_tools_modules_and_documented_graph[13]",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_discovered_catalog_merges_installed_tools_modules_and_documented_graph[14]",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_foundation_phase_change_models_are_available_as_documented_fallback[13]",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_foundation_phase_change_models_are_available_as_documented_fallback[14]",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_sourced_installation_discovers_runtime_selection_types_from_openfoam_source[13]",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_sourced_installation_discovers_runtime_selection_types_from_openfoam_source[14]",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_native_generic_tool_cannot_escape_case_or_override_case_root",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_execution_ir_supports_single_and_multi_region_foundation_drivers",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_region_solvers_is_interpreted_as_semantic_mapping_not_substring",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_cli_default_capability_profile_tracks_sourced_foundation_version",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_dynamic_command_authority_requires_sourced_foundation_13_or_14",
+        "tests/test_v330_openfoam13_14_native_discovery.py::test_safety_gate_validates_multiregion_region_solver_semantics",
+        "tests/test_v340_evidence_gap_ledger_authority.py::test_self_refining_gap_is_protocol_valid_before_ledger_resolution",
+        "tests/test_v340_evidence_gap_ledger_authority.py::test_existing_self_refining_gap_gets_fresh_python_owned_child_id",
+        "tests/test_v340_evidence_gap_ledger_authority.py::test_duplicate_in_batch_gap_ids_are_reissued_not_semantically_merged",
+        "tests/test_v340_evidence_gap_ledger_authority.py::test_unknown_refinement_parent_is_cleared_as_protocol_noise",
+        "tests/test_v340_evidence_gap_ledger_authority.py::test_prepare_union_reports_only_declared_action_branch_errors",
+        "tests/test_v340_evidence_gap_ledger_authority.py::test_codex_wait_heartbeat_reports_long_blocking_cli_call",
+        "tests/test_v340_evidence_gap_ledger_authority.py::test_claude_wait_heartbeat_reports_long_blocking_cli_call",
+        "tests/test_v350_evidence_projection_contract.py::test_durable_evidence_record_is_not_cardinality_bounded",
+        "tests/test_v350_evidence_projection_contract.py::test_engineering_event_is_bounded_projection_not_durable_store",
+        "tests/test_v350_evidence_projection_contract.py::test_engineering_event_model_itself_is_fail_soft_for_projection_overflow",
+        "tests/test_v350_evidence_projection_contract.py::test_gather_evidence_large_batch_keeps_full_store_and_bounded_event",
+        "tests/test_v360_bounded_staged_context.py::test_staged_schemas_split_decision_from_large_case_authoring_contract",
+        "tests/test_v360_bounded_staged_context.py::test_staged_cli_style_flow_reaches_solve_ready_with_two_small_contracts",
+        "tests/test_v360_bounded_staged_context.py::test_bounded_evidence_projection_does_not_grow_with_durable_store",
+        "tests/test_v360_bounded_staged_context.py::test_two_retrieval_cycles_stay_bounded_and_switch_to_small_decision_schema",
+        "tests/test_v400_audit_domains.py::test_a06_two_regions_need_no_dummy_root_fv_files",
+        "tests/test_v400_audit_domains.py::test_a06_missing_solid_field_is_not_satisfied_by_fluid_field",
+        "tests/test_v400_audit_domains.py::test_a07_mesh_digest_separates_regions_and_tracks_shared_geometry",
+        "tests/test_v400_audit_domains.py::test_a06_interface_checks_membership_not_flux_truth",
+        "tests/test_v400_audit_domains.py::test_a08_binary_asset_hash_approval_and_immutability",
+        "tests/test_v400_audit_domains.py::test_a08_asset_symlink_and_outside_case_rejected",
+        "tests/test_v400_audit_domains.py::test_a09_draft_and_budget_checkpoint_restore",
+        "tests/test_v400_audit_domains.py::test_a09_uncertain_or_changed_state_is_preserved_not_replayed[bytes]",
+        "tests/test_v400_audit_domains.py::test_a09_uncertain_or_changed_state_is_preserved_not_replayed[environment]",
+        "tests/test_v400_audit_domains.py::test_a09_uncertain_or_changed_state_is_preserved_not_replayed[pending]",
+        "tests/test_v400_audit_domains.py::test_a09_uncertain_or_changed_state_is_preserved_not_replayed[transaction]",
+        "tests/test_v400_audit_domains.py::test_a10_mpi_structure_and_existing_outputs_preserved",
+        "tests/test_v400_audit_domains.py::test_a11_numeric_override_preserves_latest_not_historical",
+        "tests/test_v400_audit_domains.py::test_a11_different_targets_questions_and_cancellation_are_not_silent_overrides",
+        "tests/test_v400_audit_domains.py::test_a12_units_and_targets_must_both_be_preserved",
+        "tests/test_v400_audit_domains.py::test_a13_unresolved_physics_ambiguity_cannot_be_review_ready",
+        "tests/test_v400_audit_domains.py::test_a14_read_syntax_is_projected_with_hash_not_just_search_summary",
+        "tests/test_v400_audit_domains.py::test_a15_mandatory_context_is_not_truncated",
+        "tests/test_v400_audit_domains.py::test_a16_early_design_rejects_undeclared_binding_and_duplicate_regions",
+        "tests/test_v400_audit_domains.py::test_a18_19_source_discovery_is_not_runtime_registration",
+        "tests/test_v400_audit_domains.py::test_a20_unicode_search_fair_scopes_and_actual_read_hash",
+        "tests/test_v400_audit_domains.py::test_a24_postprocessing_uses_region_module_not_driver",
+        "tests/test_v400_audit_domains.py::test_a25_generic_scalar_quantities_provenance_and_declared_semantics",
+        "tests/test_v400_audit_domains.py::test_a26_nonuniform_time_weighting_and_restart_reconciliation",
+        "tests/test_v400_audit_domains.py::test_a29_auth_kind_is_not_any_logged_in_message[Logged in using ChatGPT-chatgpt]",
+        "tests/test_v400_audit_domains.py::test_a29_auth_kind_is_not_any_logged_in_message[Logged in using an API key-api_key]",
+        "tests/test_v400_audit_domains.py::test_a29_auth_kind_is_not_any_logged_in_message[Logged in-unknown]",
+        "tests/test_v400_audit_domains.py::test_a29_auth_kind_is_not_any_logged_in_message[Not logged in using ChatGPT-unknown]",
+        "tests/test_v400_audit_domains.py::test_a30_environment_allowlist_and_event_usage",
+        "tests/test_v400_execution_contracts.py::test_a01_unapproved_generic_native_cannot_reach_even_fake_runner[prepare]",
+        "tests/test_v400_execution_contracts.py::test_a01_unapproved_generic_native_cannot_reach_even_fake_runner[runtime_repair]",
+        "tests/test_v400_execution_contracts.py::test_a01_unapproved_generic_native_cannot_reach_even_fake_runner[human_revision]",
+        "tests/test_v400_execution_contracts.py::test_a01_real_runner_requires_contract_before_spawn",
+        "tests/test_v400_execution_contracts.py::test_a02_actual_argv_and_repair_scope_are_bound",
+        "tests/test_v400_execution_contracts.py::test_a03_libs_inline_nested_comments_cannot_bypass[libs (\"libUnknownAudit.so\");]",
+        "tests/test_v400_execution_contracts.py::test_a03_libs_inline_nested_comments_cannot_bypass[functions { audit { libs (libUnknownAudit.so); } }]",
+        "tests/test_v400_execution_contracts.py::test_a03_libs_inline_nested_comments_cannot_bypass[functions{audit{libs/*comment*/(\\n\"libUnknownAudit.so\"\\n);}}]",
+        "tests/test_v400_execution_contracts.py::test_a03_libs_inline_nested_comments_cannot_bypass[functions { audit { \"libs\" (\"libUnknownAudit.so\"); } }]",
+        "tests/test_v400_execution_contracts.py::test_a03_comment_only_unknown_library_is_not_loaded",
+        "tests/test_v400_execution_contracts.py::test_a05_budget_is_actual_spawns_and_cache_hits_do_not_spend",
+        "tests/test_v400_execution_contracts.py::test_a05_file_hash_invalidates_dictionary_cache",
+        "tests/test_v400_execution_contracts.py::test_a22_timeout_returns_partial_disk_log_and_counts_one_spawn",
+        "tests/test_v400_execution_contracts.py::test_a23_large_log_is_bounded_in_memory_and_complete_on_disk",
+        "tests/test_v400_execution_contracts.py::test_a23_output_budget_stops_process",
+        "tests/test_v400_execution_contracts.py::test_a21_exit_is_not_requested_completion[Time = 0\\nEnd\\n]",
+        "tests/test_v400_execution_contracts.py::test_a21_exit_is_not_requested_completion[Time = 0.5\\nEnd\\n]",
+        "tests/test_v400_execution_contracts.py::test_a21_exit_is_not_requested_completion[End\\n]",
+        "tests/test_v400_execution_contracts.py::test_a21_contract_progress_and_bounded_parser",
+        "tests/test_v400_execution_contracts.py::test_a21_steady_requires_outer_not_inner_residual_convergence",
+        "tests/test_v400_release_edges.py::test_a02_approval_binds_postprocessing_goals_and_resource_limits",
+        "tests/test_v400_release_edges.py::test_a04_local_include_hash_cycle_and_escape",
+        "tests/test_v400_release_edges.py::test_a04_actual_cpu_limit_is_enforced_on_synthetic_process",
+        "tests/test_v400_release_edges.py::test_a05_approval_budget_is_stricter_than_runner_budget",
+        "tests/test_v400_release_edges.py::test_a21_completion_cannot_shorten_literal_control_target",
+        "tests/test_v400_release_edges.py::test_a21_outputs_must_be_fresh_present_and_finite",
+        "tests/test_v400_release_edges.py::test_a21_accept_cannot_turn_incomplete_calculation_into_complete",
+        "tests/test_v400_release_edges.py::test_a27_one_shot_solve_ready_reenters_workflow_after_common_approval",
+        "tests/test_v400_release_edges.py::test_a27_interactive_solve_uses_same_approval_contract",
+        "tests/test_v400_release_edges.py::test_a28_solve_ready_feedback_reaches_actual_review_agent",
+        "tests/test_v400_release_edges.py::test_a32_packaged_profiles_match_source_bytes",
+        "tests/test_v400_release_edges.py::test_a23_checkmesh_reads_full_bounded_disk_log_not_tail"
+      ],
+      "verification_level": "complete collected Python regression coverage; no CFD qualification",
+      "native_validation": "not_run",
+      "remaining_and_limits_ko": "실제 CFD native 통합 검사 및 미공개 문제/live-model 평가를 수행하지 않았다. 범용 CFD 성공률, 수치 정확도, 사용자 목표 달성률은 산출할 수 없다. 원문이 제안한 3단계 평가 중 빠른 회귀 층만 수행했다.",
+      "source_audit_title_ko": "298개 테스트와 “범용 CFD 성공률” 사이를 연결해야 한다",
+      "implementation_files_sha256": {
+        "tests/test_v400_execution_contracts.py": "8728dbbd1c36560aa1808274fe4a2de8a301eb93f784b4f67f7bc4b6d03d990e",
+        "tests/test_v400_audit_domains.py": "0a1e8ee163a58c5cca1006a44e32c8bb4743c03ae359c4fe32a0e43f3ce3c0a3",
+        "tests/test_v400_release_edges.py": "df36f24d7f3761c804c82b3c5ae2256f7acd2bd29ee41e2d45afafe89f3f321c"
+      }
+    }
+  ]
+}

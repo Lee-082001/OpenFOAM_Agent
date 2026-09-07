@@ -47,6 +47,9 @@ class ConversationSession:
     mode: InteractionMode = InteractionMode.GUIDED
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     turns: list[str] = field(default_factory=list)
+    geometry_files: list[str] = field(default_factory=list)
+    additional_files: list[str] = field(default_factory=list)
+    existing_case: str | None = None
     attempts: int = 0
     last_state: str | None = None
     pending_intake: CFDIntakeSpec | None = None
@@ -113,6 +116,9 @@ class ConversationSession:
             raise ValueError("Add a prompt before running the conversation.")
         return UserRequest(
             prompt=self.turns[0],
+            geometry_files=self.geometry_files,
+            additional_files=self.additional_files,
+            existing_case=self.existing_case,
             conversation_turns=self.turns[1:],
             interaction_mode=self.mode.value,
             exploratory_completion_authorized=self.exploratory_completion_authorized,

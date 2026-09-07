@@ -108,6 +108,7 @@ def test_runtime_solver_input_repair_does_not_require_checkmesh_rerun(tmp_path, 
         ],
     )
 
+    state.approve_solve()
     outcome = agent.repair_runtime(
         state,
         runtime_log="--> FOAM FATAL ERROR: bad fvSolution\n",
@@ -147,6 +148,7 @@ def test_runtime_mesh_repair_still_requires_fresh_checkmesh(tmp_path, graph_path
         ],
     )
 
+    state.approve_solve()
     outcome = agent.repair_runtime(
         state,
         runtime_log="--> FOAM FATAL ERROR: mesh-related failure\n",
@@ -155,9 +157,10 @@ def test_runtime_mesh_repair_still_requires_fresh_checkmesh(tmp_path, graph_path
     )
 
     assert not outcome.retry
-    rejected = [event for event in state.engineering_events if event.action_type == "retry_solver"]
-    assert rejected and not rejected[-1].success
-    assert "passing checkMesh" in rejected[-1].output_excerpt
+    assert state.current_state == State.ENGINEERING_REVIEW_REQUIRED
+    assert not agent.workspace.resolve_case_path("system/blockMeshDict").exists()
+    assert tools.mesh_calls == ["checkMesh"]
+    assert not any(event.action_type == "retry_solver" for event in state.engineering_events)
 
 
 def test_rehydrated_runtime_agent_restores_mesh_freshness_from_sealed_case(tmp_path, graph_path):
@@ -187,6 +190,7 @@ def test_rehydrated_runtime_agent_restores_mesh_freshness_from_sealed_case(tmp_p
         policy=EngineeringPolicy(max_agent_steps=12),
     )
 
+    state.approve_solve()
     outcome = rehydrated.repair_runtime(
         state,
         runtime_log="--> FOAM FATAL ERROR: bad fvSolution\n",

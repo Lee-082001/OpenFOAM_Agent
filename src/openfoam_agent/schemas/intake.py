@@ -5,6 +5,7 @@ import json
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from openfoam_agent.contracts.models import PhysicalQuantity
 
 
 FactSource = Literal["user", "derived"]
@@ -37,6 +38,7 @@ class IntakeFact(BaseModel):
     label: str = Field(min_length=1)
     value: str = Field(min_length=1)
     unit: str | None = None
+    quantity: PhysicalQuantity | None = None
     source: FactSource
     evidence: str | None = None
     reason: str | None = None
@@ -62,6 +64,32 @@ class BlockingUnknown(BaseModel):
     suggested_default: str | None = None
 
 
+class RequirementHistory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target: str
+    status: Literal["superseded", "cancelled"]
+    previous_turn: int = Field(ge=0)
+    replacement_turn: int = Field(ge=0)
+    previous_evidence: str
+    replacement_evidence: str
+
+
+class SemanticAmbiguity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    impact: Literal["physics", "geometry", "material", "coupling", "numerical"]
+    alternatives: list[str] = Field(min_length=2)
+    question: str
+    selected: str | None = None
+    user_evidence: str | None = None
+
+    @model_validator(mode="after")
+    def validate_selection(self):
+        if self.selected is not None and (self.selected not in self.alternatives or not self.user_evidence):
+            raise ValueError("A high-impact interpretation needs an explicit user-supported selection.")
+        return self
+
+
 class CFDIntakeSpec(BaseModel):
     """Solver-independent CFD definition produced before technical analysis."""
 
@@ -69,12 +97,17 @@ class CFDIntakeSpec(BaseModel):
 
     semantic_contract_version: Literal["1", "2"] = "1"
     title: str = Field(min_length=1)
+    requirement_history: list[RequirementHistory] = Field(default_factory=list)
+    ambiguities: list[SemanticAmbiguity] = Field(default_factory=list)
     facts: list[IntakeFact] = Field(default_factory=list)
     blocking_unknowns: list[BlockingUnknown] = Field(default_factory=list, max_length=3)
     status: Literal["needs_user_input", "ready_for_review"]
 
     @model_validator(mode="after")
     def validate_definition(self) -> Self:
+        unresolved = [a for a in self.ambiguities if a.impact != "numerical" and a.selected is None]
+        if self.status == "ready_for_review" and unresolved:
+            raise ValueError("High-impact ambiguity is unresolved; easy/default authorization is not physical interpretation consent.")
         ids = [fact.id for fact in self.facts]
         if len(ids) != len(set(ids)):
             raise ValueError("CFDIntakeSpec contains duplicate fact IDs.")
@@ -99,6 +132,13 @@ class CFDIntakeSpec(BaseModel):
 
     def digest(self) -> str:
         data = self.model_dump(mode="json")
+        if not data.get("requirement_history"):
+            data.pop("requirement_history", None)
+        if not data.get("ambiguities"):
+            data.pop("ambiguities", None)
+        for fact in data.get("facts", []):
+            if fact.get("quantity") is None:
+                fact.pop("quantity", None)
         # v2.15 adds an explicit semantic-contract version.  Preserve the exact
         # pre-v2.15 digest for legacy/default v1 intakes so existing confirmed
         # states remain rehydratable after upgrade.

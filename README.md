@@ -1,3 +1,13 @@
+# OpenFOAM Agent 4.0.0rc1
+
+이번 배포는 **native CFD 검증 전 후보판**입니다. [한국어 구현·검증 보고서](docs/V4_IMPLEMENTATION_VERIFICATION_KO.md)와 [33개 감사 대조표](docs/V4_AUDIT_33.json)를 먼저 확인하세요.
+
+기존 회귀 298개와 신규 61개가 분할 실행에서 통과했습니다. 실제 OpenFOAM, MPI, live LLM 및 깨끗한 의존성 설치는 검증하지 않았습니다. 한 workspace에는 한 agent 프로세스만 사용하세요. 완료 계약, 실행 승인, 사용자 자산, 체크포인트의 불일치는 자동 추정하지 않고 중단합니다.
+
+설치 및 회귀 재현은 보고서 8절을 따릅니다. 아래 기존 README는 v3.6 이하의 역사적 설명이며, v4와 충돌하는 보장·상태 설명은 위 보고서 및 현재 코드 계약으로 대체합니다.
+
+---
+
 # OpenFOAM Agent v3.6.0
 
 > **v3.6.0 bounded staged Engineering context:** full deterministic evidence remains durable local state, but each Engineering model call receives only a relevance/recency-bounded evidence capsule. Production prompts are capped at 18k characters with 10 evidence items (12 for decision turns) and two prepare retrieval cycles. Codex/other stateless transports no longer pretend to reuse previous-response delta state. Engineering is split into a compact `design_case` turn followed by a separate `author_case` turn against a Python-held frozen plan, removing the giant plan+OpenFOAM-files structured output. See `V3_6_CHANGES.md`.

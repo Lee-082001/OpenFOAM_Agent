@@ -6,6 +6,7 @@ import re
 import statistics
 
 from openfoam_agent.schemas.postprocessing import ForceCoefficientAnalysis
+from .quantities import clean_series, window, time_statistics
 
 
 _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -43,9 +44,10 @@ def analyze_force_coefficients(
         try:
             values = [float(token) for token in tokens[: len(header)]]
         except ValueError:
-            continue
-        if all(math.isfinite(value) for value in values):
-            rows.append(values)
+            raise ValueError("Malformed force coefficient sample.") from None
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("Non-finite force coefficient sample.")
+        rows.append(values)
 
     if header is None:
         raise ValueError("forceCoeffs data does not contain a '# Time ... Cd ... Cl ...' header.")
@@ -55,21 +57,27 @@ def analyze_force_coefficients(
     time_i = header.index("Time")
     cd_i = header.index("Cd")
     cl_i = header.index("Cl")
-    rows.sort(key=lambda row: row[time_i])
-
     samples_total = len(rows)
-    start = min(samples_total - 1, int(samples_total * discard_fraction))
-    used = rows[start:]
-    times = [row[time_i] for row in used]
-    cds = [row[cd_i] for row in used]
-    cls = [row[cl_i] for row in used]
-
+    cd_series, cleanup = clean_series(rows, time_column=time_i, value_column=cd_i)
+    cl_series, _ = clean_series(rows, time_column=time_i, value_column=cl_i)
+    retained_start = cd_series[0][0] + discard_fraction * (cd_series[-1][0]-cd_series[0][0])
+    cd_series = window(cd_series, retained_start)
+    cl_series = window(cl_series, retained_start)
+    times = [t for t,y in cl_series]
+    cds = [y for t,y in cd_series]
+    cls = [y for t,y in cl_series]
+    used = cl_series
     limitations: list[str] = []
-    mean_cd = statistics.fmean(cds) if cds else None
-    mean_cl = statistics.fmean(cls) if cls else None
-    rms_cl = None
-    if cls and mean_cl is not None:
-        rms_cl = math.sqrt(statistics.fmean((value - mean_cl) ** 2 for value in cls))
+    if len(times) > 1:
+        cd_stats, cl_stats = time_statistics(cd_series), time_statistics(cl_series)
+        mean_cd, mean_cl, rms_cl = cd_stats["time_mean"], cl_stats["time_mean"], cl_stats["fluctuation_rms"]
+        uniform = cl_stats["uniform_time_spacing"]
+    else:
+        mean_cd, mean_cl, rms_cl, uniform = cds[0], cls[0], None, None
+        limitations.append("A single sample does not establish a time average or RMS.")
+    if cleanup["restart_segments"] or cleanup["duplicate_times"]:
+        limitations.append("Restart/duplicate times reconciled with the latest trajectory replacing previous samples at and after restart.")
+    limitations.append("Mean/RMS use piecewise-linear time weighting; frequency resolution is descriptive, not a statistical confidence interval.")
 
     frequency = None
     periods_observed = 0
@@ -130,6 +138,10 @@ def analyze_force_coefficients(
         strouhal_number=strouhal,
         periods_observed=periods_observed,
         period_cv=period_cv,
+        uniform_time_spacing=uniform,
+        duplicate_times=cleanup["duplicate_times"],
+        restart_segments=cleanup["restart_segments"],
+        frequency_resolution=1/(times[-1]-times[0]) if len(times)>1 and times[-1]>times[0] else None,
         limitations=limitations,
     )
 

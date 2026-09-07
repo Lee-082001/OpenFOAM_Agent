@@ -386,6 +386,7 @@ def test_runtime_repair_sequence_validates_then_retries_in_one_llm_turn(tmp_path
     assert state.current_state == State.SOLVE_READY
     prompts_before_repair = len(llm.prompts)
 
+    state.approve_solve()
     outcome = agent.repair_runtime(
         state,
         runtime_log="--> FOAM FATAL ERROR:\nbad solver setup\nFOAM exiting\n",

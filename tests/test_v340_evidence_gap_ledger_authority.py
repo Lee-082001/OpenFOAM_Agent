@@ -184,7 +184,7 @@ def test_codex_wait_heartbeat_reports_long_blocking_cli_call(monkeypatch):
         output_path = command[command.index("--output-last-message") + 1]
         with open(output_path, "w", encoding="utf-8") as handle:
             handle.write('{"ok":true}')
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout='{"type":"turn.completed"}\n', stderr="")
 
     monkeypatch.setattr(codex.subprocess, "run", fake_run)
     status = CodexCLIStatus(

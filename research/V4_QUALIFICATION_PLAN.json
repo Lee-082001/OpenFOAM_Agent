@@ -1,0 +1,175 @@
+{
+  "release": "4.0.0rc1",
+  "kind": "qualification_plan_not_execution_harness",
+  "all_below_executed": false,
+  "groups": [
+    {
+      "id": "N01",
+      "name_ko": "단일 영역 정상 유동",
+      "status": "NOT_RUN",
+      "acceptance_ko": "실제 dictionary → blockMesh/checkMesh → steady solver → 수렴·필드 검사",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    },
+    {
+      "id": "N02",
+      "name_ko": "비정상 외부 유동",
+      "status": "NOT_RUN",
+      "acceptance_ko": "실제 transient 목표 시간·안정성·와류 주파수/관측 기간 검사",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    },
+    {
+      "id": "N03",
+      "name_ko": "열전달",
+      "status": "NOT_RUN",
+      "acceptance_ko": "실제 물성·열원·에너지 수지 및 온도 결과 검증",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    },
+    {
+      "id": "N04",
+      "name_ko": "유체–고체 복합 열전달",
+      "status": "NOT_RUN",
+      "acceptance_ko": "fluid/solid layout·interface 연결·연속 열유속 검증",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    },
+    {
+      "id": "N05",
+      "name_ko": "다상 문제",
+      "status": "NOT_RUN",
+      "acceptance_ko": "상별 필드·solver/module 호환성·질량 보존 검증",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    },
+    {
+      "id": "N06",
+      "name_ko": "실제 STL 자산",
+      "status": "NOT_RUN",
+      "acceptance_ko": "사용자 자산 해시 → surface quality → meshing → 해석",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    },
+    {
+      "id": "N07",
+      "name_ko": "기존 case·중단·재개",
+      "status": "NOT_RUN",
+      "acceptance_ko": "프로세스 중단/OS 재시작·checkpoint 검증·명시적 재승인·restart",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    },
+    {
+      "id": "N08",
+      "name_ko": "로컬 MPI",
+      "status": "NOT_RUN",
+      "acceptance_ko": "실제 decomposePar → mpirun → rank 종료·출력 → reconstructPar",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    },
+    {
+      "id": "M01",
+      "name_ko": "미공개 자연어 문제",
+      "status": "NOT_RUN",
+      "acceptance_ko": "튜토리얼 그대로가 아닌 조건·표현 변경 문제의 live-model 평가",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    },
+    {
+      "id": "M02",
+      "name_ko": "모호하거나 불충분한 요구",
+      "status": "NOT_RUN",
+      "acceptance_ko": "영역 경계·단위·gauge·열원 의미의 질문/차단 정확도",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    },
+    {
+      "id": "B01",
+      "name_ko": "실제 backend",
+      "status": "NOT_RUN",
+      "acceptance_ko": "Codex 구독 로그인·JSON 기능, OpenAI/Claude/Ollama 연동·취소·usage",
+      "reason_ko": "현재 환경에서 실제 OpenFOAM/MPI/backend 실행을 수행하지 않음.",
+      "required_artifacts": [
+        "input/intake/approval hashes",
+        "command and environment record",
+        "complete native log hash",
+        "output hashes",
+        "numerical/physical acceptance report"
+      ]
+    }
+  ],
+  "metrics_to_keep_separate": [
+    "intake_accuracy",
+    "design_validity",
+    "case_generation",
+    "mesh_pass",
+    "solver_started",
+    "requested_interval_or_convergence",
+    "output_validity",
+    "numerical_quality",
+    "physical_goal",
+    "cost",
+    "human_interventions"
+  ],
+  "denominator_policy": "Retain attempted failures. NOT_RUN is not passed and is not a measured CFD success rate."
+}

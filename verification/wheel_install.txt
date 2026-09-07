@@ -1,0 +1,8 @@
+WARNING: The directory '/home/oai/.cache/pip' or its parent directory is not owned or is not writable by the current user. The cache has been disabled. Check the permissions and owner of that directory. If executing pip with sudo, you should use sudo's -H flag.
+Processing /mnt/data/wheel-validation/openfoam_agent-4.0.0rc1-py3-none-any.whl
+Installing collected packages: openfoam-agent
+  Attempting uninstall: openfoam-agent
+    Found existing installation: openfoam-agent 4.0.0rc1
+    Uninstalling openfoam-agent-4.0.0rc1:
+      Successfully uninstalled openfoam-agent-4.0.0rc1
+Successfully installed openfoam-agent-4.0.0rc1

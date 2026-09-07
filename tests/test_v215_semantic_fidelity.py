@@ -323,6 +323,10 @@ def test_legacy_v1_intake_digest_ignores_new_contract_default_for_rehydration():
     spec = _semantic_intake().model_copy(update={"semantic_contract_version": "1"})
     legacy_payload = spec.model_dump(mode="json")
     legacy_payload.pop("semantic_contract_version", None)
+    legacy_payload.pop("requirement_history", None)
+    legacy_payload.pop("ambiguities", None)
+    for fact in legacy_payload["facts"]:
+        fact.pop("quantity", None)
     expected = hashlib.sha256(
         json.dumps(
             legacy_payload,

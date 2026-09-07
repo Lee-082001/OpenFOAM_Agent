@@ -1,0 +1,23 @@
+{
+  "version": "4.0.0rc1",
+  "python": "3.13.5 (main, Jun 25 2025, 18:55:22) [GCC 14.2.0]",
+  "module_path": "/mnt/data/wheel-validation/venv/lib/python3.13/site-packages/openfoam_agent/__init__.py",
+  "installed_outside_source": true,
+  "cli_help_passed": true,
+  "dependency_resolution_tested": false,
+  "dependency_setup": "--no-deps wheel install with .pth reusing already installed parent dependencies",
+  "openai_sdk_available": false,
+  "profiles": {
+    "13": {
+      "path": "/mnt/data/wheel-validation/venv/lib/python3.13/site-packages/openfoam_agent/data/openfoam13_capability_graph.json",
+      "sha256": "5dd4a5ae685509ebb4cdf4acea8dd8ecaea9c83cad222fccfe72bfa1c9948ce8",
+      "json_readable": true
+    },
+    "14": {
+      "path": "/mnt/data/wheel-validation/venv/lib/python3.13/site-packages/openfoam_agent/data/openfoam14_capability_graph.json",
+      "sha256": "63758fe07497fd3689815c8f5a38e90724feb3cd9ee62d68dd43e53f03c42ad7",
+      "json_readable": true
+    }
+  },
+  "wheel_sha256": "acc11271a825fc3e23b84410f4163978a39780ff84a167de092b45caaada76ac"
+}

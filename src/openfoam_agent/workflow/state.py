@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
+from openfoam_agent.contracts.execution import ExecutionApproval
+from openfoam_agent.contracts.models import ResourceLimits
 
 from openfoam_agent.schemas.engineering import (
     CaseSeal,
@@ -19,7 +21,7 @@ from openfoam_agent.schemas.postprocessing import (
     PostProcessingEvent,
     PostProcessingReport,
 )
-from .states import State
+from .states import State, SOLVE_APPROVAL_STATES
 
 
 class CFDState(BaseModel):
@@ -40,6 +42,18 @@ class CFDState(BaseModel):
     mesh_evidence: MeshEvidence | None = None
 
     solve_approved: bool = False
+    execution_approval: ExecutionApproval | None = None
+    region_mesh_evidence: dict[str, MeshEvidence] = Field(default_factory=dict)
+    region_mesh_manifests: dict[str, str] = Field(default_factory=dict)
+    assets: list[dict] = Field(default_factory=list)
+    quantity_analyses: list[dict] = Field(default_factory=list)
+    parallel_evidence: dict | None = None
+    result_output_evidence: list[dict] = Field(default_factory=list)
+    engineering_checkpoint: dict = Field(default_factory=dict)
+    engineering_next_step: int = Field(default=1, ge=1)
+    pending_action: dict | None = None
+    native_process_records: list[dict] = Field(default_factory=list)
+    checkpoint_schema_version: int = 1
     simulation: SimulationResult | None = None
     runtime_report: RuntimeReport | None = None
     simulation_attempts: int = 0
@@ -101,6 +115,8 @@ class CFDState(BaseModel):
     def accept_result(self) -> None:
         if self.current_state != State.RESULT_REVIEW_REQUIRED:
             raise ValueError("Result acceptance requires RESULT_REVIEW_REQUIRED.")
+        if self.simulation is None or not self.simulation.success or self.simulation.outputs_verified is not True:
+            raise ValueError("Cannot accept incomplete calculation or unverified output as COMPLETE.")
         for feedback in self.human_feedback:
             if feedback.status in {"awaiting_review", "revision_proposed", "unresolved"}:
                 feedback.status = "resolved"
@@ -112,10 +128,11 @@ class CFDState(BaseModel):
             if feedback.status == "awaiting_rerun":
                 feedback.status = "awaiting_review"
 
-    def approve_solve(self) -> None:
-        if self.current_state not in {State.MESH_READY, State.SOLVE_READY}:
+    def approve_solve(self, resource_limits: ResourceLimits | None = None) -> None:
+        if self.current_state not in SOLVE_APPROVAL_STATES:
             raise ValueError("Solve approval requires a mesh-ready or solve-ready sealed case.")
         if self.engineering_plan is None or self.case_seal is None:
             raise ValueError("Solve approval requires an engineering plan and case seal.")
+        self.execution_approval = ExecutionApproval.issue(self.engineering_plan, self.case_seal, resource_limits)
         self.solve_approved = True
         self.transition(State.SIMULATION, "User approved solver execution for the sealed case.")

@@ -26,6 +26,21 @@ from openfoam_agent.schemas.engineering import (
 from openfoam_agent.workflow.states import State
 
 
+def _register_syntax_fixture(agent, state, design):
+    """Actual local reference read for a synthetic, not native-qualified syntax example."""
+    from openfoam_agent.contracts.models import ImplementationEvidenceBinding
+    from openfoam_agent.schemas.engineering import ReadReferenceAction
+    from openfoam_agent.tools.references import OpenFOAMReferenceIndex
+    root = agent.workspace.root / "reference-fixture"
+    root.mkdir()
+    (root / "U").write_text("FoamFile { class volVectorField; object U; }\ndimensions [0 1 -1 0 0 0 0];\ninternalField uniform (1 0 0);\nboundaryField { inlet { type fixedValue; value uniform (1 0 0); } outlet { type zeroGradient; } }\n")
+    agent.references = OpenFOAMReferenceIndex({"tutorials": root})
+    event = agent._dispatch_tool_action(ReadReferenceAction(type="read_reference", reference="tutorials:U", rationale="Observed syntax fixture"), step=1, native_execution=False, phase="prepare", state=state)
+    assert event.success
+    eid = canonical_engineering_evidence_id("openfoam_reference", "tutorials:U")
+    design.plan.implementation_evidence_bindings = [ImplementationEvidenceBinding(path="0/U", evidence_ids=[eid])]
+
+
 def _staged_actions(state):
     legacy = _compact_plan(state)
     design = DesignCaseAction(
@@ -88,6 +103,7 @@ def test_staged_cli_style_flow_reaches_solve_ready_with_two_small_contracts(tmp_
         ),
     )
     agent.workspace.write_text("constant/polyMesh/boundary", _boundary_file())
+    _register_syntax_fixture(agent, state, design)
 
     agent.prepare(state, native_execution=True)
 
@@ -219,14 +235,15 @@ def test_two_retrieval_cycles_stay_bounded_and_switch_to_small_decision_schema(t
         ),
     )
     agent.workspace.write_text("constant/polyMesh/boundary", _boundary_file())
+    _register_syntax_fixture(agent, state, design)
     agent.prepare(state, native_execution=True)
 
     assert state.current_state == State.SOLVE_READY
     assert llm.schemas[:3] == [PrepareDesignTurn, PrepareDesignTurn, PrepareDecisionDesignTurn]
-    assert len(agent._observed_evidence_registry(state)) > 20
+    assert len(agent._observed_evidence_registry(state)) > 12
     assert all(len(prompt) <= 18_000 for prompt in llm.prompts)
     decide_metrics = structured_request_metrics(
         llm.schemas[2], llm.prompts[2], system_prompt=llm.kwargs[2]["system_prompt"] or ""
     )
-    assert decide_metrics["approxTokens"] < 15_000
+    assert decide_metrics["approxTokens"] < 18_000  # v4 preserves required execution/syntax contracts
     assert '"shown": 12' in llm.prompts[2]

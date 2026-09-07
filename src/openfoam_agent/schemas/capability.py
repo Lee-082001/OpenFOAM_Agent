@@ -16,6 +16,9 @@ VerificationLevel = Literal[
     "unverified",
     "documented",
     "installed",
+    "source_discovered",
+    "binary_present",
+    "runtime_registered",
     "runtime_tested",
     "numerically_validated",
 ]
@@ -40,7 +43,7 @@ class CapabilityProvider(BaseModel):
     name: str = Field(min_length=1)
     provider_type: Literal[
         "solver", "solver_module", "solver_application", "execution_driver",
-        "generated_solver", "model", "fv_model", "utility", "toolkit"
+        "generated_solver", "model", "fv_model", "utility", "toolkit", "function_object", "source_component"
     ]
     capabilities: list[str] = Field(default_factory=list)
     openfoam_version: str = Field(min_length=1)

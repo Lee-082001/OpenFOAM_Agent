@@ -1,0 +1,104 @@
+{
+  "base_archive_sha256": "3d9d99c8b186db5ed429ac36a6c49104052ae2b0c5c4b25b73e61a3b7eefb9ac",
+  "modified_legacy_test_files": 21,
+  "added_test_files": 3,
+  "note": "Passing 298 legacy tests does not mean unchanged expectations. Diff the listed files against the authoritative baseline.",
+  "files": [
+    {
+      "path": "tests/conftest.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v210_token_optimization.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v213_evidence_gap_and_runtime_delta.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v215_semantic_fidelity.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v218_runtime_boundary_codex.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v21_postprocessing.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v22_human_feedback.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v23_progress.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v250_native_failure_diagnostics.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v271_mesh_freshness.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v280_engineering_sequences.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v2_adversarial_integration.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v2_architecture.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v2_budgets.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v2_parsers_and_schema.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v2_runtime.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v2_security_hardening.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v301_structured_schema_compiler.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v330_openfoam13_14_native_discovery.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v340_evidence_gap_ledger_authority.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v360_bounded_staged_context.py",
+      "change": "modified"
+    },
+    {
+      "path": "tests/test_v400_audit_domains.py",
+      "change": "added"
+    },
+    {
+      "path": "tests/test_v400_execution_contracts.py",
+      "change": "added"
+    },
+    {
+      "path": "tests/test_v400_release_edges.py",
+      "change": "added"
+    }
+  ]
+}

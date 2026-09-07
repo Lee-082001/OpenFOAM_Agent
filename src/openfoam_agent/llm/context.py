@@ -162,8 +162,9 @@ def build_bounded_json_prompt(
     """Serialize JSON under a hard character budget before any remote API call.
 
     Domain-specific callers should already compact high-volume fields.  The generic
-    fallback only activates if an unusual user/reference payload still exceeds the
-    cap. It preserves dict keys and marks omitted list/string content explicitly.
+    fallback only activates for optional observations. Confirmed requirements,
+    execution/file contracts and implementation syntax evidence are never shortened.
+    If mandatory data alone does not fit, fail before making a remote call.
     """
 
     if max_chars < 4_000:
@@ -188,6 +189,7 @@ def build_bounded_json_prompt(
             return _prompt_result(prompt, compacted=level > 0, level=level)
 
     raise ContextBudgetError(
+        "Mandatory requirements/contracts were preserved without truncation. Split work by file/region. "
         f"Model context remained above the deterministic {max_chars}-character budget "
         "after aggressive compaction; refusing the API call."
     )
@@ -246,12 +248,23 @@ def _compact_runtime_result_dict(raw: dict[str, Any]) -> dict[str, object]:
     return projected
 
 
+# Keys carry semantic authority. Their whole subtrees are immutable projections.
+_PROTECTED_KEYS = frozenset({
+    "confirmed_intake", "confirmed_facts", "facts", "confirmed_intake_definition",
+    "frozen_engineering_plan", "approved_plan", "engineering_plan", "plan",
+    "required_case_files", "required_files", "confirmed_fact_bindings", "confirmed_fact_ids",
+    "execution", "execution_approval", "region_layouts", "interfaces", "geometry",
+    "geometry_data", "implementation_evidence_pack", "bindings", "current_case_files",
+    "assets", "physical_quantities", "quantity_analyses", "quantities_of_interest", "execution_contract",
+})
+
+
 def _compact_json_value(value: object, *, string_limit: int, list_limit: int) -> object:
     if isinstance(value, str):
         return compact_text(value, max(64, string_limit))
     if isinstance(value, dict):
         return {
-            str(key): _compact_json_value(
+            str(key): child if str(key) in _PROTECTED_KEYS else _compact_json_value(
                 child, string_limit=string_limit, list_limit=list_limit
             )
             for key, child in value.items()

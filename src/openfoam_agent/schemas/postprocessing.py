@@ -43,6 +43,11 @@ class ForceCoefficientAnalysis(_PostModel):
     reference_length: float | None = Field(default=None, gt=0.0)
     strouhal_number: float | None = Field(default=None, ge=0.0)
     periods_observed: int = Field(default=0, ge=0)
+    uniform_time_spacing: bool | None = None
+    duplicate_times: int = 0
+    restart_segments: int = 0
+    frequency_resolution: float | None = None
+    averaging_method: str = "piecewise_linear_time_weighted"
     period_cv: float | None = Field(default=None, ge=0.0)
     limitations: list[str] = Field(default_factory=list, max_length=30)
 
@@ -79,6 +84,7 @@ class PostProcessingReport(_PostModel):
     recommended_human_checks: list[str] = Field(default_factory=list, max_length=40)
     artifacts: list[PostProcessingArtifact] = Field(default_factory=list, max_length=200)
     force_analysis: ForceCoefficientAnalysis | None = None
+    quantity_analyses: list[dict] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list, max_length=50)
     actions_executed: int = Field(default=0, ge=0)
     native_commands_executed: int = Field(default=0, ge=0)
@@ -87,7 +93,7 @@ class PostProcessingReport(_PostModel):
 class SearchPostProcessReferencesAction(_PostModel):
     type: Literal["search_postprocess_references"]
     query: str = Field(min_length=1, max_length=500)
-    scope: Literal["all", "tutorials", "source", "etc"] = "all"
+    scope: Literal["all", "tutorials", "source", "etc", "modules"] = "all"
     rationale: str = Field(default="", max_length=200)
 
 
@@ -111,6 +117,7 @@ class RunFoamPostProcessAction(_PostModel):
     dictionary_path: str = Field(min_length=1, max_length=240)
     time_selection: Literal["all", "latest"] = "all"
     use_solver_context: bool = True
+    region: str = Field(default="", pattern=r"^(?:[A-Za-z][A-Za-z0-9_.-]*)?$")
     rationale: str = Field(default="", max_length=200)
 
 
@@ -124,6 +131,12 @@ class ReadResultFileAction(_PostModel):
     type: Literal["read_result_file"]
     path: str = Field(min_length=1, max_length=500)
     max_chars: int = Field(default=40_000, ge=1, le=120_000)
+    rationale: str = Field(default="", max_length=200)
+
+
+class AnalyzeQuantityAction(_PostModel):
+    type: Literal["analyze_quantity"]
+    quantity_id: str = Field(min_length=1)
     rationale: str = Field(default="", max_length=200)
 
 
@@ -144,6 +157,7 @@ class PostProcessRunSpec(_PostModel):
     dictionary_path: str = Field(min_length=1, max_length=240)
     time_selection: Literal["all", "latest"] = "all"
     use_solver_context: bool = True
+    region: str = Field(default="", pattern=r"^(?:[A-Za-z][A-Za-z0-9_.-]*)?$")
 
 
 class ForceAnalysisSpec(_PostModel):
@@ -160,6 +174,7 @@ class PostProcessingExecutionPlanAction(_PostModel):
     configs: list[PostProcessConfigFile] = Field(default_factory=list, max_length=12)
     typed_configs: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=12)
     runs: list[PostProcessRunSpec] = Field(default_factory=list, max_length=12)
+    quantity_ids: list[str] = Field(default_factory=list, max_length=32)
     force_analyses: list[ForceAnalysisSpec] = Field(default_factory=list, max_length=8)
     summary: str = Field(min_length=1, max_length=1500)
     limitations: list[str] = Field(default_factory=list, max_length=30)
@@ -169,7 +184,7 @@ class PostProcessingExecutionPlanAction(_PostModel):
 
     @model_validator(mode="after")
     def validate_plan(self) -> Self:
-        if not (self.configs or self.typed_configs or self.runs or self.force_analyses):
+        if not (self.configs or self.typed_configs or self.runs or self.force_analyses or self.quantity_ids):
             raise ValueError("Post-processing execution plan must contain deterministic work.")
         paths = [x.path for x in self.configs] + [x.path for x in self.typed_configs]
         if len(paths) != len(set(paths)):
@@ -204,6 +219,7 @@ PostProcessingAction = (
     | ListResultFilesAction
     | ReadResultFileAction
     | AnalyzeForceCoefficientsAction
+    | AnalyzeQuantityAction
     | PostProcessingExecutionPlanAction
     | FinishPostProcessingAction
     | BlockPostProcessingAction

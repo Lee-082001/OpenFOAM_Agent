@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from conftest import configure_mock_completed_run
+
+from openfoam_agent.contracts.models import CompletionContract
+from conftest import fixture_verified_output
+
 from io import StringIO
 
 from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
@@ -289,6 +294,7 @@ def test_runtime_orchestrator_emits_of13_live_progress(tmp_path, graph_path):
         progress=reporter,
     )
     agent.prepare(state, native_execution=True)
+    configure_mock_completed_run(state, agent, end_time=20.0)
     state.approve_solve()
     RuntimeOrchestrator(
         tools,
@@ -354,7 +360,7 @@ def test_postprocessing_emits_live_progress(tmp_path, graph_path):
         policy=EngineeringPolicy(max_agent_steps=10, hard_max_agent_steps=10),
     )
     prep.prepare(state, native_execution=True)
-    result = parse_runtime_log("Time = 20s\nEnd\n", return_code=0)
+    result = fixture_verified_output(parse_runtime_log("Time = 20s\nEnd\n", return_code=0, contract=CompletionContract(mode="transient", start_time=0, end_time=20.0)))
     state.runtime_report = RuntimeReport(
         success=True,
         attempts=[SimulationAttempt(attempt=1, result=result)],

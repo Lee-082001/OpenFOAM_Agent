@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from openfoam_agent.contracts.models import CompletionContract
+
 from openfoam_agent.llm.openai_client import validate_structured_output_schema
 from openfoam_agent.schemas.engineering import (
     BlockAction,
@@ -52,8 +54,7 @@ def test_engineering_turn_plain_union_dispatches_by_literal_type():
 def test_runtime_parser_accepts_clean_completed_log():
     result = parse_runtime_log(
         "Time = 1\nCourant Number mean: 0.1 max: 0.3\nEnd\n",
-        return_code=0,
-    )
+        return_code=0, contract=CompletionContract(mode="transient", start_time=0, end_time=1.0))
     assert result.success
     assert result.last_time == 1
     assert result.courant_max == 0.3
@@ -70,8 +71,7 @@ def test_runtime_parser_accepts_openfoam13_seconds_suffix():
             "Final residual = 5.337679e-06, No Iterations 2\n"
             "End\n"
         ),
-        return_code=0,
-    )
+        return_code=0, contract=CompletionContract(mode="transient", start_time=0, end_time=20.0))
     assert result.success
     assert result.last_time == 20.0
     assert result.courant_max == 0.034800772
@@ -81,8 +81,7 @@ def test_runtime_parser_accepts_openfoam13_seconds_suffix():
 def test_runtime_parser_accepts_seconds_suffix_with_whitespace_and_exponent():
     result = parse_runtime_log(
         "Time = 2.5e-03 s\nCourant Number mean: 0.01 max: 0.02\nEnd\n",
-        return_code=0,
-    )
+        return_code=0, contract=CompletionContract(mode="transient", start_time=0, end_time=0.0025))
     assert result.success
     assert result.last_time == 2.5e-03
 
@@ -90,8 +89,7 @@ def test_runtime_parser_accepts_seconds_suffix_with_whitespace_and_exponent():
 def test_runtime_parser_rejects_nonfinite_or_fatal_log():
     result = parse_runtime_log(
         "Time = 1\n--> FOAM FATAL ERROR: bad thing\nnan\n",
-        return_code=1,
-    )
+        return_code=1, contract=CompletionContract(mode="transient", start_time=0, end_time=1.0))
     assert not result.success
     assert result.fatal_error is not None
     assert result.non_finite_detected

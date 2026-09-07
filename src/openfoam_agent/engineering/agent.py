@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from openfoam_agent.contracts.evidence import implementation_evidence_pack, evidence_coverage_failures
+from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
+from openfoam_agent.tools.execution_policy import (
+    deny_unapproved_engineering_solve, command_effect, ExecutionPolicyError,
+)
+from openfoam_agent.tools.safe_runner import SafeRunner
+
 import hashlib
 import json
 import os
@@ -243,6 +250,10 @@ class CFDEngineeringAgent:
         self.safety = DeterministicSafetyGate(self.tools, self.workspace)
         self.presolve = PreSolveCompletenessGate(self.tools, self.workspace)
         self.policy = policy or EngineeringPolicy()
+        runner = getattr(self.tools, "runner", None)
+        if isinstance(runner, SafeRunner):
+            runner.budget.limit = self.policy.max_native_commands
+            runner.resource_limits.max_native_processes = self.policy.max_native_commands
         self.progress = progress or NullProgressReporter()
         self._checkmesh_mesh_manifest: str | None = None
         self._presolve_case_manifest: str | None = None
@@ -258,17 +269,28 @@ class CFDEngineeringAgent:
         self._evidence_gap_ledger: dict[str, dict[str, dict[str, object]]] = {}
         self._retrieval_cycles: dict[str, int] = {}
         self._evidence_retrieval_disabled: dict[str, str] = {}
+        self._active_transaction = None
+        self._resume_pending = False
 
     def prepare(self, state: CFDState, *, native_execution: bool = True) -> CFDState:
         state.assert_confirmed_intake()
-        self._evidence_gap_ledger["prepare"] = {}
-        self._draft_design_plan = None
-        self._draft_authoring_brief = ""
-        self._retrieval_cycles["prepare"] = 0
-        self._evidence_retrieval_disabled.pop("prepare", None)
+        from openfoam_agent.tools.assets import ingest_request_assets
+        ingest_request_assets(state, self.workspace)
+        self.bind_checkpoint(state)
+        resumed = self._resume_pending
+        self._resume_pending = False
+        if not resumed:
+            self._evidence_gap_ledger["prepare"] = {}
+            self._draft_design_plan = None
+            self._draft_authoring_brief = ""
+            self._retrieval_cycles["prepare"] = 0
+            self._evidence_retrieval_disabled.pop("prepare", None)
+            state.engineering_next_step = 1
         if native_execution and not self._checkmesh_preflight(state, phase="preflight"):
             return state
-        state.engineering_round_start_index = len(state.engineering_events)
+        if not resumed:
+            state.engineering_round_start_index = len(state.engineering_events)
+        self.checkpoint(state, "confirmed-intake")
         state.transition(State.ENGINEERING, "Confirmed CFD definition handed to CFDEngineeringAgent.")
         self.progress.emit(
             ProgressEvent(
@@ -285,9 +307,13 @@ class CFDEngineeringAgent:
         )
 
         current_limit = min(self.policy.max_agent_steps, self.policy.hard_max_agent_steps)
-        step = 1
+        if resumed and state.engineering_budget_extensions:
+            current_limit = max(current_limit, max(x.new_limit for x in state.engineering_budget_extensions))
+        step = state.engineering_next_step
         while True:
             while step <= current_limit:
+                state.engineering_next_step = step + 1
+                self.checkpoint(state, "before-model-turn")
                 turn = self._generate_turn(
                     state,
                     step=step,
@@ -305,6 +331,7 @@ class CFDEngineeringAgent:
                     progress_limit=current_limit,
                     native_execution=native_execution,
                 )
+                self.checkpoint(state, "design-or-authoring-turn-completed")
                 if terminal:
                     return state
                 step += 1
@@ -489,7 +516,20 @@ class CFDEngineeringAgent:
         )
         return state
 
-    def _execute_prepare_decision(
+    def _execute_prepare_decision(self, state, action, **kwargs):
+        self._active_transaction = {"type": action.type, "step": kwargs.get("llm_step")}
+        self.checkpoint(state, "transaction-start")
+        try:
+            outcome = self._execute_prepare_decision_impl(state, action, **kwargs)
+        except BaseException:
+            self.checkpoint(state, "transaction-interrupted")
+            raise
+        self._active_transaction = None
+        state.pending_action = None
+        self.checkpoint(state, "transaction-completed")
+        return outcome
+
+    def _execute_prepare_decision_impl(
         self,
         state: CFDState,
         action: object,
@@ -559,6 +599,11 @@ class CFDEngineeringAgent:
             failures: list[str] = []
             if action.plan.confirmed_intake_sha256 != state.intake_digest:
                 failures.append("Engineering design confirmed_intake_sha256 does not match the frozen intake.")
+            failures.extend(validate_design(action.plan, state.intake))
+            try:
+                failures.extend(evidence_coverage_failures(action.plan, state))
+            except ValueError as exc:
+                failures.append(str(exc))
             failures.extend(self._validate_observed_provenance(action.plan, state))
             failures.extend(self._validate_engineering_defaults(action.plan, state))
             valid = not failures
@@ -1614,6 +1659,11 @@ class CFDEngineeringAgent:
         except WorkspaceSafetyError as exc:
             reason = f"Runtime repair blocked by workspace safety: {exc}"
             return RepairOutcome(RuntimeRepairDecision.BLOCKED, reason=reason)
+        if state.execution_approval is not None:
+            try:
+                state.execution_approval.check_plan(plan)
+            except ValueError as exc:
+                return RepairOutcome(RuntimeRepairDecision.NEEDS_USER_REVIEW, reason=str(exc))
         if plan.solver != approved_solver:
             return RepairOutcome(
                 RuntimeRepairDecision.NEEDS_USER_REVIEW,
@@ -1654,6 +1704,8 @@ class CFDEngineeringAgent:
             )
             state.engineering_events.append(event)
             if not event.success:
+                if getattr(self, "_repair_review_required", None):
+                    return RepairOutcome(RuntimeRepairDecision.NEEDS_USER_REVIEW, reason=self._repair_review_required)
                 return outcome
             if outcome is not None:
                 return outcome
@@ -1897,7 +1949,54 @@ class CFDEngineeringAgent:
         start = min(state.engineering_round_start_index, len(state.engineering_events))
         return state.engineering_events[start:]
 
+    def checkpoint(self, state, reason):
+        from openfoam_agent.workflow.checkpoint import CheckpointStore
+        return CheckpointStore(self).save(state, reason=reason)
+
+    def bind_checkpoint(self, state):
+        runner = getattr(self.tools, "runner", None)
+        if isinstance(runner, SafeRunner):
+            runner.process_observer = lambda phase, record: self.checkpoint(state, f"native-{phase}")
+
+    def restore_checkpoint(self):
+        from openfoam_agent.workflow.checkpoint import CheckpointStore
+        state = CheckpointStore(self).load()
+        self.bind_checkpoint(state)
+        return state
+
+    def _record_region_mesh(self, state, evidence, arguments):
+        region = ""
+        if "-region" in arguments:
+            pos = arguments.index("-region")
+            if pos + 1 >= len(arguments):
+                raise ValueError("Missing region argument.")
+            region = arguments[pos + 1]
+        state.region_mesh_evidence[region] = evidence
+        if evidence.passed:
+            state.region_mesh_manifests[region] = region_mesh_digest(self.workspace, region)
+        else:
+            state.region_mesh_manifests.pop(region, None)
+        state.mesh_evidence = evidence
+
+    def _region_mesh_failures(self, state, plan):
+        failures = []
+        for layout in region_layouts(plan):
+            if not layout.region:
+                continue
+            evidence = state.region_mesh_evidence.get(layout.region)
+            if evidence is None or not evidence.passed:
+                failures.append(f"Passing checkMesh evidence is missing for region {layout.region}.")
+            elif state.region_mesh_manifests.get(layout.region) != region_mesh_digest(self.workspace, layout.region):
+                failures.append(f"Mesh evidence is stale for region {layout.region}.")
+        return failures
+
     def _native_command_count(self, state: CFDState) -> int:
+        runner = getattr(self.tools, "runner", None)
+        if isinstance(runner, SafeRunner):
+            state.native_process_records = list(runner.budget.records)
+            return runner.budget.attempts
+        # Injected test transports have no OS process counter. Do not label these
+        # action counts as measured subprocesses in reports.
         return sum(1 for event in self._current_round_events(state) if event.native_command_executed)
 
     def _tool_action_count(self, state: CFDState) -> int:
@@ -2047,6 +2146,13 @@ class CFDEngineeringAgent:
     ) -> RepairOutcome:
         if state.engineering_plan is None or state.case_seal is None:
             return self._runtime_repair_outcome(state, RuntimeRepairDecision.BLOCKED, "No approved engineering plan is available.")
+        self._repair_review_required = None
+        if not state.solve_approved or state.execution_approval is None:
+            return self._runtime_repair_outcome(state, RuntimeRepairDecision.NEEDS_USER_REVIEW, "Runtime repair requires a durable execution approval.")
+        try:
+            state.execution_approval.check_plan(state.engineering_plan)
+        except ValueError as exc:
+            return self._runtime_repair_outcome(state, RuntimeRepairDecision.NEEDS_USER_REVIEW, str(exc))
         try:
             self.workspace.adopt_seal(state.case_seal)
             self.safety.verify_seal(state.engineering_plan, state.case_seal)
@@ -2057,7 +2163,9 @@ class CFDEngineeringAgent:
             # case for which this persisted checkMesh evidence was approved. Restore
             # freshness against the narrower mesh-only manifest so solver-input edits
             # do not force redundant checkMesh runs.
-            self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
+            observed = state.region_mesh_manifests.get("")
+            if observed is not None and observed == region_mesh_digest(self.workspace, ""):
+                self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
         approved_solver = state.engineering_plan.solver
         self._evidence_gap_ledger["runtime_repair"] = {}
         self._retrieval_cycles["runtime_repair"] = 0
@@ -2187,6 +2295,8 @@ class CFDEngineeringAgent:
                 limit=self.policy.max_runtime_repair_steps,
                 state=state,
             )
+            if getattr(self, "_repair_review_required", None):
+                return self._runtime_repair_outcome(state, RuntimeRepairDecision.NEEDS_USER_REVIEW, self._repair_review_required)
         reason = f"Runtime repair action budget exhausted ({self.policy.max_runtime_repair_steps})."
         return self._runtime_repair_outcome(state, RuntimeRepairDecision.BLOCKED, reason)
 
@@ -2260,6 +2370,8 @@ class CFDEngineeringAgent:
                 state=state,
             )
             if not event.success:
+                if getattr(self, "_repair_review_required", None):
+                    return RepairOutcome(RuntimeRepairDecision.NEEDS_USER_REVIEW, reason=self._repair_review_required)
                 self.progress.emit(
                     ProgressEvent(
                         phase="runtime-repair-sequence",
@@ -2300,9 +2412,20 @@ class CFDEngineeringAgent:
         native_execution: bool,
     ) -> tuple[EngineeringEvent, RepairOutcome | None]:
         result = self.safety.validate_plan(action.plan, state.intake)  # type: ignore[arg-type]
+        if native_execution:
+            result.failures.extend(self._region_mesh_failures(state, action.plan))
+            result.valid = not result.failures
         result.failures.extend(self._validate_observed_provenance(action.plan, state))
         result.failures.extend(self._validate_engineering_defaults(action.plan, state))
         result.valid = not result.failures
+        if state.execution_approval is not None:
+            try:
+                state.execution_approval.check_plan(action.plan)
+                candidate = self.workspace.seal(action.plan)
+                state.execution_approval.check_repair_files(candidate)
+            except (ValueError, WorkspaceSafetyError) as exc:
+                result.failures.append(str(exc))
+                result.valid = False
         if action.plan.solver != approved_solver:
             result.failures.append("Runtime repair attempted to change the user-approved solver.")
             result.valid = False
@@ -3092,7 +3215,19 @@ class CFDEngineeringAgent:
                 break
         return result
 
-    def _dispatch_tool_action(
+    def _dispatch_tool_action(self, action, *, step, native_execution, phase, state=None):
+        if state is not None:
+            state.pending_action = {"status": "intent", "phase": phase, "step": step,
+                                    "action": action.model_dump(mode="json")}
+            self.checkpoint(state, "action-intent")
+        event = self._dispatch_tool_action_impl(action, step=step, native_execution=native_execution, phase=phase, state=state)
+        if state is not None:
+            state.pending_action = {"status": "completed", "event": event.model_dump(mode="json")}
+            self.checkpoint(state, "action-completed")
+            state.pending_action = None
+        return event
+
+    def _dispatch_tool_action_impl(
         self,
         action,
         *,
@@ -3102,6 +3237,28 @@ class CFDEngineeringAgent:
         state: CFDState | None = None,
     ) -> EngineeringEvent:
         try:
+            # Enforce effects BEFORE syntax preflight can itself create processes.
+            # The LLM's role label has no authority over this decision.
+            if isinstance(action, RunNativeOpenFOAMAction):
+                deny_unapproved_engineering_solve(action.invocation.command, action.invocation.arguments)
+            if isinstance(action, RunMeshCommandAction):
+                deny_unapproved_engineering_solve(action.command, [])
+            if phase.startswith("runtime") and state is not None and isinstance(
+                action, (WriteCaseFileAction, PatchCaseFileAction, DeleteCaseFileAction)
+            ):
+                from pathlib import PurePosixPath
+                path = PurePosixPath(action.patch.path if isinstance(action, PatchCaseFileAction) else action.path)
+                if state.execution_approval is None:
+                    raise ExecutionPolicyError("Runtime repair lacks a durable execution approval.")
+                if not (path.parts[0] == "system" and path.name in {"fvSchemes", "fvSolution"}):
+                    self._repair_review_required = "This repair changes more than numerical settings; explicit user review is required."
+                    raise ExecutionPolicyError(self._repair_review_required)
+            if phase.startswith("runtime") and isinstance(action, (RunNativeOpenFOAMAction, RunMeshCommandAction)):
+                command = action.invocation.command if isinstance(action, RunNativeOpenFOAMAction) else action.command
+                arguments = action.invocation.arguments if isinstance(action, RunNativeOpenFOAMAction) else []
+                if command_effect(command, arguments) in {"mesh", "initialization", "write", "decomposition"}:
+                    self._repair_review_required = "Native repair changes physical/mesh inputs; explicit user review is required."
+                    raise ExecutionPolicyError(self._repair_review_required)
             if (
                 native_execution
                 and state is not None
@@ -3235,7 +3392,7 @@ class CFDEngineeringAgent:
                 payload_ref = (
                     self._store_evidence_payload(
                         state, phase=phase, step=step, action_type=action.type,
-                        payload={"reference": action.reference, "content": text},
+                        payload={"reference": action.reference, "content": text, "read_metadata": getattr(self.references, "last_read_metadata", {})},
                         observed_evidence=observed,
                     )
                     if state is not None else None
@@ -3474,12 +3631,13 @@ class CFDEngineeringAgent:
                 if invocation.command != "checkMesh":
                     self._presolve_case_manifest = None
                     self._presolve_required_case_files = None
-                if invocation.role == "mesh" or invocation.command in _MESH_TOPOLOGY_MUTATING_COMMANDS:
+                if command_effect(invocation.command, invocation.arguments) in {"mesh", "decomposition"}:
                     self._checkmesh_mesh_manifest = None
                     if state is not None:
                         state.mesh_evidence = None
-                        if phase == "runtime_repair":
-                            state.case_seal = None
+                        state.case_seal = None
+                        state.solve_approved = False
+                        state.execution_approval = None
                 output = _tool_output(result)
                 self.workspace.write_log(f"{step:03d}.{invocation.command}.log", output)
                 success = result.success
@@ -3497,7 +3655,7 @@ class CFDEngineeringAgent:
                     summary = f"{invocation.command} returned status {result.return_code}; native diagnostic captured."
                 if invocation.command == "checkMesh" and state is not None:
                     evidence = parse_check_mesh_evidence(result)
-                    state.mesh_evidence = evidence
+                    self._record_region_mesh(state, evidence, invocation.arguments)
                     success = evidence.passed
                     summary = f"checkMesh returned status {result.return_code}; evidence {'passed' if evidence.passed else 'failed'}."
                     if evidence.passed:
@@ -3505,7 +3663,7 @@ class CFDEngineeringAgent:
                 return self._event(
                     step, action.type, success, summary, event_output,
                     native_command_executed=True,
-                    mesh_command_executed=(invocation.role in {"mesh", "mesh_validation"}),
+                    mesh_command_executed=(command_effect(invocation.command, invocation.arguments) in {"mesh", "validation", "decomposition"}),
                     failure_signature=failure_signature,
                     failure_scope=failure_scope,
                 )
@@ -3582,8 +3740,9 @@ class CFDEngineeringAgent:
                     self._checkmesh_mesh_manifest = None
                     if state is not None:
                         state.mesh_evidence = None
-                        if phase == "runtime_repair":
-                            state.case_seal = None
+                        state.case_seal = None
+                        state.solve_approved = False
+                        state.execution_approval = None
                 output = _tool_output(result)
                 self.workspace.write_log(f"{step:03d}.{action.command}.log", output)
                 event_output = output
@@ -3604,7 +3763,7 @@ class CFDEngineeringAgent:
                     )
                 if action.command == "checkMesh" and state is not None:
                     evidence = parse_check_mesh_evidence(result)
-                    state.mesh_evidence = evidence
+                    self._record_region_mesh(state, evidence, [])
                     event_success = evidence.passed
                     summary = (
                         f"checkMesh returned status {result.return_code}; "
@@ -3623,7 +3782,7 @@ class CFDEngineeringAgent:
                     failure_signature=failure_signature,
                     failure_scope=failure_scope,
                 )
-        except (ValueError, FileNotFoundError, WorkspaceSafetyError, OSError) as exc:
+        except (ValueError, FileNotFoundError, WorkspaceSafetyError, OSError, ExecutionPolicyError) as exc:
             if isinstance(action, GatherEvidenceAction):
                 reason = f"{type(exc).__name__}: {exc}"
                 self._disable_evidence_retrieval(phase, reason)
@@ -4022,6 +4181,9 @@ class CFDEngineeringAgent:
                 "phase": phase,
                 "step": step,
                 "frozen_engineering_plan": self._draft_design_plan.model_dump(mode="json"),
+                "confirmed_intake": confirmed_intake_definition(state),
+                "implementation_evidence_pack": implementation_evidence_pack(state, self._draft_design_plan),
+                "assets": state.assets,
                 "authoring_brief": self._draft_authoring_brief,
                 "environment_hint": self.tools.environment_snapshot(),
                 "tool_execution_contracts": self._mesh_tool_contracts(),
@@ -4082,6 +4244,9 @@ class CFDEngineeringAgent:
                 "approved_plan": (
                     {
                         "solver": state.engineering_plan.solver,
+                        "execution": (state.engineering_plan.execution.model_dump(mode="json") if state.engineering_plan.execution else None),
+                        "region_layouts": [x.model_dump(mode="json") for x in state.engineering_plan.region_layouts],
+                        "interfaces": [x.model_dump(mode="json") for x in state.engineering_plan.interfaces],
                         "solver_provider_id": state.engineering_plan.solver_provider_id,
                         "temporal_behavior": state.engineering_plan.temporal_behavior,
                         "motion_kind": state.engineering_plan.motion_kind,

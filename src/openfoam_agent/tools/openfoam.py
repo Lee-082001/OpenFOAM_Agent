@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Callable
@@ -15,6 +17,7 @@ class OpenFOAMTools:
 
     def __init__(self, runner: SafeRunner | None = None):
         self.runner = runner or SafeRunner()
+        self._dictionary_cache = {}
 
     @property
     def installed_openfoam(self):
@@ -61,6 +64,7 @@ class OpenFOAMTools:
                 "tutorials": bool(os.environ.get("FOAM_TUTORIALS")),
                 "source": bool(os.environ.get("FOAM_SRC")),
                 "etc": bool(os.environ.get("FOAM_ETC")),
+                "modules": bool(os.environ.get("FOAM_MODULES")),
             },
         }
 
@@ -143,6 +147,13 @@ class OpenFOAMTools:
         if execution.driver == "foamRun":
             assert execution.solver_module is not None
             args = ["-solver", execution.solver_module, *args]
+        # MPI is a Python-owned launch contract, never an arbitrary LLM command.
+        if execution.parallel.mode == "local_mpi":
+            return self.runner.run_mpi(
+                [execution.driver, *args], ranks=execution.parallel.ranks,
+                launcher=execution.parallel.launcher, cwd=case_dir,
+                stream_output=stream_output, timeout=timeout, output_callback=output_callback,
+            )
         # foamMultiRun obtains region->solver semantics from controlDict.regionSolvers.
         return self.run_native_command(
             execution.driver,
@@ -212,6 +223,7 @@ class OpenFOAMTools:
         dictionary_path: str | Path,
         *,
         solver: str | None = None,
+        region: str = "",
         latest_time: bool = False,
         timeout: int = 900,
     ):
@@ -226,6 +238,10 @@ class OpenFOAMTools:
             if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", solver):
                 raise ValueError(f"Unsafe solver identifier: {solver!r}")
             command.extend(["-solver", solver])
+        if region:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", region):
+                raise ValueError("Unsafe post-processing region.")
+            command.extend(["-region", region])
         if latest_time:
             command.append("-latestTime")
         return self.runner.run(command, cwd=case_dir, timeout=timeout)
@@ -235,11 +251,26 @@ class OpenFOAMTools:
         file_path: str | Path,
         cwd: str | Path | None = None,
     ):
-        return self.runner.run(
-            ["foamDictionary", "-keywords", str(Path(file_path).resolve())],
-            cwd=cwd,
-            timeout=30,
-        )
+        path = Path(file_path).resolve()
+        # Cache only successful, literal-file validation, keyed by the exact file,
+        # installation and executable bytes, options and case context.
+        executable = self.runner.resolve_trusted_executable("foamDictionary", env=self.runner.sanitized_environment())
+        binary_hash = None
+        if executable and Path(str(executable)).is_file():
+            with Path(str(executable)).open("rb") as stream:
+                binary_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+        key = hashlib.sha256(json.dumps({
+            "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "cwd": str(Path(cwd).resolve()) if cwd else None,
+            "environment": self.runner.installation.fingerprint,
+            "binary": binary_hash, "options": ["-keywords"],
+        }, sort_keys=True).encode()).hexdigest()
+        if key in self._dictionary_cache:
+            return self._dictionary_cache[key].model_copy(update={"cache_hit": True})
+        result = self.runner.run(["foamDictionary", "-keywords", str(path)], cwd=cwd, timeout=30)
+        if result.success:
+            self._dictionary_cache[key] = result.model_copy(deep=True)
+        return result
 
     def run_mesh_command(self, command: str, case_dir: str | Path):
         dispatch = {

@@ -154,7 +154,7 @@ def test_createpatch_invalidates_mesh_presolve_and_runtime_seal(tmp_path, graph_
         RunMeshCommandAction(type="run_mesh_command", command="createPatch", rationale="change topology"),
         step=99,
         native_execution=True,
-        phase="runtime_repair",
+        phase="prepare",
         state=state,
     )
     assert event.success
@@ -183,7 +183,7 @@ def test_codex_cli_check_requires_structured_exec_and_chatgpt_login(monkeypatch)
         if command[1:3] == ["exec", "--help"]:
             return SimpleNamespace(
                 returncode=0,
-                stdout="--output-schema --output-last-message --ephemeral --sandbox --ignore-user-config",
+                stdout="--output-schema --output-last-message --ephemeral --sandbox --ignore-user-config --json",
                 stderr="",
             )
         if command[1:3] == ["login", "status"]:
@@ -217,7 +217,7 @@ def test_codex_llm_isolated_readonly_exec_strips_api_env_and_revalidates(monkeyp
         output_index = command.index("--output-last-message") + 1
         with open(command[output_index], "w", encoding="utf-8") as handle:
             json.dump({"action": "ok", "reason": "validated"}, handle)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout='{"type":"turn.completed"}\n', stderr="")
 
     monkeypatch.setattr(codex.subprocess, "run", fake_run)
     llm = CodexLLM(status=status, model=None)

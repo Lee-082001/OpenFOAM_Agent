@@ -20,6 +20,7 @@ from .openai_client import (
     validate_structured_output_schema,
 )
 from .structured_schema import compile_transport_schema
+from .codex_transport import authentication_kind, inspect_events
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -58,10 +59,11 @@ def _safe_process_text(value: str | None, *, limit: int = 4000) -> str:
 
 
 def _codex_environment() -> dict[str, str]:
-    env = dict(os.environ)
-    for key in _CODEX_API_ROUTING_ENV:
-        env.pop(key, None)
-    return env
+    allowed = {"HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+        "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT",
+        "CODEX_HOME", "CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+    return {key: value for key,value in os.environ.items() if key in allowed}
+
 
 
 def check_codex_cli(
@@ -111,7 +113,7 @@ def check_codex_cli(
 
     version = _safe_process_text(version_proc.stdout or version_proc.stderr, limit=300)
     help_text = "\n".join(part for part in (help_proc.stdout, help_proc.stderr) if part)
-    required = ("--output-schema", "--output-last-message", "--ephemeral", "--sandbox")
+    required = ("--output-schema", "--output-last-message", "--ephemeral", "--sandbox", "--json", "--ignore-user-config")
     missing = [flag for flag in required if flag not in help_text]
     if version_proc.returncode != 0 or help_proc.returncode != 0 or missing:
         detail = f" missing flags={missing}" if missing else ""
@@ -121,9 +123,9 @@ def check_codex_cli(
         )
 
     login_text = _safe_process_text(login_proc.stdout or login_proc.stderr, limit=500)
-    if login_proc.returncode != 0 or "logged in" not in login_text.casefold():
+    if login_proc.returncode != 0 or authentication_kind(login_text) != "chatgpt":
         raise LLMConfigurationError(
-            "--backend codex requires an authenticated Codex CLI. Run `codex login` and verify "
+            "--backend codex requires positively identified ChatGPT authentication, not API-key or unknown authentication. Run `codex login` and verify "
             "with `codex login status`. API-key environment variables are intentionally ignored "
             "by this backend so it uses the ChatGPT/Codex login path."
         )
@@ -139,9 +141,9 @@ def check_codex_cli(
 class CodexLLM:
     """Structured LLM adapter backed by subscription-authenticated `codex exec`.
 
-    Codex is used only as a model transport here. It runs in an empty temporary working
-    directory with a read-only sandbox and ephemeral session, so CFD filesystem/tool
-    execution remains owned by deterministic OpenFOAM Agent Python.
+    Codex is requested as a model transport in a temporary read-only ephemeral session.
+    Tool events are rejected, but observation is NOT pre-execution tool prevention.
+    The CLI/account/OS remain part of the trusted local-operator boundary.
     """
 
     store = False
@@ -171,6 +173,8 @@ class CodexLLM:
         self.timeout_seconds = timeout_seconds
         self.structured_repair_attempts = structured_repair_attempts
         self.status = status or check_codex_cli(binary=binary)
+        if authentication_kind(self.status.login_status) != "chatgpt" or not self.status.supports_ignore_user_config:
+            raise LLMConfigurationError("Codex requires ChatGPT authentication and --ignore-user-config support.")
         self.binary = self.status.binary
         self.wait_callback = wait_callback
         self.wait_heartbeat_seconds = float(wait_heartbeat_seconds)
@@ -202,6 +206,8 @@ class CodexLLM:
         last_error = "Codex did not return valid structured JSON."
         previous = ""
         self.last_usage = None
+        self.usage_attempts = []
+        self.last_transport = None
 
         for attempt in range(attempts):
             current_prompt = base_prompt
@@ -259,6 +265,9 @@ class CodexLLM:
                 self.binary,
                 "exec",
                 "--ephemeral",
+                "--json",
+                "-c",
+                'forced_login_method="chatgpt"',
                 "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
@@ -299,12 +308,23 @@ class CodexLLM:
                 raise StructuredOutputError(
                     f"codex exec failed with exit code {proc.returncode}: {stderr or '<no diagnostic>'}"
                 )
+            try:
+                self.last_transport, usage = inspect_events(proc.stdout or "")
+            except ValueError as exc:
+                raise StructuredOutputError(str(exc)) from exc
+            self.usage_attempts.append(usage)
+            if all(row is not None for row in self.usage_attempts):
+                self.last_usage = {key: sum(row.get(key, 0) for row in self.usage_attempts) for key in {k for row in self.usage_attempts for k in row}}
+            else:
+                self.last_usage = None
             if not output_path.is_file():
                 diagnostic = _safe_process_text(proc.stderr or proc.stdout, limit=3000)
                 raise StructuredOutputError(
                     "codex exec exited successfully but did not write --output-last-message. "
                     f"Diagnostic: {diagnostic or '<none>'}"
                 )
+            if output_path.stat().st_size > 4_000_000:
+                raise StructuredOutputError("Codex structured output exceeds the output limit.")
             text = output_path.read_text(encoding="utf-8", errors="replace").strip()
             if not text:
                 raise StructuredOutputError("codex exec returned an empty final structured output.")

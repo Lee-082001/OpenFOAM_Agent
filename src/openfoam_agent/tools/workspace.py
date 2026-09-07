@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+from .dictionary_policy import library_entries
 from pathlib import Path
 
 from openfoam_agent.schemas.engineering import CaseFileSeal, CaseSeal, EngineeringPlan
@@ -90,17 +91,21 @@ class CaseWorkspace:
         self.max_total_bytes = max_total_bytes
         self.max_execution_bytes = max_execution_bytes
         self.max_execution_files = max_execution_files
-        self.allowed_libraries = allowed_libraries or {
+        self.allowed_libraries = allowed_libraries if allowed_libraries is not None else {
             "libfvMotionSolvers.so",
             "librigidBodyMeshMotion.so",
             "libforces.so",
             "libfieldFunctionObjects.so",
         }
         self._authored_paths: set[str] = set()
+        self._asset_paths: set[str] = set()
 
     def resolve_case_path(self, relative_text: str, *, must_exist: bool = False) -> Path:
         relative = self._validate_relative(relative_text)
-        path = (self.case_dir / relative).resolve()
+        unresolved = self.case_dir / relative
+        if any(p.is_symlink() for p in [unresolved, *unresolved.parents] if p != self.root):
+            raise WorkspaceSafetyError(f"Symlink path component is forbidden: {relative_text}")
+        path = unresolved.resolve()
         if self.case_dir not in path.parents:
             raise WorkspaceSafetyError(f"Case path escapes sandbox: {relative_text}")
         if must_exist and not path.is_file():
@@ -126,6 +131,8 @@ class CaseWorkspace:
         # Path resolution performs the same sandbox/path checks as write_text, but
         # does not create the target.
         self.resolve_case_path(relative_text)
+        if self._normalized(relative_text) in self._asset_paths:
+            raise WorkspaceSafetyError("User assets are immutable to LLM authoring; use an explicit replacement/fork.")
         self._validate_content(content, relative_text)
         return hashlib.sha256(encoded).hexdigest()
 
@@ -177,6 +184,14 @@ class CaseWorkspace:
         self._assert_total_size()
         return digest
 
+    def write_with_local_includes(self, relative_text: str, content: str):
+        """Explicit application API; raw LLM include directives remain disallowed."""
+        from .dictionary_policy import materialize_local_includes
+        target = self.resolve_case_path(relative_text)
+        expanded, references = materialize_local_includes(content, parent=target.parent, root=self.case_dir)
+        digest = self.write_text(relative_text, expanded)
+        return {"sha256": digest, "include_sources": references}
+
     def patch_text_once(self, relative_text: str, old: str, new: str) -> str:
         """Apply one exact text replacement through the normal write safety path.
 
@@ -210,6 +225,8 @@ class CaseWorkspace:
     def delete(self, relative_text: str) -> None:
         normalized = self._normalized(relative_text)
         path = self.resolve_case_path(normalized, must_exist=True)
+        if normalized in self._asset_paths:
+            raise WorkspaceSafetyError("User assets cannot be deleted by LLM authoring.")
         path.unlink()
         self._authored_paths.discard(normalized)
         parent = path.parent
@@ -260,6 +277,14 @@ class CaseWorkspace:
     def is_mesh_affecting_path(self, relative_text: str) -> bool:
         """Return whether a case path participates in the allowlisted mesh pipeline."""
         normalized = self._normalized(relative_text)
+        parts = Path(normalized).parts
+        if len(parts) >= 3 and parts[0] == "constant" and "polyMesh" in parts[1:3]:
+            return True
+        if parts[0] == "system" and parts[-1] in {
+            "blockMeshDict", "snappyHexMeshDict", "surfaceFeatureExtractDict", "createPatchDict",
+            "topoSetDict", "extrudeMeshDict", "decomposeParDict", "meshQualityDict",
+        }:
+            return True
         if normalized in _MESH_AFFECTING_EXACT_PATHS:
             return True
         if normalized.startswith(_MESH_AFFECTING_PREFIXES):
@@ -315,13 +340,13 @@ class CaseWorkspace:
                     path=relative,
                     sha256=_sha256_file(path),
                     size_bytes=size,
-                    origin="agent" if relative in self._authored_paths else "native",
+                    origin=("user_asset" if relative in self._asset_paths else "agent" if relative in self._authored_paths else "native"),
                 )
             )
         return seals
 
     def seal(self, plan: EngineeringPlan) -> CaseSeal:
-        if not self._authored_paths:
+        if not self._authored_paths and not self._asset_paths:
             raise WorkspaceSafetyError("Cannot seal an empty case workspace.")
         failures = self.validate_all_content()
         if failures:
@@ -336,10 +361,13 @@ class CaseWorkspace:
     def adopt_seal(self, seal: CaseSeal) -> None:
         """Rehydrate agent-authored tracking while verifying sealed files exist."""
         authored: set[str] = set()
+        self._asset_paths = set()
         for item in seal.files:
             self.resolve_case_path(item.path, must_exist=True)
             if item.origin == "agent":
                 authored.add(item.path)
+            elif item.origin == "user_asset":
+                self._asset_paths.add(item.path)
         self._authored_paths = authored
 
     def verify_seal(self, seal: CaseSeal, plan: EngineeringPlan) -> None:
@@ -376,7 +404,10 @@ class CaseWorkspace:
         """
         normalized = self._normalized_result(relative_text)
         relative = Path(normalized)
-        path = (self.case_dir / relative).resolve()
+        unresolved = self.case_dir / relative
+        if any(p.is_symlink() for p in [unresolved, *unresolved.parents] if p != self.root):
+            raise WorkspaceSafetyError(f"Symlink path component is forbidden: {relative_text}")
+        path = unresolved.resolve()
         if self.case_dir not in path.parents:
             raise WorkspaceSafetyError(f"Result path escapes sandbox: {relative_text}")
         if path.is_symlink():
@@ -533,20 +564,13 @@ class CaseWorkspace:
                 f"{relative_text} contains executable/unsafe directives: "
                 + ", ".join(sorted(set(forbidden)))
             )
-        for matched in _LIBS_ENTRY.finditer(content):
-            body = matched.group("body")
-            libraries = {item.group("name") for item in _QUOTED_LIB.finditer(body)}
-            residue = _QUOTED_LIB.sub("", body)
-            if residue.strip():
-                raise WorkspaceSafetyError(
-                    f"{relative_text} has an unsupported libs entry syntax."
-                )
-            unknown = libraries - self.allowed_libraries
-            if unknown:
-                raise WorkspaceSafetyError(
-                    f"{relative_text} requests non-allowlisted libraries: "
-                    + ", ".join(sorted(unknown))
-                )
+        try:
+            libraries = set(library_entries(content))
+        except ValueError as exc:
+            raise WorkspaceSafetyError(f"{relative_text}: {exc}") from exc
+        unknown = libraries - self.allowed_libraries
+        if unknown:
+            raise WorkspaceSafetyError(f"{relative_text} requests non-allowlisted libraries: " + ", ".join(sorted(unknown)))
 
     def _assert_total_size(self) -> None:
         total = sum(self.resolve_case_path(path, must_exist=True).stat().st_size for path in self.list_authored())
