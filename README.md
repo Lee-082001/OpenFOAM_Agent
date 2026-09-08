@@ -1,10 +1,13 @@
-## v4.2.1 progress-first authoring correction
+## v4.2.2 phase-specific authoring context
 
-- Syntax/reference evidence is now advisory provenance rather than a file-mutation permission token.
-- Raw and typed OpenFOAM files both proceed through deterministic workspace safety, header/parser checks, pre-solve validation and native OpenFOAM checks.
-- Repair/revision prompts receive compact evidence summaries instead of protected full evidence bodies, reducing secondary ContextBudgetError failures.
+- Engineering design stays at the production 18k character cap, while staged `author_case` receives a separate 32k default cap.
+- If a full authoring prompt still does not fit, Python projects a file-scoped compact plan capsule bound to the immutable full-plan SHA256 instead of rejecting an ordinary file as indivisible.
+- Documentary syntax evidence is summarized for authoring and remains advisory; confirmed intake, execution identity, region/interface topology and concrete engineering defaults remain available to the authoring model.
+- Large advisory plan narratives no longer force `system/controlDict` or other single-file tasks into `ContextBudgetError`.
 
-# Release notice: OpenFOAM Agent 4.2.1
+# Release notice: OpenFOAM Agent 4.2.2
+
+> v4.2.2 fixes a live v4.2.1 failure where staged authoring accepted the Engineering design but rejected `system/controlDict` as an indivisible 18k context task. Design and authoring now have phase-specific context budgets plus deterministic compact file-task projection. See `V4_2_2_CHANGES.md`.
 
 > v4.2.0 introduces a progress-first validation architecture. Confirmed requirements, execution integrity, security, unsafe paths, provider availability at execution, mesh freshness, case seals and completion remain strict. Planning-time evidence, ordinary engineering defaults, QoI/conservation/completion intents, redundant metadata and runtime-resolvable details are normalized, deferred or warned instead of aborting the CFD workflow. See `V4_2_0_CHANGES.md`.
 

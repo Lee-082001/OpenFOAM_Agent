@@ -115,7 +115,9 @@ def test_a05_file_hash_invalidates_dictionary_cache(tmp_path):
 
 def test_a22_timeout_returns_partial_disk_log_and_counts_one_spawn(tmp_path):
     runner, ws = synthetic_runner(tmp_path, {"checkMesh": "echo 'Time = 0.1'; sleep 30\n"})
-    result = runner.run(["checkMesh"], cwd=ws.case_dir, timeout=1)
+    # exec_guard startup can exceed one second on slow/containerized filesystems;
+    # keep enough wall time to verify partial-log draining rather than interpreter startup.
+    result = runner.run(["checkMesh"], cwd=ws.case_dir, timeout=3)
     assert not result.success and result.return_code == 124
     assert result.termination_reason == "timeout"
     assert "Time = 0.1" in Path(result.log_path).read_text()

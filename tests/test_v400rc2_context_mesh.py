@@ -43,12 +43,12 @@ def task_action(task):
 
 
 def test_rc2_partition_exact_file_fact_and_syntax_coverage():
-    state,plan,payload=partition_payload();queue=compile_tasks('',payload,14000)
+    state,plan,payload=partition_payload();queue=compile_tasks('',payload,8000)
     assert 1<len(queue['tasks'])<=8
     assert [p for t in queue['tasks'] for p in t['authoring_task']['paths']]==plan.required_case_files
     ids=set()
     for task in queue['tasks']:
-        assert len(build_bounded_json_prompt('',task,max_chars=14000).prompt)<=14000
+        assert len(build_bounded_json_prompt('',task,max_chars=8000).prompt)<=8000
         ids|={f['id'] for f in task['confirmed_intake']['facts']}
         for record in task['implementation_evidence_pack']['records']:assert record['content'].endswith('grammar\n')
         assert task['frozen_engineering_plan']['interfaces']==payload['frozen_engineering_plan']['interfaces']
@@ -69,7 +69,7 @@ def test_rc2_partition_transitive_fact_dependencies_not_silently_dropped():
 
 @pytest.mark.parametrize('mutation',['task_id','missing_file','duplicate_file','changed_plan','early_native'])
 def test_rc2_partition_rejects_bad_response_before_commit(mutation):
-    _,plan,payload=partition_payload();queue=compile_tasks('',payload,14000);action=task_action(queue['tasks'][0]);before=deepcopy(queue)
+    _,plan,payload=partition_payload();queue=compile_tasks('',payload,8000);action=task_action(queue['tasks'][0]);before=deepcopy(queue)
     if mutation=='task_id':action.task_id='invented'
     if mutation=='missing_file':action.files=[]
     if mutation=='duplicate_file':action.files.append(action.files[0])
@@ -79,14 +79,18 @@ def test_rc2_partition_rejects_bad_response_before_commit(mutation):
     assert queue==before
 
 
-def test_rc2_indivisible_global_contract_fails_without_truncation():
+def test_v422_oversized_global_narrative_uses_compact_plan_projection():
     _,_,payload=partition_payload();payload['frozen_engineering_plan']['assumptions']=['mandatory'*8000]
-    with pytest.raises(ContextBudgetError,match='Indivisible'):compile_tasks('',payload,16000)
+    queue=compile_tasks('',payload,16000)
+    assert queue['plan_sha256']==sha(payload['frozen_engineering_plan'])
+    assert any(task['authoring_task']['compact_plan_projection'] for task in queue['tasks'])
+    for task in queue['tasks']:
+        assert len(build_bounded_json_prompt('',task,max_chars=16000).prompt)<=16000
 
 
 def test_rc2_partition_checkpoint_restores_pending_file_tasks(tmp_path,graph_path):
     state,plan,payload=partition_payload();agent=CFDEngineeringAgent(ScriptedLLM([]),workspace=tmp_path,capability_db=graph_path,tools=FakeOpenFOAMTools())
-    agent._draft_design_plan=plan;agent._authoring_task_queue=compile_tasks('',payload,14000)
+    agent._draft_design_plan=plan;agent._authoring_task_queue=compile_tasks('',payload,8000)
     accept_task(agent._authoring_task_queue,task_action(agent._authoring_task_queue['tasks'][0]),plan)
     agent.checkpoint(state,'partition-test')
     other=CFDEngineeringAgent(ScriptedLLM([]),workspace=tmp_path,capability_db=graph_path,tools=FakeOpenFOAMTools())
@@ -227,7 +231,7 @@ def test_rc2_controller_automatically_splits_routes_and_defers_bundle_commit(tmp
             self.prompts.append(prompt);task=json.loads(prompt[prompt.index('{'):])
             return CaseAuthoringTurn(action=task_action(task))
     llm=Author();agent=CFDEngineeringAgent(llm,workspace=tmp_path,capability_db=graph_path,tools=FakeOpenFOAMTools(),
-        policy=EngineeringPolicy(max_model_prompt_chars=14000,preload_capabilities=False,compact_phase_schemas=True,staged_case_authoring=True))
+        policy=EngineeringPolicy(max_model_prompt_chars=14000,max_authoring_prompt_chars=8000,preload_capabilities=False,compact_phase_schemas=True,staged_case_authoring=True))
     agent._draft_design_plan=plan;calls=[]
     # Observe the existing transactional executor boundary, not a native CFD run.
     monkeypatch.setattr(agent,'_execute_case_plan',lambda state,action,**kw:calls.append(action))
@@ -240,3 +244,31 @@ def test_rc2_controller_automatically_splits_routes_and_defers_bundle_commit(tmp
         assert (tmp_path/'checkpoint.json').is_file()
     assert len(llm.prompts)>1 and len(calls)==1 and agent._authoring_task_queue is None
     assert [f.path for f in calls[0].files]==plan.required_case_files
+
+
+def test_v422_cli_separates_design_and_authoring_context_budgets():
+    from openfoam_agent.cli import build_parser
+    args = build_parser().parse_args([])
+    assert args.engineering_context_chars == 18_000
+    assert args.engineering_authoring_context_chars == 32_000
+
+
+def test_v422_control_dict_compact_capsule_survives_large_plan_under_18k():
+    _, _, payload = partition_payload(1)
+    payload['frozen_engineering_plan']['required_case_files'] = ['system/controlDict']
+    payload['implementation_evidence_pack']['file_coverage'][0]['path'] = 'system/controlDict'
+    payload['frozen_engineering_plan']['implementation_evidence_bindings'][0]['path'] = 'system/controlDict'
+    payload['frozen_engineering_plan']['assumptions'] = ['large advisory narrative ' * 4000]
+    payload['frozen_engineering_plan']['decisions'] = [
+        {'area': f'area{i}', 'choice': 'representative engineering choice ' * 8,
+         'rationale': 'long rationale ' * 20, 'risk_level': 'low',
+         'evidence_policy': 'advisory', 'verification_stage': 'pre_validation'}
+        for i in range(12)
+    ]
+    queue = compile_tasks('', payload, 18_000)
+    assert len(queue['tasks']) == 1
+    task = queue['tasks'][0]
+    assert task['authoring_task']['paths'] == ['system/controlDict']
+    assert task['authoring_task']['compact_plan_projection']
+    assert task['authoring_contract']['full_plan_sha256'] == sha(payload['frozen_engineering_plan'])
+    assert len(build_bounded_json_prompt('', task, max_chars=18_000).prompt) <= 18_000

@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_release_version():
-    assert __version__ == "4.2.1"
+    assert __version__ == "4.2.2"
 
 
 def test_legacy_engineering_modules_are_deleted():

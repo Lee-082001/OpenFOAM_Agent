@@ -164,6 +164,10 @@ class EngineeringPolicy:
     max_observation_chars: int = 12_000
     model_event_excerpt_chars: int = 2_500
     max_model_prompt_chars: int = 60_000
+    # Authoring carries a frozen design plus file DSL and therefore needs a larger
+    # context envelope than design/reasoning turns. The CLI intentionally keeps
+    # design at 18k while allowing authoring 32k by default.
+    max_authoring_prompt_chars: int = 32_000
     max_prepare_model_evidence_items: int = 16
     max_decide_model_evidence_items: int = 18
     max_model_evidence_detail_chars: int = 900
@@ -205,6 +209,7 @@ class EngineeringPolicy:
             "max_observation_chars": self.max_observation_chars,
             "model_event_excerpt_chars": self.model_event_excerpt_chars,
             "max_model_prompt_chars": self.max_model_prompt_chars,
+            "max_authoring_prompt_chars": self.max_authoring_prompt_chars,
             "max_prepare_model_evidence_items": self.max_prepare_model_evidence_items,
             "max_decide_model_evidence_items": self.max_decide_model_evidence_items,
             "max_model_evidence_detail_chars": self.max_model_evidence_detail_chars,
@@ -4383,7 +4388,7 @@ class CFDEngineeringAgent:
                 "step": step,
                 "frozen_engineering_plan": self._draft_design_plan.model_dump(mode="json"),
                 "confirmed_intake": confirmed_intake_definition(state),
-                "implementation_evidence_pack": implementation_evidence_pack(state, self._draft_design_plan, max_chars=None),
+                "implementation_evidence_pack": advisory_authoring_evidence_summary(state, self._draft_design_plan, max_records=12),
                 "assets": state.assets,
                 "authoring_brief": self._draft_authoring_brief,
                 "environment_hint": self.tools.environment_snapshot(),
@@ -4716,14 +4721,19 @@ class CFDEngineeringAgent:
         if contract_phase == "author_case" and self._authoring_task_queue is not None:
             payload = self._authoring_task_queue["tasks"][self._authoring_task_queue["cursor"]]
         context_partition_metrics: dict[str, int] = {}
+        prompt_char_limit = (
+            self.policy.max_authoring_prompt_chars
+            if contract_phase == "author_case"
+            else self.policy.max_model_prompt_chars
+        )
         try:
-            prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=self.policy.max_model_prompt_chars)
+            prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=prompt_char_limit)
         except ContextBudgetError:
             if contract_phase == "author_case":
-                self._authoring_task_queue = compile_tasks(instruction, payload, self.policy.max_model_prompt_chars)
+                self._authoring_task_queue = compile_tasks(instruction, payload, prompt_char_limit)
                 self.checkpoint(state, "authoring-partition-created")
                 payload = self._authoring_task_queue["tasks"][0]
-                prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=self.policy.max_model_prompt_chars)
+                prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=prompt_char_limit)
             elif contract_phase in {"prepare_design", "prepare_design_decide"}:
                 prompt_result, payload, context_partition_metrics = build_partitioned_design_prompt(
                     instruction,
@@ -4745,6 +4755,7 @@ class CFDEngineeringAgent:
         metrics["evidenceShown"] = len(evidence_records)
         metrics["evidenceObserved"] = evidence_total
         metrics["stagedAuthoring"] = bool(self.policy.staged_case_authoring)
+        metrics["promptLimitChars"] = prompt_char_limit
         metrics.update(context_partition_metrics)
         model_name = getattr(self.llm, "model", None)
         if isinstance(model_name, str) and model_name:

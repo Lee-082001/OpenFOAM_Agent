@@ -253,6 +253,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--engineering-authoring-context-chars",
+        type=int,
+        default=32_000,
+        help=(
+            "Hard character cap for staged case-authoring prompts (default: 32000). "
+            "Design remains bounded by --engineering-context-chars; larger authoring "
+            "capacity avoids rejecting ordinary file tasks while retaining file partitioning."
+        ),
+    )
+    parser.add_argument(
         "--engineering-evidence-items",
         type=int,
         default=10,
@@ -427,6 +437,8 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--claude-timeout must be >= 1.")
     if args.engineering_context_chars < 8_000:
         parser.error("--engineering-context-chars must be >= 8000.")
+    if args.engineering_authoring_context_chars < 12_000:
+        parser.error("--engineering-authoring-context-chars must be >= 12000.")
     if not 1 <= args.engineering_evidence_items <= 40:
         parser.error("--engineering-evidence-items must be between 1 and 40.")
     if not 1 <= args.engineering_new_evidence_items <= 12:
@@ -724,6 +736,7 @@ def _policies_from_args(
         max_prepare_retrieval_cycles=args.engineering_retrieval_cycles,
         max_preloaded_capabilities=12,
         max_model_prompt_chars=args.engineering_context_chars,
+        max_authoring_prompt_chars=args.engineering_authoring_context_chars,
         max_prepare_model_evidence_items=args.engineering_evidence_items,
         max_decide_model_evidence_items=min(40, args.engineering_evidence_items + 2),
         max_model_evidence_detail_chars=600,
@@ -816,6 +829,7 @@ def build_report(
             "engineering_hard_limit": engineering_policy.hard_max_agent_steps,
             "engineering_tool_action_limit": engineering_policy.max_tool_actions,
             "engineering_model_prompt_char_limit": engineering_policy.max_model_prompt_chars,
+            "engineering_authoring_prompt_char_limit": engineering_policy.max_authoring_prompt_chars,
             "engineering_model_evidence_items": engineering_policy.max_prepare_model_evidence_items,
             "engineering_prepare_retrieval_cycle_limit": engineering_policy.max_prepare_retrieval_cycles,
             "engineering_staged_case_authoring": engineering_policy.staged_case_authoring,

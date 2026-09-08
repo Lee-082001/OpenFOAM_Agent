@@ -12,9 +12,9 @@ See `docs/V4_AUDIT_33.json` and `docs/V4_IMPLEMENTATION_VERIFICATION_KO.md` for 
 
 
 
-## v4.2.1 progress-first authoring boundary
+## v4.2.2 progress-first authoring and context boundary
 
-Documentary syntax evidence is no longer a permission token for `write_case_file` or `patch_case_file`. Both raw and typed artifacts may advance when the workspace sandbox/content policy accepts them. Correctness is then established at the appropriate stage by deterministic `FoamFile`/dictionary checks, pre-solve completeness, native OpenFOAM utilities and `checkMesh`. The hard boundary remains security and execution integrity: unsafe directives/includes, non-allowlisted libraries, path escape, unauthorized native commands, stale seals/checkMesh and approval violations still fail closed. Repair/revision prompts receive compact evidence summaries so missing or large reference bodies cannot become a secondary context-budget blocker.
+Documentary syntax evidence is no longer a permission token for `write_case_file` or `patch_case_file`. Both raw and typed artifacts may advance when the workspace sandbox/content policy accepts them. Correctness is then established at the appropriate stage by deterministic `FoamFile`/dictionary checks, pre-solve completeness, native OpenFOAM utilities and `checkMesh`. The hard boundary remains security and execution integrity: unsafe directives/includes, non-allowlisted libraries, path escape, unauthorized native commands, stale seals/checkMesh and approval violations still fail closed. Engineering design and staged authoring now use separate context budgets: production design remains bounded at 18k characters while authoring defaults to 32k. If a full authoring prompt does not fit, Python sends a file-scoped compact projection bound to the immutable full-plan SHA256 rather than treating an ordinary file as an indivisible contract. Repair/revision prompts likewise receive compact evidence summaries so advisory reference bodies cannot become a secondary context-budget blocker.
 
 
 ## v3.1 semantic blockMesh topology contract
@@ -455,4 +455,4 @@ Engineering evidence is no longer a universal design-time hard gate. Decisions a
 
 Execution-provider availability is a deterministic environment observation. The Engineering Agent receives a compact inventory of verified installed drivers/solver applications/modules and chooses among them. Python still verifies provider identity/version/strength, execution approval, command safety, mesh freshness, case seals, runtime completion, and result validity.
 
-Raw free-form OpenFOAM file authoring remains explicit-syntax-evidence gated. Typed dictionary and structured blockMesh authoring are treated differently because Python owns their serialization and downstream validation.
+Raw free-form and typed OpenFOAM authoring both treat documentary syntax/reference evidence as advisory provenance. Hard authorization is instead owned by workspace/content safety, confirmed-fact preservation, parser/header validation, native OpenFOAM validation, mesh freshness and execution approval. Typed dictionary and structured blockMesh paths still benefit from deterministic serialization before native validation.

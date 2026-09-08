@@ -2,14 +2,14 @@
 
 Every required file is assigned exactly once. All facts affecting a task and their
 transitive fact dependencies travel with it. A fact with no file mapping is global
-and travels with every task. Oversized indivisible units fail before a model call.
-No file is committed and no native tool is run until all task responses assemble.
+and travels with every task. Oversized bundles are projected into compact file-scoped capsules before a model call.
+Only a genuinely oversized mandatory file capsule fails. No file is committed and no native tool is run until all task responses assemble.
 """
 from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
-from openfoam_agent.llm.context import ContextBudgetError, build_bounded_json_prompt
+from openfoam_agent.llm.context import ContextBudgetError, build_bounded_json_prompt, compact_text
 
 
 def sha(value):
@@ -39,7 +39,141 @@ def _binding_paths(binding):
     return paths
 
 
-def project(payload, paths):
+
+
+def _compact_binding(binding, paths):
+    item = deepcopy(binding)
+    item["case_files"] = [p for p in item.get("case_files", []) if p in paths]
+    item["case_assertions"] = [a for a in item.get("case_assertions", []) if a.get("path") in paths]
+    relation = item.get("numeric_relation")
+    if isinstance(relation, dict):
+        relation = deepcopy(relation)
+        relation["numerator"] = [x for x in relation.get("numerator", []) if x.get("path") in paths]
+        relation["denominator"] = [x for x in relation.get("denominator", []) if x.get("path") in paths]
+        if relation["numerator"] or relation["denominator"]:
+            item["numeric_relation"] = relation
+        else:
+            item["numeric_relation"] = None
+    item["explanation"] = compact_text(str(item.get("explanation", "")), 160) if item.get("explanation") else ""
+    return item
+
+
+def _compact_plan_projection(full, paths, selected_ids, relevant_bindings):
+    """Return an authoring-only plan capsule; the full plan stays controller-owned.
+
+    The model does not return an EngineeringPlan during ``author_case``. Sending the
+    entire frozen plan to every file task therefore wastes context and can make one
+    ordinary file (for example ``system/controlDict``) indivisible under a small prompt
+    budget. This capsule preserves execution identity, region/interface topology, all
+    selected confirmed-fact bindings and concrete engineering defaults while summarizing
+    advisory narrative/audit fields. ``authoring_contract.full_plan_sha256`` binds every
+    task back to the immutable full plan used by Python when the responses are assembled.
+    """
+    essential = {
+        "schema_version", "case_name", "solver", "solver_provider_id", "execution",
+        "region_layouts", "interfaces", "completion", "openfoam_distribution",
+        "openfoam_version", "temporal_behavior", "motion_kind",
+        "mesh_motion_requirement", "confirmed_intake_sha256",
+    }
+    bound_plan_fields = {
+        field
+        for binding in relevant_bindings
+        if binding.get("fact_id") in selected_ids
+        for field in binding.get("plan_fields", [])
+    }
+    # These fields are useful for almost every case file but are allowed to be
+    # compact projections because the full controller-held plan remains authoritative.
+    useful = {"problem_interpretation", "mesh_strategy", "engineering_defaults"}
+    keep = essential | bound_plan_fields | useful
+    plan = {key: deepcopy(value) for key, value in full.items() if key in keep}
+    if "problem_interpretation" in plan:
+        plan["problem_interpretation"] = compact_text(str(plan["problem_interpretation"]), 1200)
+    if "mesh_strategy" in plan:
+        plan["mesh_strategy"] = compact_text(str(plan["mesh_strategy"]), 700)
+
+    defaults = []
+    for item in full.get("engineering_defaults", []):
+        if not isinstance(item, dict):
+            continue
+        defaults.append({
+            "parameter": item.get("parameter"),
+            "value": item.get("value"),
+            "unit": item.get("unit", ""),
+            "basis": item.get("basis", "representative"),
+        })
+    plan["engineering_defaults"] = defaults
+
+    # Decisions/assumptions are advisory authoring context. Keep the engineering
+    # choices, not repeated long rationales/evidence notes.
+    plan["decisions"] = [
+        {
+            "area": item.get("area"),
+            "choice": compact_text(str(item.get("choice", "")), 320),
+            "risk_level": item.get("risk_level", "medium"),
+            "verification_stage": item.get("verification_stage", "pre_validation"),
+        }
+        for item in full.get("decisions", [])
+        if isinstance(item, dict)
+    ]
+    plan["assumptions"] = [compact_text(str(item), 240) for item in full.get("assumptions", [])]
+    plan["postprocess_strategy"] = [compact_text(str(item), 200) for item in full.get("postprocess_strategy", [])]
+
+    # Runtime-result intent is relevant mainly to controlDict/function-object authoring;
+    # otherwise it is deferred to post-processing and need not consume every file task.
+    if "system/controlDict" in paths:
+        plan["quantities_of_interest"] = deepcopy(full.get("quantities_of_interest", []))
+        plan["conservation_checks"] = deepcopy(full.get("conservation_checks", []))
+    else:
+        plan["quantities_of_interest"] = []
+        plan["conservation_checks"] = []
+
+    plan["required_case_files"] = list(paths)
+    plan["confirmed_fact_ids"] = [x for x in full.get("confirmed_fact_ids", []) if x in selected_ids]
+    plan["confirmed_fact_bindings"] = [
+        _compact_binding(item, set(paths))
+        for item in relevant_bindings
+        if item.get("fact_id") in selected_ids
+    ]
+    plan["implementation_evidence_bindings"] = [
+        deepcopy(item) for item in full.get("implementation_evidence_bindings", [])
+        if item.get("path") in paths
+    ]
+    # Evidence pointers are audit metadata; documentary bodies are advisory in v4.2+.
+    plan["evidence"] = [
+        {"evidence_id": item.get("evidence_id")}
+        for item in full.get("evidence", [])[:16]
+        if isinstance(item, dict) and item.get("evidence_id")
+    ]
+    plan["projection_notice"] = (
+        "Authoring-only projection. Omitted narrative/result-analysis fields remain immutable "
+        "in the controller-held full plan identified by authoring_contract.full_plan_sha256."
+    )
+    return plan
+
+
+def _compact_evidence_pack(evidence, paths):
+    coverage = [deepcopy(item) for item in evidence.get("file_coverage", []) if item.get("path") in paths]
+    evidence_ids = {eid for item in coverage for eid in item.get("evidence_ids", [])}
+    records = []
+    for item in evidence.get("records", []):
+        if item.get("evidence_id") not in evidence_ids:
+            continue
+        records.append({
+            "evidence_id": item.get("evidence_id"),
+            "source": item.get("source"),
+            "record_id": item.get("record_id"),
+            "openfoam_version": item.get("openfoam_version"),
+            "excerpt_sha256": item.get("excerpt_sha256"),
+            "content_excerpt": compact_text(str(item.get("content", "")), 900) if item.get("content") else "",
+        })
+    return {
+        "records": records,
+        "file_coverage": coverage,
+        "complete": bool(evidence.get("complete")),
+        "scope": "Advisory file-scoped projection; native/deterministic validation authorizes progress.",
+    }
+
+def project(payload, paths, *, compact=False):
     full = payload["frozen_engineering_plan"]
     intake = deepcopy(payload["confirmed_intake"])
     if not isinstance(intake, dict) or not isinstance(intake.get("facts"), list):
@@ -55,23 +189,27 @@ def project(payload, paths):
     if "provenance_dependencies" in intake:
         intake["provenance_dependencies"] = [item for item in closure if item["id"] not in primary_ids]
     selected_ids = {item["id"] for item in intake["facts"]}
-    plan = deepcopy(full)
-    plan["required_case_files"] = list(paths)
-    plan["confirmed_fact_ids"] = [item for item in full.get("confirmed_fact_ids", []) if item in selected_ids]
-    plan["confirmed_fact_bindings"] = [item for item in bindings if item["fact_id"] in selected_ids]
-    plan["implementation_evidence_bindings"] = [item for item in full.get("implementation_evidence_bindings", []) if item["path"] in paths]
-    evidence = payload["implementation_evidence_pack"]
-    coverage = [item for item in evidence["file_coverage"] if item["path"] in paths]
-    evidence_ids = {eid for item in coverage for eid in item["evidence_ids"]}
-    evidence = {**evidence, "file_coverage":coverage, "records":[item for item in evidence["records"] if item["evidence_id"] in evidence_ids]}
+    if compact:
+        plan = _compact_plan_projection(full, set(paths), selected_ids, relevant)
+        evidence = _compact_evidence_pack(payload["implementation_evidence_pack"], set(paths))
+    else:
+        plan = deepcopy(full)
+        plan["required_case_files"] = list(paths)
+        plan["confirmed_fact_ids"] = [item for item in full.get("confirmed_fact_ids", []) if item in selected_ids]
+        plan["confirmed_fact_bindings"] = [item for item in bindings if item["fact_id"] in selected_ids]
+        plan["implementation_evidence_bindings"] = [item for item in full.get("implementation_evidence_bindings", []) if item["path"] in paths]
+        evidence = payload["implementation_evidence_pack"]
+        coverage = [item for item in evidence["file_coverage"] if item["path"] in paths]
+        evidence_ids = {eid for item in coverage for eid in item["evidence_ids"]}
+        evidence = {**evidence, "file_coverage":coverage, "records":[item for item in evidence["records"] if item["evidence_id"] in evidence_ids]}
     result = {key:deepcopy(value) for key,value in payload.items() if key not in {"frozen_engineering_plan", "confirmed_intake", "implementation_evidence_pack", "current_case_files"}}
-    # Cross-region interfaces, execution topology and other global plan constraints
-    # are NOT discarded, even if retaining them makes a single task too large.
+    # The full controller-held plan remains immutable; compact tasks preserve the
+    # authoring-relevant execution/region/interface projection plus its full-plan hash.
     result.update(frozen_engineering_plan=plan,confirmed_intake=intake,implementation_evidence_pack=evidence,
         current_case_files=[item for item in payload.get("current_case_files",[]) if isinstance(item,dict) and item.get("path") in paths],
         authoring_contract={"full_plan_sha256":sha(full), "full_intake_sha256":sha(payload["confirmed_intake"]),
             "required_files_sha256":sha(full["required_case_files"]), "total_required_files":len(full["required_case_files"]),
-            "projection_only":True, "instruction":"This is a file-scoped projection, not a replacement plan. Do not modify global contracts."})
+            "projection_only":True, "compact_projection":bool(compact), "instruction":"This is a file-scoped projection, not a replacement plan. Do not modify global contracts."})
     return result
 
 
@@ -82,36 +220,65 @@ def compile_tasks(instruction, payload, max_chars):
     if len(paths) != len(set(paths)) or not paths:
         raise ValueError("Authoring file manifest is empty or duplicated.")
     batches=[]; current=[]
-    # Reserve protocol metadata bytes before choosing the greedy file grouping.
-    def fits(items):
-        try:
-            build_bounded_json_prompt(instruction,project(payload,items),max_chars=max_chars-1200)
-            return True
-        except ContextBudgetError:
-            return False
+    # Protocol metadata is small; reserve less than the legacy 1200-char margin and
+    # let the final exact build below enforce the real cap.
+    grouping_limit=max_chars-600
+    def projection_that_fits(items):
+        for compact in (False, True):
+            candidate=project(payload,items,compact=compact)
+            try:
+                build_bounded_json_prompt(instruction,candidate,max_chars=grouping_limit)
+                return candidate,compact
+            except ContextBudgetError:
+                pass
+        return None,None
+    projection_modes=[]
     for path in paths:
-        if fits(current+[path]):
+        candidate,compact=projection_that_fits(current+[path])
+        if candidate is not None:
             current.append(path)
-        else:
-            if current: batches.append(current)
-            current=[path]
-            if not fits(current):
-                raise ContextBudgetError(f"Indivisible file task {path} exceeds context budget; required facts/syntax were not truncated.")
-    if current: batches.append(current)
+            continue
+        if current:
+            final_candidate,final_compact=projection_that_fits(current)
+            if final_candidate is None:
+                raise ContextBudgetError("Authoring task projection unexpectedly exceeded its previously verified budget.")
+            batches.append(current);projection_modes.append(final_compact)
+        current=[path]
+        single,single_compact=projection_that_fits(current)
+        if single is None:
+            raise ContextBudgetError(
+                f"Minimal file-scoped authoring capsule for {path} exceeds context budget. "
+                "Increase the authoring context cap; no confirmed requirement was truncated."
+            )
+    if current:
+        final_candidate,final_compact=projection_that_fits(current)
+        if final_candidate is None:
+            raise ContextBudgetError("Final authoring task projection exceeded budget.")
+        batches.append(current);projection_modes.append(final_compact)
     tasks=[]
-    for index,items in enumerate(batches):
-        task=project(payload,items)
+    for index,(items,compact_mode) in enumerate(zip(batches,projection_modes)):
+        task=project(payload,items,compact=bool(compact_mode))
         meta={"id":f"{sha(payload['frozen_engineering_plan'])[:16]}:{index+1}","index":index+1,"count":len(batches),
-            "paths":items,"is_final":index==len(batches)-1,
+            "paths":items,"is_final":index==len(batches)-1,"compact_plan_projection":bool(compact_mode),
             "response_contract":"Echo task_id. Return only these files. Intermediate tasks set defer_native=true with no commands. Final task supplies the complete native pipeline."}
         task["authoring_task"]=meta
-        build_bounded_json_prompt(instruction,task,max_chars=max_chars)
+        # If protocol metadata tips the task over the grouping reserve, the exact cap is
+        # still allowed. Rebuild with compact projection before giving up.
+        try:
+            build_bounded_json_prompt(instruction,task,max_chars=max_chars)
+        except ContextBudgetError:
+            if not compact_mode:
+                task=project(payload,items,compact=True)
+                task["authoring_task"]={**meta,"compact_plan_projection":True}
+                build_bounded_json_prompt(instruction,task,max_chars=max_chars)
+            else:
+                raise
         tasks.append(task)
     assigned=[p for task in tasks for p in task["authoring_task"]["paths"]]
     projected={f["id"] for task in tasks for f in task["confirmed_intake"]["facts"]}
     if assigned != paths or projected != {f["id"] for f in payload["confirmed_intake"]["facts"]}:
         raise ValueError("Authoring partition lost a required file or confirmed fact.")
-    return {"version":1,"plan_sha256":sha(payload["frozen_engineering_plan"]),"tasks":tasks,"cursor":0,"responses":[],
+    return {"version":2,"plan_sha256":sha(payload["frozen_engineering_plan"]),"tasks":tasks,"cursor":0,"responses":[],
         "assigned_files":assigned,"coverage_verified":True}
 
 
