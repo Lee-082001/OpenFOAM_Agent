@@ -442,3 +442,12 @@ Frozen intake
 ```
 
 The split is representational, not a change in authority: the Engineering Agent still chooses CFD physics/solver/mesh/BC/numerics; Python only compiles evidence context, validates provenance/safety, freezes the selected plan between stages, and executes deterministic tools.
+
+
+## v4.1 risk- and stage-aware evidence policy
+
+Engineering evidence is no longer a universal design-time hard gate. Decisions are classified by `risk_level`, `evidence_policy`, and `verification_stage`. `mandatory` evidence remains fail-closed at the relevant stage; `deferred` implementation evidence may be resolved at authoring or replaced by deterministic serialization/parser/native validation; `advisory` evidence supports engineering judgement but cannot block solely because a document/source excerpt is absent.
+
+Execution-provider availability is a deterministic environment observation. The Engineering Agent receives a compact inventory of verified installed drivers/solver applications/modules and chooses among them. Python still verifies provider identity/version/strength, execution approval, command safety, mesh freshness, case seals, runtime completion, and result validity.
+
+Raw free-form OpenFOAM file authoring remains explicit-syntax-evidence gated. Typed dictionary and structured blockMesh authoring are treated differently because Python owns their serialization and downstream validation.

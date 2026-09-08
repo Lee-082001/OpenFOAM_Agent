@@ -1,6 +1,8 @@
-# Release notice: OpenFOAM Agent 4.0.4
+# Release notice: OpenFOAM Agent 4.1.0
 
-> v4.0.4 fixes Codex CLI non-terminal `item.type=error` diagnostics being misclassified as tool/action violations. Tool/search/MCP/file-change items remain fail-closed; terminal `error` and `turn.failed` events now expose their real message. See `V4_0_4_CHANGES.md`.
+> v4.1.0 introduces a risk- and stage-aware evidence architecture. Mandatory safety/execution facts remain fail-closed, implementation evidence is deferred to authoring/native validation, and advisory engineering evidence no longer blocks by itself. Verified installed execution candidates are supplied deterministically to the Engineering Agent. See `V4_1_0_CHANGES.md`.
+
+> v4.0.4 fixed Codex CLI non-terminal `item.type=error` diagnostics being misclassified as tool/action violations. See `V4_0_4_CHANGES.md`.
 
 > v4.0.2 fixed evidence-heavy `prepare_design` context exhaustion by automatically projecting a bounded design/evidence capsule while preserving confirmed requirements. See `V4_0_2_CHANGES.md`.
 

@@ -59,6 +59,8 @@ def project_design_capsule(payload: dict[str, object], *, evidence_limit: int) -
         "confirmed_intake": deepcopy(payload.get("confirmed_intake")),
         "intake_sha256": payload.get("intake_sha256"),
         "engineering_assumption_policy": deepcopy(payload.get("engineering_assumption_policy")),
+        "evidence_policy": deepcopy(payload.get("evidence_policy")),
+        "verified_execution_candidates": deepcopy(payload.get("verified_execution_candidates", [])),
         "evidence_retrieval_policy": deepcopy(payload.get("evidence_retrieval_policy")),
         "bindings": deepcopy(payload.get("bindings")),
         "budget": deepcopy(payload.get("budget")),

@@ -923,7 +923,8 @@ def _print_human_report(report: dict[str, Any]) -> None:
         review_critical: list[str] = []
         for fact in intake["facts"]:
             if fact["category"] != "context":
-                unit = f" {fact['unit']}" if fact["unit"] else ""
+                raw_unit = str(fact.get("unit") or "").strip()
+                unit = "" if raw_unit.casefold() in {"", "1", "dimensionless", "-"} else f" {raw_unit}"
                 source_label = fact["source"]
                 if fact["source"] == "derived" and fact["category"] in {
                     "classification",

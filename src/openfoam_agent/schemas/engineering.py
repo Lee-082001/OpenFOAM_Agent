@@ -67,6 +67,11 @@ class EngineeringDecision(_EngineeringModel):
     area: str = Field(min_length=1, max_length=80)
     choice: str = Field(min_length=1, max_length=500)
     rationale: str = Field(min_length=1, max_length=500)
+    risk_level: Literal["low", "medium", "high", "critical"] = "medium"
+    evidence_policy: Literal["mandatory", "deferred", "advisory"] = "advisory"
+    verification_stage: Literal[
+        "design", "authoring", "pre_validation", "pre_execution", "runtime", "result_review"
+    ] = "pre_validation"
 
 
 def canonical_engineering_evidence_id(kind: str, reference: str) -> str:
@@ -538,6 +543,11 @@ class EvidenceGapRequest(_EngineeringModel):
     reference_scope: Literal["all", "tutorials", "source", "etc", "modules"] = "all"
     read_top_reference_matches: int = Field(default=1, ge=0, le=2)
     target_case_files: list[str] = Field(default_factory=list, max_length=80)
+    evidence_policy: Literal["mandatory", "deferred", "advisory"] = "deferred"
+    risk_level: Literal["low", "medium", "high", "critical"] = "medium"
+    verification_stage: Literal[
+        "design", "authoring", "pre_validation", "pre_execution", "runtime", "result_review"
+    ] = "authoring"
 
     @model_validator(mode="before")
     @classmethod

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from openfoam_agent.contracts.evidence import implementation_evidence_pack, evidence_coverage_failures, require_authoring_evidence, authoring_prompt_evidence
+from openfoam_agent.contracts.evidence import implementation_evidence_pack, evidence_coverage_failures, require_authoring_evidence, authoring_prompt_evidence, authoring_evidence_failures_for_representations
+from openfoam_agent.contracts.evidence_policy import POLICY_SUMMARY, provider_is_sufficient
 from openfoam_agent.engineering.authoring_tasks import compile_tasks, accept_task
 from openfoam_agent.llm.context import ContextBudgetError
 from openfoam_agent.engineering.design_context import build_partitioned_design_prompt
@@ -615,10 +616,11 @@ class CFDEngineeringAgent:
             if action.plan.confirmed_intake_sha256 != state.intake_digest:
                 failures.append("Engineering design confirmed_intake_sha256 does not match the frozen intake.")
             failures.extend(validate_design(action.plan, state.intake))
-            try:
-                failures.extend(evidence_coverage_failures(action.plan, state))
-            except ValueError as exc:
-                failures.append(str(exc))
+            # v4.1: implementation syntax evidence is DEFERRED to authoring.
+            # Design acceptance must not require an explicit source excerpt for every
+            # future case file. Raw free-form authoring remains evidence-gated later;
+            # typed/structured authoring may instead establish confidence through
+            # deterministic serialization and native validation.
             failures.extend(self._validate_observed_provenance(action.plan, state))
             failures.extend(self._validate_engineering_defaults(action.plan, state))
             valid = not failures
@@ -1102,10 +1104,16 @@ class CFDEngineeringAgent:
         # repair cascade.
         candidate_bundle = {path: content for path, content in rendered_files}
         bundle_failures = self.workspace.validate_candidate_bundle(candidate_bundle)
-        try:
-            require_authoring_evidence(state, execution.plan, candidate_bundle)
-        except ValueError as exc:
-            bundle_failures.append(str(exc))
+        # v4.1 risk/stage-aware evidence: raw free-form text remains explicitly
+        # evidence-gated. Typed dictionaries and structured blockMesh are rendered by
+        # deterministic Python and proceed to parser/native validation without forcing
+        # one observed source excerpt per ordinary file.
+        raw_paths = [item.path for item in execution.files]
+        typed_paths = [item.path for item in execution.typed_dictionaries]
+        bundle_failures.extend(authoring_evidence_failures_for_representations(
+            state, execution.plan, raw_paths=raw_paths, typed_paths=typed_paths,
+            block_mesh_path=(execution.block_mesh.path if execution.block_mesh is not None else None),
+        ))
 
         # v3.0.2: solve-critical OpenFOAM files must satisfy the IOobject-facing
         # FoamFile contract before *any* candidate file is committed. This closes the
@@ -4314,6 +4322,30 @@ class CFDEngineeringAgent:
                 "inventing tool/version-specific capability or syntax evidence",
             ],
         }
+        evidence_policy = {
+            "mode": "risk_stage_aware_v1",
+            "classes": POLICY_SUMMARY,
+            "hard_gate_rule": "Only mandatory evidence may block at its verification stage.",
+            "deferred_rule": "Missing implementation evidence does not block design; resolve before unsafe/raw use or replace with deterministic/native validation.",
+            "advisory_rule": "Missing advisory evidence never blocks by itself; record engineering provenance and validate outcomes.",
+        }
+        verified_execution_candidates = []
+        for provider in self.catalog.all_providers():
+            if provider.provider_type not in {"execution_driver", "solver_application", "solver_module"}:
+                continue
+            executable = provider.provider_type in {"execution_driver", "solver_application"}
+            if not provider_is_sufficient(provider, executable=executable):
+                continue
+            verified_execution_candidates.append({
+                "provider_id": provider.id,
+                "name": provider.name,
+                "provider_type": provider.provider_type,
+                "verification_level": provider.verification_level,
+                "openfoam_version": provider.openfoam_version,
+                "capabilities": list(provider.capabilities)[:8],
+            })
+        verified_execution_candidates = verified_execution_candidates[:32]
+
         retrieval_policy = {
             "available": phase not in self._evidence_retrieval_disabled
             and self._retrieval_cycles.get(phase, 0) < (
@@ -4376,6 +4408,8 @@ class CFDEngineeringAgent:
                 "confirmed_intake": confirmed_intake_definition(state),
                 "intake_sha256": state.intake_digest,
                 "engineering_assumption_policy": assumption_policy,
+                "evidence_policy": evidence_policy,
+                "verified_execution_candidates": verified_execution_candidates,
                 "evidence_retrieval_policy": retrieval_policy,
                 "environment_hint": self.tools.environment_snapshot(),
                 "capability_graph_hint": self.catalog.summary(),
@@ -4862,10 +4896,12 @@ class CFDEngineeringAgent:
                     f"{provider.openfoam_version}, not {plan.openfoam_version}."
                 )
             if provider_id not in capability_ids:
-                failures.append(
-                    f"Capability provider '{provider_id}' was not present in deterministic "
-                    "capability evidence supplied to this run."
-                )
+                executable = provider.provider_type in {"execution_driver", "solver_application", "utility"}
+                if not provider_is_sufficient(provider, executable=executable):
+                    failures.append(
+                        f"Capability provider '{provider_id}' lacks sufficient deterministic installed "
+                        "evidence for this design stage."
+                    )
 
         for evidence in plan.evidence:
             if evidence.evidence_id not in registry:
