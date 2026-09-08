@@ -183,7 +183,7 @@ def test_codex_cli_check_requires_structured_exec_and_chatgpt_login(monkeypatch)
         if command[1:3] == ["exec", "--help"]:
             return SimpleNamespace(
                 returncode=0,
-                stdout="--output-schema --output-last-message --ephemeral --sandbox --ignore-user-config --json",
+                stdout="--output-schema --output-last-message --ephemeral --sandbox --ignore-user-config --json --disable",
                 stderr="",
             )
         if command[1:3] == ["login", "status"]:

@@ -262,6 +262,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--engineering-new-evidence-items",
+        type=int,
+        default=6,
+        help=(
+            "Maximum newly retrieved evidence records promoted into the next Engineering "
+            "model context per retrieval batch (default: 6). All retrieved records remain "
+            "in the durable evidence ledger."
+        ),
+    )
+    parser.add_argument(
         "--engineering-retrieval-cycles",
         type=int,
         default=2,
@@ -419,6 +429,8 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         parser.error("--engineering-context-chars must be >= 8000.")
     if not 1 <= args.engineering_evidence_items <= 40:
         parser.error("--engineering-evidence-items must be between 1 and 40.")
+    if not 1 <= args.engineering_new_evidence_items <= 12:
+        parser.error("--engineering-new-evidence-items must be between 1 and 12.")
     if not 1 <= args.engineering_retrieval_cycles <= 6:
         parser.error("--engineering-retrieval-cycles must be between 1 and 6.")
     positive_budget_fields = {
@@ -715,6 +727,7 @@ def _policies_from_args(
         max_prepare_model_evidence_items=args.engineering_evidence_items,
         max_decide_model_evidence_items=min(40, args.engineering_evidence_items + 2),
         max_model_evidence_detail_chars=600,
+        max_new_model_evidence_per_batch=args.engineering_new_evidence_items,
     )
     runtime = RuntimePolicy(max_attempts=args.runtime_repair_cycles + 1)
     postprocessing = PostProcessingPolicy(

@@ -122,8 +122,21 @@ def test_gather_evidence_large_batch_keeps_full_store_and_bounded_event(tmp_path
     )
 
     assert event.success
-    assert len(event.observed_evidence) == 24
+    # v4.0.3: retrieval may discover many candidates, but only a small ranked subset
+    # is promoted into the immediate model/event context. The durable evidence store
+    # still owns every item actually returned by the tool call.
+    assert len(event.observed_evidence) == 6
     assert len(state.engineering_evidence_records) == 1
-    # GatherEvidence currently requests a bounded 8 providers per capability query;
-    # the durable store still owns every item actually returned by the tool call.
-    assert len(state.engineering_evidence_records[0].observed_evidence) == 100
+    record = state.engineering_evidence_records[0]
+    assert len(record.observed_evidence) == 100
+    assert record.payload["retrieved_new_evidence_count"] == 100
+    assert record.payload["projected_new_evidence_count"] == 6
+    projected = agent._bounded_evidence_for_model(state, phase="prepare", max_items=10)
+    promoted_ids = set(record.payload["gaps"][0]["projected_evidence_ids"])
+    projected_ids = {item["evidence_id"] for item in projected}
+    # Existing intake-targeted capability anchors may share the capsule, but the newly
+    # retrieved batch contributes no more than the six promoted records.
+    assert len(promoted_ids) == 6
+    assert len(projected_ids & promoted_ids) <= 6
+    unpromoted = set(record.payload["gaps"][0]["new_evidence_ids"]) - promoted_ids
+    assert not (projected_ids & unpromoted)

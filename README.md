@@ -1,6 +1,8 @@
-# Release notice: OpenFOAM Agent 4.0.2
+# Release notice: OpenFOAM Agent 4.0.3
 
-> v4.0.2 fixes evidence-heavy `prepare_design` context exhaustion by automatically projecting a bounded design/evidence capsule while preserving confirmed requirements. See `V4_0_2_CHANGES.md`.
+> v4.0.3 hardens the Codex backend as a model-only structured transport and bounds newly promoted evidence per retrieval batch. It explicitly requests Codex tool-feature disables, reports exact transport violations, and keeps large retrieval result sets durable without injecting all of them into the next LLM turn. See `V4_0_3_CHANGES.md`.
+
+> v4.0.2 fixed evidence-heavy `prepare_design` context exhaustion by automatically projecting a bounded design/evidence capsule while preserving confirmed requirements. See `V4_0_2_CHANGES.md`.
 
 This candidate extends rc1 with bounded file-task authoring, shared syntax-evidence
 gates, a mesh dependency DAG, opt-in strict Linux isolation/aggregate budgets,

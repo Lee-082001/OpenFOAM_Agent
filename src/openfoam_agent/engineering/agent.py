@@ -166,6 +166,7 @@ class EngineeringPolicy:
     max_prepare_model_evidence_items: int = 16
     max_decide_model_evidence_items: int = 18
     max_model_evidence_detail_chars: int = 900
+    max_new_model_evidence_per_batch: int = 6
     max_model_feedback_items: int = 8
     max_mesh_cells: int = 5_000_000
     require_solve_ready_gate: bool = False
@@ -206,6 +207,7 @@ class EngineeringPolicy:
             "max_prepare_model_evidence_items": self.max_prepare_model_evidence_items,
             "max_decide_model_evidence_items": self.max_decide_model_evidence_items,
             "max_model_evidence_detail_chars": self.max_model_evidence_detail_chars,
+            "max_new_model_evidence_per_batch": self.max_new_model_evidence_per_batch,
             "max_model_feedback_items": self.max_model_feedback_items,
             "max_mesh_cells": self.max_mesh_cells,
             "max_preloaded_capabilities": self.max_preloaded_capabilities,
@@ -2913,6 +2915,7 @@ class CFDEngineeringAgent:
                         "requested_gap_id",
                         "status",
                         "new_evidence_ids",
+                        "projected_evidence_ids",
                         "total_seen",
                         "message",
                         "protocol_notes",
@@ -2939,6 +2942,84 @@ class CFDEngineeringAgent:
         for entry in self._evidence_gap_ledger.get(phase, {}).values():
             if str(entry.get("status", "")) in {"open", "evidence_available", "stagnant"}:
                 entry["status"] = "retrieval_unavailable"
+
+    @staticmethod
+    def _evidence_relevance_score(record: dict[str, object]) -> int:
+        """Deterministically rank retrieved evidence before projecting it to the LLM.
+
+        Search tools may return many candidates.  All candidates remain in the durable
+        evidence payload/ledger, but only a small high-value subset should be promoted
+        into the next model context.  Native/runtime-strength capability evidence and
+        full reference excerpts outrank shallow search snippets.
+        """
+
+        kind = str(record.get("kind", ""))
+        score = 0
+        if kind == "openfoam_reference":
+            if str(record.get("content_excerpt", "")).strip():
+                score += 80
+            elif str(record.get("snippet", "")).strip():
+                score += 35
+            haystack = " ".join(
+                str(record.get(key, "")) for key in ("reference", "snippet", "content_excerpt")
+            )
+        else:
+            result = record.get("result") if isinstance(record.get("result"), dict) else {}
+            level = str(result.get("verification_level", "")).casefold()
+            level_weight = {
+                "native": 90,
+                "runtime": 85,
+                "runtime_table": 80,
+                "installed_binary": 70,
+                "installed_library": 65,
+                "installed": 55,
+                "source": 35,
+                "documented": 20,
+            }
+            score += level_weight.get(level, 0)
+            if result.get("verified") is True:
+                score += 25
+            haystack = " ".join(
+                str(result.get(key, "")) for key in ("name", "provider_id", "provider_type", "summary")
+            ) + " " + str(record.get("reference", ""))
+
+        query = str(record.get("query", ""))
+        query_tokens = {tok.casefold() for tok in re.findall(r"[A-Za-z0-9_]{3,}", query)}
+        hay_tokens = {tok.casefold() for tok in re.findall(r"[A-Za-z0-9_]{3,}", haystack)}
+        score += min(30, 5 * len(query_tokens & hay_tokens))
+        return score
+
+    def _select_new_evidence_for_model(
+        self,
+        gap_results: list[dict[str, object]],
+        records: dict[str, dict[str, object]],
+    ) -> list[str]:
+        """Fairly select a bounded subset of newly retrieved evidence for model context."""
+
+        limit = self.policy.max_new_model_evidence_per_batch
+        ranked_per_gap: list[list[str]] = []
+        for gap in gap_results:
+            ids = [str(item) for item in gap.get("new_evidence_ids", []) if str(item) in records]
+            ids.sort(key=lambda eid: (-self._evidence_relevance_score(records[eid]), eid))
+            if ids:
+                ranked_per_gap.append(ids)
+
+        promoted: list[str] = []
+        cursor = 0
+        while len(promoted) < limit and ranked_per_gap:
+            next_round: list[list[str]] = []
+            for queue in ranked_per_gap:
+                if len(promoted) >= limit:
+                    break
+                if cursor < len(queue):
+                    promoted.append(queue[cursor])
+                    if cursor + 1 < len(queue):
+                        next_round.append(queue)
+            if not next_round:
+                break
+            ranked_per_gap = next_round
+            cursor += 1
+        return promoted
 
     def _gather_evidence(
         self,
@@ -2977,7 +3058,7 @@ class CFDEngineeringAgent:
         ledger = self._evidence_gap_ledger.setdefault(phase, {})
         performed_retrieval = False
         observed_by_id: dict[str, ObservedEngineeringEvidence] = {}
-        new_observed_ids: set[str] = set()
+        new_candidate_records: dict[str, dict[str, object]] = {}
         gap_results: list[dict[str, object]] = []
 
         normalized_gaps = self._normalize_evidence_gap_batch(action, phase=phase)
@@ -3026,6 +3107,8 @@ class CFDEngineeringAgent:
                 "seen_ids": set(),
                 "ordered_seen_ids": [],
                 "last_new_ids": [],
+                "last_projected_ids": [],
+                "projected_seen_ids": [],
                 "retrievals": 0,
                 "last_new_count": 0,
                 "status": "open",
@@ -3111,7 +3194,8 @@ class CFDEngineeringAgent:
                 if evidence_id not in ordered_seen:
                     ordered_seen.append(evidence_id)
             entry["last_new_ids"] = list(new_ids)
-            new_observed_ids.update(new_ids)
+            for evidence_id in new_ids:
+                new_candidate_records[evidence_id] = found[evidence_id]
             entry["retrievals"] = int(entry.get("retrievals", 0)) + 1
             entry["last_new_count"] = len(new_ids)
             entry["status"] = "evidence_available" if new_ids else "stagnant"
@@ -3146,24 +3230,45 @@ class CFDEngineeringAgent:
             "cycle_limit": limit,
             "gaps": gap_results,
         }
-        observed = [
+        promoted_ids = self._select_new_evidence_for_model(gap_results, new_candidate_records)
+        promoted_set = set(promoted_ids)
+        for item in gap_results:
+            projected = [eid for eid in item.get("new_evidence_ids", []) if eid in promoted_set]
+            item["projected_evidence_ids"] = projected
+            ledger_entry = ledger.get(str(item.get("gap_id", "")))
+            if isinstance(ledger_entry, dict):
+                ledger_entry["last_projected_ids"] = list(projected)
+                prior = list(ledger_entry.get("projected_seen_ids", []) or [])
+                for evidence_id in projected:
+                    if evidence_id not in prior:
+                        prior.append(evidence_id)
+                ledger_entry["projected_seen_ids"] = prior
+        observed = [observed_by_id[eid] for eid in promoted_ids if eid in observed_by_id]
+        durable_observed = [
             observed_by_id[eid]
-            for eid in sorted(new_observed_ids)
+            for eid in new_candidate_records
             if eid in observed_by_id
         ]
+        payload["retrieved_new_evidence_count"] = new_total
+        payload["projected_new_evidence_count"] = len(observed)
+        payload["projection_limit"] = self.policy.max_new_model_evidence_per_batch
         payload_ref = self._store_evidence_payload(
             state,
             phase=phase,
             step=step,
             action_type=action.type,
             payload=payload,
-            observed_evidence=observed,
+            observed_evidence=durable_observed,
         )
         return self._event(
             step,
             action.type,
             True,
-            f"Evidence-gap batch completed: {new_total} new evidence item(s); stagnant={len(stagnant)}.",
+            (
+                f"Evidence-gap batch completed: {new_total} retrieved; "
+                f"{len(observed)} promoted to model context (limit={self.policy.max_new_model_evidence_per_batch}); "
+                f"stagnant={len(stagnant)}."
+            ),
             self._evidence_batch_display(
                 gap_results,
                 cycle=self._retrieval_cycles.get(phase, cycles),
@@ -4870,32 +4975,64 @@ class CFDEngineeringAgent:
         # Keep evidence from at most the four most recent active gaps.  Per-gap caps
         # preserve breadth when one broad query returns dozens of weak matches.
         for _gap_id, entry in reversed(active[-4:]):
-            last_new = list(entry.get("last_new_ids", []) or [])
-            ordered_seen = list(entry.get("ordered_seen_ids", []) or [])
+            last_new = list(entry.get("last_projected_ids", []) or [])
+            projected_seen = list(entry.get("projected_seen_ids", []) or [])
+            # v4.0.3: only evidence promoted by the retrieval projection policy is
+            # eligible for the next bounded model capsule. The full retrieved set
+            # remains in the durable evidence store for traceability.
             for evidence_id in last_new[:4]:
                 add(evidence_id)
-            for evidence_id in ordered_seen[:6]:
+            for evidence_id in projected_seen[:6]:
                 add(evidence_id)
 
+        # Track retrieval candidates that were deliberately *not* promoted. They remain
+        # available in the durable ledger, but must not leak back into this model turn via
+        # targeted-capability or generic registry fallbacks.
+        unprojected_retrieval_ids: set[str] = set()
+        for record in state.engineering_evidence_records:
+            if record.action_type != "gather_evidence" or not isinstance(record.payload, dict):
+                continue
+            for gap in record.payload.get("gaps", []) or []:
+                if not isinstance(gap, dict):
+                    continue
+                retrieved = {str(eid) for eid in gap.get("new_evidence_ids", []) or []}
+                projected_ids = {str(eid) for eid in gap.get("projected_evidence_ids", []) or []}
+                unprojected_retrieval_ids.update(retrieved - projected_ids)
+
         # Before generic fallback, surface intake-relevant providers that Python
-        # deterministically pre-observed from the frozen intake.
+        # deterministically pre-observed from the frozen intake, unless this retrieval
+        # batch deliberately left that provider unprojected.
         for provider_id in self._targeted_capability_provider_ids(state):
-            add(canonical_engineering_evidence_id("capability", provider_id))
+            evidence_id = canonical_engineering_evidence_id("capability", provider_id)
+            if evidence_id not in unprojected_retrieval_ids:
+                add(evidence_id)
 
         # If the gap ledger is sparse, preserve the most recent deterministic records.
         for record in reversed(state.engineering_evidence_records[-6:]):
-            for observed in record.observed_evidence[:6]:
-                add(observed.evidence_id)
+            if record.action_type == "gather_evidence" and isinstance(record.payload, dict):
+                projected_ids: list[str] = []
+                for gap in record.payload.get("gaps", []) or []:
+                    if isinstance(gap, dict):
+                        projected_ids.extend(str(eid) for eid in gap.get("projected_evidence_ids", []) or [])
+                for evidence_id in projected_ids[:6]:
+                    add(evidence_id)
+            else:
+                for observed in record.observed_evidence[:6]:
+                    add(observed.evidence_id)
 
         # Finally retain a tiny provider/reference tail so a no-gap design still has
         # deterministic capability anchors.
         for evidence in registry.values():
+            if evidence.evidence_id in unprojected_retrieval_ids:
+                continue
             if evidence.kind == "capability":
                 add(evidence.evidence_id)
             if len(selected) >= max_items:
                 break
         if len(selected) < max_items:
             for evidence_id in reversed(list(registry)):
+                if evidence_id in unprojected_retrieval_ids:
+                    continue
                 add(evidence_id)
                 if len(selected) >= max_items:
                     break

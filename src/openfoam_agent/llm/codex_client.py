@@ -42,6 +42,34 @@ _CODEX_API_ROUTING_ENV = {
     "OPENAI_PROJECT_ID",
 }
 
+# Codex is used here as a structured model transport, not as an autonomous local agent.
+# `codex exec` supports repeatable --disable feature flags.  Keep the profile explicit
+# because --sandbox read-only only constrains effects; it does not remove model-visible tools.
+# The JSON event inspector remains a fail-closed backstop if a CLI/model regression ignores
+# one of these requested feature disables.
+_CODEX_MODEL_ONLY_DISABLED_FEATURES = (
+    "shell_tool",
+    "unified_exec",
+    "code_mode",
+    "code_mode_only",
+    "code_mode_host",
+    "search_tool",
+    "standalone_web_search",
+    "web_search",
+    "apps",
+    "enable_mcp_apps",
+    "plugins",
+    "remote_plugin",
+    "tool_search",
+    "computer_use",
+    "browser_use",
+    "in_app_browser",
+    "image_generation",
+    "view_image",
+    "skill_search",
+    "multi_agent",
+)
+
 
 @dataclass(frozen=True)
 class CodexCLIStatus:
@@ -113,7 +141,7 @@ def check_codex_cli(
 
     version = _safe_process_text(version_proc.stdout or version_proc.stderr, limit=300)
     help_text = "\n".join(part for part in (help_proc.stdout, help_proc.stderr) if part)
-    required = ("--output-schema", "--output-last-message", "--ephemeral", "--sandbox", "--json", "--ignore-user-config")
+    required = ("--output-schema", "--output-last-message", "--ephemeral", "--sandbox", "--json", "--ignore-user-config", "--disable")
     missing = [flag for flag in required if flag not in help_text]
     if version_proc.returncode != 0 or help_proc.returncode != 0 or missing:
         detail = f" missing flags={missing}" if missing else ""
@@ -141,8 +169,9 @@ def check_codex_cli(
 class CodexLLM:
     """Structured LLM adapter backed by subscription-authenticated `codex exec`.
 
-    Codex is requested as a model transport in a temporary read-only ephemeral session.
-    Tool events are rejected, but observation is NOT pre-execution tool prevention.
+    Codex is requested as a model-only transport in a temporary read-only ephemeral session.
+    Model-visible execution/search/app features are explicitly disabled before the call and
+    JSON events are still inspected afterwards as a fail-closed regression backstop.
     The CLI/account/OS remain part of the trusted local-operator boundary.
     """
 
@@ -268,10 +297,14 @@ class CodexLLM:
                 "--json",
                 "-c",
                 'forced_login_method="chatgpt"',
+                "-c",
+                'approval_policy="never"',
                 "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
             ]
+            for feature in _CODEX_MODEL_ONLY_DISABLED_FEATURES:
+                command.extend(["--disable", feature])
             if self.status.supports_ignore_user_config:
                 # Avoid user MCP/tool configuration interfering with strict final JSON.
                 command.append("--ignore-user-config")

@@ -311,5 +311,5 @@ def test_a30_environment_allowlist_and_event_usage(monkeypatch):
     assert usage["totalTokens"]==12 and not contract["pre_execution_tool_prevention_verified"]
     _,unknown=inspect_events('{"type":"turn.completed"}\n');assert unknown is None
     for kind in ["command_execution","mcp_tool_call","file_change","web_search"]:
-        with pytest.raises(ValueError,match="tool/action"):
+        with pytest.raises(ValueError,match="CodexTransportViolation"):
             inspect_events(json.dumps({"type":"item.started","item":{"type":kind}}))
