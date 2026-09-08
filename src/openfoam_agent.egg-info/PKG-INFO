@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: openfoam-agent
-Version: 4.2.2
+Version: 4.2.3
 Summary: Agent-owned OpenFOAM CFD engineering behind deterministic safety gates
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
@@ -8,6 +8,18 @@ Requires-Dist: openai<3,>=2
 Requires-Dist: pydantic<3,>=2.8
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8; extra == "dev"
+
+## v4.2.3 controller-owned authoring manifest
+
+- `EngineeringPlan.required_case_files` is now the single authoritative solve-required manifest.
+- `author_case.required_case_files` remains only optional compatibility metadata; omission, ordering differences, or stale model echoes cannot reject an otherwise valid staged authoring response.
+- Partition tasks validate actual authored-file coverage against controller-assigned paths rather than trusting a duplicated manifest echoed by the model.
+- Harmless duplicate authoring hints are normalized, redundant intermediate native commands are dropped, and exact duplicate native invocations are collapsed before semantic validation.
+- Security/path checks, actual file coverage, pre-solve completeness, native command policy, `checkMesh`, case seals and solve approval remain fail-closed.
+
+# Release notice: OpenFOAM Agent 4.2.3
+
+> v4.2.3 fixes a live v4.2.2 staged-authoring failure where a valid frozen EngineeringPlan was rejected only because the model echoed a non-identical `required_case_files` list into `ExecuteCasePlanAction`. The controller now owns that manifest end-to-end and normalizes redundant authoring metadata instead of retrying or failing. See `V4_2_3_CHANGES.md`.
 
 ## v4.2.2 phase-specific authoring context
 

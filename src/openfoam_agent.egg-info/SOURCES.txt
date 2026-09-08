@@ -156,3 +156,4 @@ tests/test_v402_design_context_partition.py
 tests/test_v403_codex_model_only_transport.py
 tests/test_v410_risk_stage_evidence.py
 tests/test_v420_progress_first_validation.py
+tests/test_v423_authoring_manifest_authority.py

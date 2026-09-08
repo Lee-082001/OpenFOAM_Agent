@@ -150,8 +150,11 @@ def test_rc2_multi_region_authoring_pipeline_accepts_distinct_checks():
     action=CaseAuthoringAction(type='author_case',goal='Validate each region',files=[CaseBundleFile(path='system/a',content='a 1;')],required_case_files=['system/a'],
         native_pipeline=[NativeOpenFOAMCommand(command='checkMesh',arguments=['-region',r]) for r in ['fluid','solid']])
     assert len(action.native_pipeline)==2
-    with pytest.raises(ValueError,match='duplicate checkMesh'):
-        CaseAuthoringAction.model_validate({**action.model_dump(),'native_pipeline':[x.model_dump() for x in [action.native_pipeline[0]]*2]})
+    # Exact repeated invocations are harmless model duplication in v4.2.3 and are
+    # normalized away; distinct region checks remain separate and mandatory.
+    normalized=CaseAuthoringAction.model_validate({**action.model_dump(),'native_pipeline':[x.model_dump() for x in [action.native_pipeline[0]]*2]})
+    assert len(normalized.native_pipeline)==1
+    assert normalized.native_pipeline[0].arguments==['-region','fluid']
 
 
 def test_rc2_mesh_transitive_asset_conversion_invalidation(tmp_path):

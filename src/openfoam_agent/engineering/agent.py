@@ -668,6 +668,9 @@ class CFDEngineeringAgent:
             data = action.model_dump(mode="python")
             data["type"] = "execute_case_plan"
             data["plan"] = plan.model_dump(mode="python")
+            # The frozen plan is the sole authority for the solve-required manifest.
+            # Never let a redundant model echo block staged authoring.
+            data["required_case_files"] = list(plan.required_case_files)
             try:
                 if self._authoring_task_queue is not None:
                     from copy import deepcopy

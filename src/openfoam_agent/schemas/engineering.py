@@ -945,8 +945,60 @@ class CaseAuthoringAction(_EngineeringModel):
     surface_checks: list[str] = Field(default_factory=list, max_length=16)
     mesh_commands: list[str] = Field(default_factory=list, max_length=12)
     native_pipeline: list[NativeOpenFOAMCommand] = Field(default_factory=list, max_length=20)
-    required_case_files: list[str] = Field(min_length=1, max_length=80)
+    # Compatibility mirror only. The authoritative manifest lives on the frozen
+    # EngineeringPlan and is injected by the controller when the authoring response
+    # is assembled. Keeping this optional prevents a harmless model echo mismatch
+    # from rejecting an otherwise valid case bundle.
+    required_case_files: list[str] = Field(default_factory=list, max_length=80)
     rationale: str = Field(default="", max_length=200)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_authoring_mirrors(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        # These lists are execution hints/compatibility mirrors, not independent
+        # sources of truth. Deduplicate harmless repeats instead of forcing the LLM
+        # through another structured-output retry.
+        for key in ("validate_dictionaries", "surface_checks", "mesh_commands", "required_case_files"):
+            raw = data.get(key) or []
+            data[key] = list(dict.fromkeys(str(x) for x in raw if str(x).strip()))
+        # Intermediate partition tasks are controller-owned and may never run native
+        # commands. If the model redundantly emits them, dropping them is safer and
+        # more useful than rejecting the entire task.
+        if data.get("defer_native"):
+            data["native_pipeline"] = []
+            data["mesh_commands"] = []
+        # Prefer the richer native_pipeline representation if both legacy and current
+        # forms are emitted. They describe the same controller stage.
+        elif data.get("native_pipeline") and data.get("mesh_commands"):
+            data["mesh_commands"] = []
+
+        # Exact duplicate native invocations are harmless model repetition. Collapse
+        # them before semantic validation, and keep mesh validation at the end so a
+        # later mesh-mutating utility cannot accidentally run after checkMesh.
+        pipeline = data.get("native_pipeline") or []
+        if pipeline:
+            unique, seen = [], set()
+            for item in pipeline:
+                if isinstance(item, dict):
+                    token = (
+                        str(item.get("command", "")),
+                        tuple(str(x) for x in (item.get("arguments") or [])),
+                        str(item.get("role", "utility")),
+                    )
+                else:
+                    token = repr(item)
+                if token in seen:
+                    continue
+                seen.add(token); unique.append(item)
+            checks = [item for item in unique if (item.get("command") if isinstance(item, dict) else getattr(item, "command", None)) == "checkMesh"]
+            non_checks = [item for item in unique if (item.get("command") if isinstance(item, dict) else getattr(item, "command", None)) != "checkMesh"]
+            data["native_pipeline"] = non_checks + checks
+        elif data.get("mesh_commands") and "checkMesh" in data["mesh_commands"]:
+            data["mesh_commands"] = [x for x in data["mesh_commands"] if x != "checkMesh"] + ["checkMesh"]
+        return data
 
     @model_validator(mode="after")
     def validate_case_authoring(self) -> Self:
@@ -1003,17 +1055,40 @@ class CaseAuthoringAction(_EngineeringModel):
 
 
 class ExecuteCasePlanAction(CaseAuthoringAction):
-    """Legacy one-shot case construction contract retained for compatibility/repair."""
+    """Controller-bound executable case bundle.
+
+    ``required_case_files`` is intentionally not an independent contract. The frozen
+    EngineeringPlan is the single source of truth; model-authored mirrors are
+    normalized away before validation. Actual authored-file coverage and pre-solve
+    completeness are checked deterministically later.
+    """
 
     type: Literal["execute_case_plan"]
     plan: EngineeringPlan
 
+    @model_validator(mode="before")
+    @classmethod
+    def bind_required_manifest_to_plan(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        plan = data.get("plan")
+        if isinstance(plan, EngineeringPlan):
+            canonical = list(plan.required_case_files)
+        elif isinstance(plan, dict):
+            canonical = list(plan.get("required_case_files") or [])
+        else:
+            canonical = None
+        if canonical is not None:
+            data["required_case_files"] = canonical
+        return data
+
     @model_validator(mode="after")
     def validate_execution_plan(self) -> Self:
-        if set(self.required_case_files) != set(self.plan.required_case_files):
-            raise ValueError(
-                "execute_case_plan required_case_files must exactly match plan.required_case_files."
-            )
+        # Defensive assertion only; the before-validator above establishes the
+        # controller-owned canonical manifest.
+        if self.required_case_files != self.plan.required_case_files:
+            raise ValueError("Controller-owned required case manifest could not be normalized.")
         return self
 
 

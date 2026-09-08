@@ -1,3 +1,9 @@
+## v4.2.3 single-source-of-truth authoring contract
+
+Staged authoring no longer asks two independent objects to agree on the solve-required file manifest. The frozen `EngineeringPlan.required_case_files` is the controller-owned source of truth. `CaseAuthoringAction.required_case_files` is an optional backward-compatible mirror and is never authoritative. For partitioned authoring, `authoring_task.paths` controls the exact files that a task must return; for the assembled executable candidate, Python injects the full frozen-plan manifest before deterministic validation. This removes a non-safety failure mode where ordering, omission, or stale LLM echoes could reject a complete case. Actual authored path coverage, safe workspace paths/content, pre-solve required-file existence, native execution allowlists, mesh validation, case sealing and solve approval remain strict.
+
+Harmless authoring duplication is normalized before validation: repeated dictionary/surface/legacy mesh hints are deduplicated, intermediate partition tasks have any mistakenly emitted native commands removed, and exact duplicate native invocations are collapsed. If `checkMesh` is present in a pipeline it is ordered after other mesh utilities, preserving validation-after-mutation semantics.
+
 # v4.0.0rc1 contract changes
 
 Current v4 additions are organized under `contracts/`, `tools/execution_policy.py`, `tools/dictionary_policy.py`, `tools/assets.py`, `runtime/completion.py`, `runtime/parallel.py`, `workflow/checkpoint.py`, and `postprocessing/context.py` / `quantities.py`. Engineering remains the coordinator; its full decomposition is not complete.

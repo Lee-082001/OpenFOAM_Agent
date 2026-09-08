@@ -260,7 +260,7 @@ def compile_tasks(instruction, payload, max_chars):
         task=project(payload,items,compact=bool(compact_mode))
         meta={"id":f"{sha(payload['frozen_engineering_plan'])[:16]}:{index+1}","index":index+1,"count":len(batches),
             "paths":items,"is_final":index==len(batches)-1,"compact_plan_projection":bool(compact_mode),
-            "response_contract":"Echo task_id. Return only these files. Intermediate tasks set defer_native=true with no commands. Final task supplies the complete native pipeline."}
+            "response_contract":"Echo task_id. Return only these files. required_case_files is controller-owned and may be omitted. Intermediate tasks set defer_native=true; any emitted native commands are ignored. Final task supplies the complete native pipeline."}
         task["authoring_task"]=meta
         # If protocol metadata tips the task over the grouping reserve, the exact cap is
         # still allowed. Rebuild with compact projection before giving up.
@@ -290,8 +290,10 @@ def accept_task(queue, action, plan):
     if action.block_mesh is not None: paths.append(action.block_mesh.path)
     if action.task_id != task["id"] or set(paths)!=set(task["paths"]) or len(paths)!=len(set(paths)):
         raise ValueError("Authoring task ID/file coverage mismatch; no files were committed.")
-    if set(action.required_case_files)!=set(task["paths"]):
-        raise ValueError("Task required files differ from the controller assignment.")
+    # ``required_case_files`` in an authoring response is a compatibility mirror.
+    # The controller assignment in authoring_task.paths is authoritative; actual
+    # authored path coverage was already checked above. Ignore an omitted/stale mirror
+    # instead of rejecting a safe, complete task.
     if action.defer_native == task["is_final"]:
         raise ValueError("Only the final task may supply a native pipeline.")
     queue["responses"].append(action.model_dump(mode="python")); queue["cursor"]+=1
