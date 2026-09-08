@@ -1,10 +1,12 @@
 """Observable Codex transport contract for model-only structured calls.
 
-The adapter requests a no-tool Codex exec profile *before* the model call.  The JSON
+The adapter requests a no-tool Codex exec profile *before* the model call. The JSON
 stream is still inspected afterwards because CLI/model regressions can re-expose a
-capability despite the requested profile.  Pre-execution prevention is therefore a
-requested configuration contract, while the event inspector remains the fail-closed
-runtime backstop.
+capability despite the requested profile. Tool/action items therefore remain fail-closed.
+Codex diagnostic items (``item.type=error``) are different: recent Codex CLI JSONL can
+emit them as non-terminal warnings while the turn later completes successfully, so they
+are recorded but are not treated as tool use. Terminal ``error``/``turn.failed`` events
+remain hard failures and expose their bounded message.
 """
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ from typing import Any
 
 
 _MODEL_ONLY_ALLOWED_ITEMS = frozenset({"agent_message", "reasoning", "plan", "todo_list"})
+_DIAGNOSTIC_ITEM_TYPES = frozenset({"error"})
 
 
 class CodexTransportViolation(ValueError):
@@ -48,8 +51,26 @@ def _bounded_detail(value: str | None, *, limit: int = 600) -> str:
     return text
 
 
+def _extract_message(value: Any) -> str:
+    """Extract a bounded human diagnostic from Codex error-shaped payloads."""
+
+    if isinstance(value, str):
+        return _bounded_detail(value)
+    if isinstance(value, dict):
+        for key in ("message", "detail", "error", "reason"):
+            if key not in value:
+                continue
+            nested = value.get(key)
+            if nested is value:
+                continue
+            text = _extract_message(nested)
+            if text:
+                return text
+    return ""
+
+
 def _item_detail(item: dict[str, Any]) -> str:
-    """Expose the useful tool diagnostic without dumping arbitrary event payloads."""
+    """Expose useful tool diagnostics without dumping arbitrary event payloads."""
 
     item_type = str(item.get("type") or "")
     if item_type == "command_execution":
@@ -67,6 +88,12 @@ def _item_detail(item: dict[str, Any]) -> str:
     return ""
 
 
+def _terminal_error(event: dict[str, Any], kind: str) -> ValueError:
+    message = _extract_message(event.get("error")) or _extract_message(event.get("message"))
+    suffix = f", message={json.dumps(message, ensure_ascii=False)}" if message else ""
+    return ValueError(f"CodexTurnError: event={kind}{suffix}.")
+
+
 def authentication_kind(status: str) -> str:
     text = status.casefold()
     if re.search(r"api[ -_]?key|\bwith api\b|\busing api\b", text):
@@ -82,6 +109,7 @@ def inspect_events(output: str):
     completed = False
     usage = None
     count = 0
+    diagnostics: list[str] = []
     for line in output.splitlines():
         if not line.strip():
             continue
@@ -94,12 +122,16 @@ def inspect_events(output: str):
         count += 1
         kind = str(event.get("type") or "")
         if kind in {"error", "turn.failed"}:
-            raise ValueError("Codex reported a failed turn.")
+            raise _terminal_error(event, kind)
         if kind in {"item.started", "item.updated", "item.completed"}:
             item = event.get("item", {})
             if not isinstance(item, dict):
                 raise CodexTransportViolation(event_type=kind, detail="item=<invalid-envelope>")
             item_type = str(item.get("type") or "<missing>")
+            if item_type in _DIAGNOSTIC_ITEM_TYPES:
+                message = _extract_message(item.get("message")) or _extract_message(item.get("error"))
+                diagnostics.append(_bounded_detail(message or f"{item_type} diagnostic"))
+                continue
             if item_type not in _MODEL_ONLY_ALLOWED_ITEMS:
                 raise CodexTransportViolation(
                     event_type=kind,
@@ -131,11 +163,14 @@ def inspect_events(output: str):
         elif kind not in {"thread.started", "turn.started"}:
             raise CodexTransportViolation(event_type=kind or "<missing>", detail="unknown event envelope")
     if not completed:
-        raise ValueError("Codex event stream has no completed turn.")
+        detail = f" Last diagnostic: {diagnostics[-1]}" if diagnostics else ""
+        raise ValueError("Codex event stream has no completed turn." + detail)
     return {
         "event_count": count,
         "turn_completed": True,
         "tool_events_observed": False,
+        "diagnostic_items_observed": len(diagnostics),
+        "diagnostics": diagnostics[-8:],
         "model_only_profile_requested": True,
         "post_execution_event_guard": True,
         # We cannot introspect the exact server-side tool surface from the completed

@@ -1,6 +1,6 @@
-# Release notice: OpenFOAM Agent 4.0.3
+# Release notice: OpenFOAM Agent 4.0.4
 
-> v4.0.3 hardens the Codex backend as a model-only structured transport and bounds newly promoted evidence per retrieval batch. It explicitly requests Codex tool-feature disables, reports exact transport violations, and keeps large retrieval result sets durable without injecting all of them into the next LLM turn. See `V4_0_3_CHANGES.md`.
+> v4.0.4 fixes Codex CLI non-terminal `item.type=error` diagnostics being misclassified as tool/action violations. Tool/search/MCP/file-change items remain fail-closed; terminal `error` and `turn.failed` events now expose their real message. See `V4_0_4_CHANGES.md`.
 
 > v4.0.2 fixed evidence-heavy `prepare_design` context exhaustion by automatically projecting a bounded design/evidence capsule while preserving confirmed requirements. See `V4_0_2_CHANGES.md`.
 

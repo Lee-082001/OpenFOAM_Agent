@@ -152,3 +152,4 @@ tests/test_v400rc2_context_mesh.py
 tests/test_v400rc2_physics.py
 tests/test_v400rc2_runtime.py
 tests/test_v402_design_context_partition.py
+tests/test_v403_codex_model_only_transport.py

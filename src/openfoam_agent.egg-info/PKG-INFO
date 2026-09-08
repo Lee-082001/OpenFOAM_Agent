@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: openfoam-agent
-Version: 4.0.2
+Version: 4.0.4
 Summary: Agent-owned OpenFOAM CFD engineering behind deterministic safety gates
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
@@ -9,9 +9,11 @@ Requires-Dist: pydantic<3,>=2.8
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8; extra == "dev"
 
-# Release notice: OpenFOAM Agent 4.0.2
+# Release notice: OpenFOAM Agent 4.0.4
 
-> v4.0.2 fixes evidence-heavy `prepare_design` context exhaustion by automatically projecting a bounded design/evidence capsule while preserving confirmed requirements. See `V4_0_2_CHANGES.md`.
+> v4.0.4 fixes Codex CLI non-terminal `item.type=error` diagnostics being misclassified as tool/action violations. Tool/search/MCP/file-change items remain fail-closed; terminal `error` and `turn.failed` events now expose their real message. See `V4_0_4_CHANGES.md`.
+
+> v4.0.2 fixed evidence-heavy `prepare_design` context exhaustion by automatically projecting a bounded design/evidence capsule while preserving confirmed requirements. See `V4_0_2_CHANGES.md`.
 
 This candidate extends rc1 with bounded file-task authoring, shared syntax-evidence
 gates, a mesh dependency DAG, opt-in strict Linux isolation/aggregate budgets,

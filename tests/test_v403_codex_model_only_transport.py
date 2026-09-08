@@ -101,3 +101,61 @@ def test_codex_success_contract_records_requested_model_only_profile():
     assert contract["post_execution_event_guard"] is True
     # Do not overclaim independent verification of the server-side tool surface.
     assert contract["pre_execution_tool_prevention_verified"] is False
+
+
+def test_codex_nonterminal_error_item_is_recorded_not_rejected():
+    stream = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "t"}),
+            json.dumps({"type": "item.completed", "item": {"type": "error", "message": "non-fatal diagnostic"}}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": '{"ok":true}'}}),
+            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 3, "output_tokens": 2}}),
+        ]
+    )
+    contract, usage = inspect_events(stream)
+    assert contract["turn_completed"] is True
+    assert contract["diagnostic_items_observed"] == 1
+    assert contract["diagnostics"] == ["non-fatal diagnostic"]
+    assert usage["totalTokens"] == 5
+
+
+def test_codex_terminal_error_exposes_message():
+    stream = json.dumps({"type": "error", "message": "provider temporarily unavailable"})
+    with pytest.raises(ValueError) as exc_info:
+        inspect_events(stream)
+    text = str(exc_info.value)
+    assert "CodexTurnError" in text
+    assert "event=error" in text
+    assert "provider temporarily unavailable" in text
+
+
+def test_codex_turn_failed_exposes_nested_message():
+    stream = json.dumps({"type": "turn.failed", "error": {"message": "shared rollout token budget exhausted"}})
+    with pytest.raises(ValueError) as exc_info:
+        inspect_events(stream)
+    text = str(exc_info.value)
+    assert "event=turn.failed" in text
+    assert "shared rollout token budget exhausted" in text
+
+
+def test_codex_client_accepts_nonterminal_error_item_when_turn_completes(monkeypatch):
+    import openfoam_agent.llm.codex_client as codex
+
+    def fake_run(command, **kwargs):
+        output_path = command[command.index("--output-last-message") + 1]
+        with open(output_path, "w", encoding="utf-8") as handle:
+            json.dump({"ok": True}, handle)
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "item.completed", "item": {"type": "error", "message": "warning only"}}),
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
+            ]
+        )
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(codex.subprocess, "run", fake_run)
+    llm = CodexLLM(status=_status())
+    assert llm.generate(_Output, "Return ok.").ok is True
+    assert llm.last_transport["diagnostic_items_observed"] == 1
+    assert llm.last_transport["diagnostics"] == ["warning only"]
