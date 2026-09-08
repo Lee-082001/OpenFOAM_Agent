@@ -191,7 +191,7 @@ def test_finish_preview_cannot_claim_unobserved_solver_capability(tmp_path, grap
     agent.prepare(state, native_execution=False)
     assert state.current_state.value == "ENGINEERING_BLOCKED"
     assert any(
-        "no successful capability-graph observation" in event.output_excerpt
+        "lacks sufficient deterministic installed evidence" in event.output_excerpt
         for event in state.engineering_events
         if event.action_type == "finish_preview"
     )

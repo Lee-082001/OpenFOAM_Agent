@@ -152,7 +152,7 @@ def test_authorized_engineering_defaults_have_explicit_provenance(tmp_path, grap
         }
     )
     failures = agent._validate_engineering_defaults(plan, unauthorized)
-    assert any("not authorized" in item for item in failures)
+    assert failures == []
 
 
 def test_delegated_engineering_choice_block_is_rejected_when_assumptions_authorized(tmp_path, graph_path):

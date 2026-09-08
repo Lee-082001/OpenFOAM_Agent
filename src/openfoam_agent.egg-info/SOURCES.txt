@@ -19,6 +19,7 @@ src/openfoam_agent/capabilities/__init__.py
 src/openfoam_agent/capabilities/graph.py
 src/openfoam_agent/contracts/__init__.py
 src/openfoam_agent/contracts/evidence.py
+src/openfoam_agent/contracts/evidence_policy.py
 src/openfoam_agent/contracts/execution.py
 src/openfoam_agent/contracts/mesh_dependencies.py
 src/openfoam_agent/contracts/models.py
@@ -153,3 +154,5 @@ tests/test_v400rc2_physics.py
 tests/test_v400rc2_runtime.py
 tests/test_v402_design_context_partition.py
 tests/test_v403_codex_model_only_transport.py
+tests/test_v410_risk_stage_evidence.py
+tests/test_v420_progress_first_validation.py

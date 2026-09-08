@@ -40,6 +40,12 @@ def region_mesh_digest(workspace, region: str) -> str:
 
 
 def validate_design(plan, intake) -> list[str]:
+    """Design-stage hard checks only.
+
+    v4.2 deliberately defers region/file completeness to authoring and pre-solve
+    validation. The design stage only blocks if confirmed user requirements are
+    dropped or if a binding points outside the declared safe case-file namespace.
+    """
     failures = []
     ids = {x.id for x in intake.facts if x.category != "context"}
     if set(plan.confirmed_fact_ids) != ids:
@@ -53,19 +59,4 @@ def validate_design(plan, intake) -> list[str]:
             refs |= {x.path for x in [*binding.numeric_relation.numerator, *binding.numeric_relation.denominator]}
         if refs - required:
             failures.append(f"Design binding {binding.fact_id} references undeclared files: {sorted(refs - required)}")
-    try:
-        layouts = region_layouts(plan)
-        for layout in layouts:
-            if layout.region:
-                for name in ("fvSchemes", "fvSolution"):
-                    if f"{layout.system_dir}/{name}" not in required:
-                        failures.append(f"Design lacks {layout.system_dir}/{name}.")
-                if not any(p.startswith(layout.field_dir + "/") for p in required):
-                    failures.append(f"Design lacks initial fields for region {layout.region}.")
-        names = {x.region for x in layouts}
-        for interface in plan.interfaces:
-            if interface.region == interface.neighbour_region or {interface.region, interface.neighbour_region} - names:
-                failures.append("Design interface references invalid region topology.")
-    except ValueError as exc:
-        failures.append(str(exc))
     return failures

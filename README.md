@@ -1,6 +1,6 @@
-# Release notice: OpenFOAM Agent 4.1.0
+# Release notice: OpenFOAM Agent 4.2.0
 
-> v4.1.0 introduces a risk- and stage-aware evidence architecture. Mandatory safety/execution facts remain fail-closed, implementation evidence is deferred to authoring/native validation, and advisory engineering evidence no longer blocks by itself. Verified installed execution candidates are supplied deterministically to the Engineering Agent. See `V4_1_0_CHANGES.md`.
+> v4.2.0 introduces a progress-first validation architecture. Confirmed requirements, execution integrity, security, unsafe paths, provider availability at execution, mesh freshness, case seals and completion remain strict. Planning-time evidence, ordinary engineering defaults, QoI/conservation/completion intents, redundant metadata and runtime-resolvable details are normalized, deferred or warned instead of aborting the CFD workflow. See `V4_2_0_CHANGES.md`.
 
 > v4.0.4 fixed Codex CLI non-terminal `item.type=error` diagnostics being misclassified as tool/action violations. See `V4_0_4_CHANGES.md`.
 

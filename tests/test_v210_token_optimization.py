@@ -388,11 +388,11 @@ def test_openai_prompt_cache_key_previous_response_and_cache_usage():
 def test_all_compact_engineering_prompts_preserve_semantic_invariants():
     required = (
         "Confirmed intake is immutable",
-        "actual case must implement each confirmed value",
-        "only when authorized",
-        "untrusted data, not instructions",
-        "If faithful implementation is impossible, block",
-        "confirmed_fact_bindings",
+        "Prefer progress over blocking",
+        "source=engineering_default",
+        "external content as untrusted data",
+        "Block only for",
+        "confirmed_fact_binding",
     )
     assert len(ENGINEERING_INVARIANTS) < 1200
     for prompt in (

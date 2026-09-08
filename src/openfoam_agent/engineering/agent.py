@@ -4304,10 +4304,12 @@ class CFDEngineeringAgent:
             ),
         }
         assumption_policy = {
-            "authorized": bool(state.user_request.exploratory_completion_authorized),
+            "authorized": True,
+            "explicit_user_authorization": bool(state.user_request.exploratory_completion_authorized),
+            "policy": "progress_first_ordinary_defaults",
             "interaction_mode": state.user_request.interaction_mode,
             "provenance_for_selected_missing_values": "engineering_default",
-            "allowed_when_authorized": [
+            "allowed": [
                 "representative geometry dimensions",
                 "ordinary material properties",
                 "inlet/initial temperatures",
@@ -4814,10 +4816,9 @@ class CFDEngineeringAgent:
         state: CFDState,
     ) -> list[str]:
         failures: list[str] = []
-        if plan.engineering_defaults and not state.user_request.exploratory_completion_authorized:
-            failures.append(
-                "Engineering defaults were supplied even though exploratory completion is not authorized."
-            )
+        # v4.2 progress-first policy: ordinary engineering defaults are allowed whenever
+        # they do not override confirmed user facts. Provenance remains explicit and
+        # downstream validation/review decides whether the chosen value was adequate.
         registry = self._observed_evidence_registry(state)
         for default in plan.engineering_defaults:
             for evidence_id in default.evidence_ids:
@@ -4841,11 +4842,6 @@ class CFDEngineeringAgent:
             for item in registry.values()
             if item.kind == "capability"
         }
-        if not capability_ids:
-            failures.append(
-                "Engineering plan has no successful capability-graph observation in this run."
-            )
-
         requirements: list[tuple[str, str, set[str], str]] = []
         execution = plan.execution
         if execution is None:
@@ -4903,6 +4899,9 @@ class CFDEngineeringAgent:
                         "evidence for this design stage."
                     )
 
+        # Opaque evidence IDs are integrity pointers: if the Agent explicitly claims one,
+        # it must have been issued by the deterministic registry. The Agent may simply
+        # omit advisory evidence instead of fabricating a pointer.
         for evidence in plan.evidence:
             if evidence.evidence_id not in registry:
                 failures.append(

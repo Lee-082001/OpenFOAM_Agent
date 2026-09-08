@@ -5,14 +5,14 @@ import json
 import re
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from pydantic.json_schema import SkipJsonSchema
 from openfoam_agent.contracts.models import ConservationCheck
 from openfoam_agent.contracts.models import (ImplementationEvidenceBinding, ParallelExecution, RegionCaseLayout, RegionInterface, CompletionContract, QuantityOfInterest)
 
 
 class _EngineeringModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
 
 ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT = 24
@@ -437,42 +437,78 @@ class EngineeringPlan(_EngineeringModel):
     postprocess_strategy: list[str] = Field(default_factory=list, max_length=40)
     confirmed_intake_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_progressive_plan(cls, value: Any):
+        """Normalize redundant/optional planning metadata instead of rejecting a CFD design.
+
+        Confirmed-fact identity and unsafe paths remain strict later. Duplicate audit metadata,
+        redundant solver mirrors and optional result-analysis intent are controller concerns, not
+        reasons to discard an otherwise usable engineering plan.
+        """
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        for key in ("confirmed_fact_ids", "required_case_files"):
+            raw = data.get(key) or []
+            data[key] = list(dict.fromkeys(str(x) for x in raw if str(x).strip()))
+        # Binding file references are redundant plan metadata. Promote safe references
+        # into required_case_files rather than rejecting the plan for an omission.
+        required = list(data.get("required_case_files") or [])
+        for binding in data.get("confirmed_fact_bindings") or []:
+            if not isinstance(binding, dict):
+                continue
+            refs = list(binding.get("case_files") or [])
+            refs += [a.get("path") for a in (binding.get("case_assertions") or []) if isinstance(a, dict)]
+            rel = binding.get("numeric_relation") or {}
+            if isinstance(rel, dict):
+                for side in ("numerator", "denominator"):
+                    refs += [t.get("path") for t in (rel.get(side) or []) if isinstance(t, dict)]
+            for ref in refs:
+                text = str(ref or "")
+                if re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", text) and ".." not in text and text not in required:
+                    required.append(text)
+        data["required_case_files"] = required
+
+        for key, ident in (("confirmed_fact_bindings", "fact_id"), ("evidence", "evidence_id"), ("engineering_defaults", "parameter")):
+            raw = data.get(key) or []
+            out, seen = [], set()
+            for item in raw:
+                if not isinstance(item, dict):
+                    out.append(item); continue
+                token = str(item.get(ident, "")).casefold() if ident == "parameter" else str(item.get(ident, ""))
+                if token and token in seen:
+                    continue
+                if token:
+                    seen.add(token)
+                out.append(item)
+            data[key] = out
+        execution = data.get("execution")
+        if isinstance(execution, dict):
+            driver = execution.get("driver")
+            if driver == "foamRun":
+                if execution.get("solver_module"):
+                    data["solver"] = execution["solver_module"]
+                if execution.get("solver_provider_id"):
+                    data["solver_provider_id"] = execution["solver_provider_id"]
+            elif driver == "foamMultiRun":
+                data["solver"] = "foamMultiRun"
+                if execution.get("driver_provider_id"):
+                    data["solver_provider_id"] = execution["driver_provider_id"]
+            elif driver:
+                data["solver"] = driver
+                if execution.get("driver_provider_id"):
+                    data["solver_provider_id"] = execution["driver_provider_id"]
+        return data
+
     @model_validator(mode="after")
     def validate_unique_audit_fields(self) -> Self:
-        if len(self.confirmed_fact_ids) != len(set(self.confirmed_fact_ids)):
-            raise ValueError("Engineering plan contains duplicate confirmed fact IDs.")
         binding_ids = [item.fact_id for item in self.confirmed_fact_bindings]
-        if len(binding_ids) != len(set(binding_ids)):
-            raise ValueError("Engineering plan contains duplicate confirmed fact bindings.")
         if set(binding_ids) != set(self.confirmed_fact_ids):
             raise ValueError("Engineering plan confirmed fact bindings must exactly cover confirmed_fact_ids.")
-        if len(self.required_case_files) != len(set(self.required_case_files)):
-            raise ValueError("Engineering plan contains duplicate required case files.")
         for path in self.required_case_files:
             if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
                 raise ValueError(f"Unsafe required case file path: {path}")
-        evidence_ids = [item.evidence_id for item in self.evidence]
-        if len(evidence_ids) != len(set(evidence_ids)):
-            raise ValueError("Engineering plan contains duplicate evidence IDs.")
-        default_parameters = [item.parameter.casefold() for item in self.engineering_defaults]
-        if len(default_parameters) != len(set(default_parameters)):
-            raise ValueError("Engineering plan contains duplicate engineering-default parameters.")
-        if self.execution is not None:
-            if self.execution.driver == "foamRun":
-                if self.solver != self.execution.solver_module:
-                    raise ValueError("EngineeringPlan.solver must mirror the foamRun solver_module.")
-                if self.solver_provider_id != self.execution.solver_provider_id:
-                    raise ValueError("EngineeringPlan.solver_provider_id must mirror the foamRun solver provider.")
-            elif self.execution.driver == "foamMultiRun":
-                if self.solver != "foamMultiRun":
-                    raise ValueError("EngineeringPlan.solver must be foamMultiRun for multi-region execution.")
-                if self.solver_provider_id != self.execution.driver_provider_id:
-                    raise ValueError("EngineeringPlan.solver_provider_id must mirror the foamMultiRun driver provider.")
-            else:
-                if self.solver != self.execution.driver:
-                    raise ValueError("EngineeringPlan.solver must mirror a direct solver application driver.")
-                if self.solver_provider_id != self.execution.driver_provider_id:
-                    raise ValueError("EngineeringPlan.solver_provider_id must mirror the direct driver provider.")
         return self
 
     def digest(self) -> str:
@@ -1201,7 +1237,33 @@ def _route_action_payload(value: Any, routes: dict[str, type[_EngineeringModel]]
     if model is None:
         return value
     normalized = dict(value)
-    normalized["action"] = model.model_validate(raw_action)
+    try:
+        normalized["action"] = model.model_validate(raw_action)
+    except ValidationError as exc:
+        # Progress-first structured-output recovery: planning-time result-analysis
+        # details are optional and often cannot be concrete before runtime. If *all*
+        # validation failures are confined to those sections, discard only those
+        # malformed optional sections and preserve the CFD design. Never apply this
+        # fallback to confirmed facts, execution/provider fields, paths, or authoring.
+        if action_type != "design_case" or not isinstance(raw_action.get("plan"), dict):
+            raise
+        optional = {"quantities_of_interest", "conservation_checks", "completion", "implementation_evidence_bindings"}
+        roots = set()
+        for error in exc.errors():
+            loc = tuple(error.get("loc") or ())
+            # model_validate(raw_action) reports plan.<field>...
+            if len(loc) >= 2 and loc[0] == "plan":
+                roots.add(str(loc[1]))
+            elif loc:
+                roots.add(str(loc[0]))
+        if not roots or not roots.issubset(optional):
+            raise
+        retry_action = dict(raw_action)
+        retry_plan = dict(retry_action["plan"])
+        for field in roots:
+            retry_plan[field] = None if field == "completion" else []
+        retry_action["plan"] = retry_plan
+        normalized["action"] = model.model_validate(retry_action)
     return normalized
 
 

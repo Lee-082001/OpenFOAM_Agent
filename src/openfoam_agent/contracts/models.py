@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Contract(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
 
 class ResourceLimits(Contract):
@@ -125,6 +125,7 @@ class ImplementationEvidenceBinding(Contract):
 
 class CompletionContract(Contract):
     mode: Literal["transient", "steady", "custom"]
+    resolution_state: Literal["intent", "resolved"] = "intent"
     start_time: float = 0.0
     end_time: float | None = None
     minimum_steps: int = Field(default=1, ge=1)
@@ -139,10 +140,10 @@ class CompletionContract(Contract):
             raise ValueError("Completion start time must be finite.")
         if self.end_time is not None and (not math.isfinite(self.end_time) or self.end_time <= self.start_time):
             raise ValueError("Completion end time must exceed the start time.")
-        if self.mode == "transient" and self.end_time is None:
-            raise ValueError("Transient completion requires an end time.")
-        if self.mode == "steady" and not self.residual_thresholds:
-            raise ValueError("Steady completion requires explicit residual thresholds.")
+        if self.resolution_state == "resolved" and self.mode == "transient" and self.end_time is None:
+            raise ValueError("Resolved transient completion requires an end time.")
+        if self.resolution_state == "resolved" and self.mode == "steady" and not self.residual_thresholds:
+            raise ValueError("Resolved steady completion requires explicit residual thresholds.")
         if any(not math.isfinite(v) or v <= 0 for v in (item.value for item in self.residual_thresholds)):
             raise ValueError("Residual thresholds must be finite and positive.")
         return self
@@ -151,7 +152,8 @@ class CompletionContract(Contract):
 class NativeFieldReduction(Contract):
     quantity_kind: Literal["temperature", "pressure", "density", "mass_flow", "volume_flow", "heat_rate", "mass", "energy"]
     field: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
-    time_names: list[str] = Field(min_length=1, max_length=1000)
+    resolution_state: Literal["intent", "resolved"] = "intent"
+    time_names: list[str] = Field(default_factory=list, max_length=1000)
     reduction: Literal["patch_sum", "area_integral", "area_mean", "volume_integral", "volume_mean", "cell_minimum", "cell_maximum"]
     patches: list[str] = Field(default_factory=list, max_length=200)
     dimensions: tuple[int, int, int, int, int, int, int]
@@ -159,6 +161,8 @@ class NativeFieldReduction(Contract):
     @model_validator(mode="after")
     def validate_observation(self) -> Self:
         import re
+        if self.resolution_state != "resolved":
+            return self
         if any(not re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", t) or not math.isfinite(float(t)) for t in self.time_names):
             raise ValueError("Field observation requires literal finite time directory names.")
         times = [float(t) for t in self.time_names]
@@ -182,25 +186,36 @@ class RegionBalance(Contract):
 
     @model_validator(mode="after")
     def validate_fields(self) -> Self:
-        if (self.storage_mode == "density_field") != bool(self.storage_density_field):
-            raise ValueError("Storage mode and density field must agree.")
-        if (self.source_mode == "density_field") != bool(self.source_density_field):
-            raise ValueError("Source mode and density field must agree.")
+        # RegionBalance can be emitted as design intent before result fields exist.
+        # Normalize harmless mode/field disagreements instead of rejecting the whole plan.
+        if self.storage_density_field and self.storage_mode != "density_field":
+            self.storage_mode = "density_field"
+        elif not self.storage_density_field and self.storage_mode == "density_field":
+            self.storage_mode = "steady"
+        if self.source_density_field and self.source_mode != "density_field":
+            self.source_mode = "density_field"
+        elif not self.source_density_field and self.source_mode == "density_field":
+            self.source_mode = "zero"
         return self
 
 
 class ConservationCheck(Contract):
     id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
     kind: Literal["mass", "energy", "volume"]
-    regions: list[RegionBalance] = Field(min_length=1, max_length=30)
-    time_names: list[str] = Field(min_length=2, max_length=1000)
-    absolute_tolerance: float = Field(ge=0, allow_inf_nan=False)
-    relative_tolerance: float = Field(ge=0, le=1, allow_inf_nan=False)
+    resolution_state: Literal["intent", "resolved"] = "intent"
+    regions: list[RegionBalance] = Field(default_factory=list, max_length=30)
+    time_names: list[str] = Field(default_factory=list, max_length=1000)
+    absolute_tolerance: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    relative_tolerance: float = Field(default=0.05, ge=0, le=1, allow_inf_nan=False)
     check_interfaces: bool = True
 
     @model_validator(mode="after")
     def validate_balance(self) -> Self:
-        NativeFieldReduction(quantity_kind="temperature", field="probe", time_names=self.time_names, reduction="volume_mean", dimensions=(0,0,0,0,0,0,0))
+        if self.resolution_state != "resolved":
+            return self
+        NativeFieldReduction(quantity_kind="temperature", field="probe", resolution_state="resolved", time_names=self.time_names, reduction="volume_mean", dimensions=(0,0,0,0,0,0,0))
+        if not self.regions:
+            raise ValueError("Resolved conservation check requires at least one region.")
         if len({r.region for r in self.regions}) != len(self.regions):
             raise ValueError("Conservation region names must be unique.")
         return self
@@ -209,14 +224,15 @@ class ConservationCheck(Contract):
 class QuantityOfInterest(Contract):
     id: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
     quantity: str = Field(min_length=1)
+    resolution_state: Literal["intent", "resolved"] = "intent"
     region: str = ""
     selection: str = ""
-    unit: str = Field(min_length=1)
+    unit: str = Field(default="unknown", min_length=1)
     source_path: str = ""
     native_field: NativeFieldReduction | None = None
     time_column: int = Field(default=0, ge=0)
     value_column: int = Field(default=1, ge=0)
-    operation: Literal["time_mean", "rms", "minimum", "maximum", "last", "integral", "difference", "balance"]
+    operation: Literal["time_mean", "rms", "minimum", "maximum", "last", "integral", "difference", "balance"] = "last"
     other_source_path: str | None = None
     other_value_column: int = Field(default=1, ge=0)
     start_time: float | None = None
@@ -228,10 +244,11 @@ class QuantityOfInterest(Contract):
 
     @model_validator(mode="after")
     def validate_quantity_window(self) -> Self:
-        if self.native_field is None and not self.source_path:
-            raise ValueError("Scalar table source or native field observation is required.")
-        if self.native_field is not None and (self.source_path or self.operation in {"difference", "balance"} or self.other_source_path):
-            raise ValueError("Native field analysis must not ambiguously mix table sources or table-difference operations.")
+        if self.resolution_state == "resolved":
+            if self.native_field is None and not self.source_path:
+                raise ValueError("Resolved quantity requires a scalar table source or native field observation.")
+            if self.native_field is not None and (self.source_path or self.operation in {"difference", "balance"} or self.other_source_path):
+                raise ValueError("Resolved native-field analysis cannot mix table sources or table-difference operations.")
         for v in (self.start_time, self.end_time, self.expected_min, self.expected_max):
             if v is not None and not math.isfinite(v):
                 raise ValueError("Quantity bounds must be finite.")
@@ -239,6 +256,6 @@ class QuantityOfInterest(Contract):
             raise ValueError("Quantity time interval is reversed.")
         if self.expected_min is not None and self.expected_max is not None and self.expected_min > self.expected_max:
             raise ValueError("Quantity expected range is reversed.")
-        if self.operation in {"difference", "balance"} and self.other_source_path is None:
-            raise ValueError("Difference/balance needs two scalar data sources.")
+        if self.resolution_state == "resolved" and self.operation in {"difference", "balance"} and self.other_source_path is None:
+            raise ValueError("Resolved difference/balance needs two scalar data sources.")
         return self

@@ -649,7 +649,8 @@ class CFDPostProcessingAgent:
         if force_analysis is not None:
             merged.extend(force_analysis.limitations)
         quantities = self._validated_quantity_analyses(state, merged)
-        missing_quantities = {q.id for q in state.engineering_plan.quantities_of_interest}-{q["id"] for q in quantities}
+        required_quantity_ids = {q.id for q in state.engineering_plan.quantities_of_interest if getattr(q, "resolution_state", "resolved") == "resolved"}
+        missing_quantities = required_quantity_ids-{q["id"] for q in quantities}
         quantities_failed = bool(missing_quantities) or any(not q.get("declared_bounds_satisfied",False) for q in quantities)
         if missing_quantities: merged.append("Requested quantities are missing or stale: "+", ".join(sorted(missing_quantities)))
         if quantities_failed: merged.append("Requested quantity verification is incomplete or outside declared bounds.")
@@ -663,7 +664,8 @@ class CFDPostProcessingAgent:
                 conservation.append(analysis)
             except (ValueError,OSError) as exc:
                 merged.append(str(exc))
-        missing_checks = {c.id for c in state.engineering_plan.conservation_checks}-{c["id"] for c in conservation}
+        required_check_ids = {c.id for c in state.engineering_plan.conservation_checks if getattr(c, "resolution_state", "resolved") == "resolved"}
+        missing_checks = required_check_ids-{c["id"] for c in conservation}
         balance_failed = bool(missing_checks) or any(not c["conservation_verified"] for c in conservation)
         required_verification_failed = balance_failed or quantities_failed
         if missing_checks: merged.append("Requested conservation checks are missing or stale: "+", ".join(sorted(missing_checks)))
