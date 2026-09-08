@@ -43,12 +43,12 @@ def task_action(task):
 
 
 def test_rc2_partition_exact_file_fact_and_syntax_coverage():
-    state,plan,payload=partition_payload();queue=compile_tasks('',payload,16000)
+    state,plan,payload=partition_payload();queue=compile_tasks('',payload,14000)
     assert 1<len(queue['tasks'])<=8
     assert [p for t in queue['tasks'] for p in t['authoring_task']['paths']]==plan.required_case_files
     ids=set()
     for task in queue['tasks']:
-        assert len(build_bounded_json_prompt('',task,max_chars=16000).prompt)<=16000
+        assert len(build_bounded_json_prompt('',task,max_chars=14000).prompt)<=14000
         ids|={f['id'] for f in task['confirmed_intake']['facts']}
         for record in task['implementation_evidence_pack']['records']:assert record['content'].endswith('grammar\n')
         assert task['frozen_engineering_plan']['interfaces']==payload['frozen_engineering_plan']['interfaces']
@@ -69,7 +69,7 @@ def test_rc2_partition_transitive_fact_dependencies_not_silently_dropped():
 
 @pytest.mark.parametrize('mutation',['task_id','missing_file','duplicate_file','changed_plan','early_native'])
 def test_rc2_partition_rejects_bad_response_before_commit(mutation):
-    _,plan,payload=partition_payload();queue=compile_tasks('',payload,16000);action=task_action(queue['tasks'][0]);before=deepcopy(queue)
+    _,plan,payload=partition_payload();queue=compile_tasks('',payload,14000);action=task_action(queue['tasks'][0]);before=deepcopy(queue)
     if mutation=='task_id':action.task_id='invented'
     if mutation=='missing_file':action.files=[]
     if mutation=='duplicate_file':action.files.append(action.files[0])
@@ -86,7 +86,7 @@ def test_rc2_indivisible_global_contract_fails_without_truncation():
 
 def test_rc2_partition_checkpoint_restores_pending_file_tasks(tmp_path,graph_path):
     state,plan,payload=partition_payload();agent=CFDEngineeringAgent(ScriptedLLM([]),workspace=tmp_path,capability_db=graph_path,tools=FakeOpenFOAMTools())
-    agent._draft_design_plan=plan;agent._authoring_task_queue=compile_tasks('',payload,16000)
+    agent._draft_design_plan=plan;agent._authoring_task_queue=compile_tasks('',payload,14000)
     accept_task(agent._authoring_task_queue,task_action(agent._authoring_task_queue['tasks'][0]),plan)
     agent.checkpoint(state,'partition-test')
     other=CFDEngineeringAgent(ScriptedLLM([]),workspace=tmp_path,capability_db=graph_path,tools=FakeOpenFOAMTools())
@@ -97,23 +97,31 @@ def test_rc2_partition_checkpoint_restores_pending_file_tasks(tmp_path,graph_pat
 
 @pytest.mark.parametrize('phase',['prepare','human_revision','runtime_repair'])
 @pytest.mark.parametrize('kind',['write','patch'])
-def test_rc2_all_primitive_mutation_phases_require_observed_syntax(tmp_path,graph_path,phase,kind):
+def test_v421_primitive_mutations_do_not_need_documentary_syntax_evidence(tmp_path,graph_path,phase,kind):
     state=make_state(syntax_evidence=False);plan=make_plan(state.intake)
     agent=CFDEngineeringAgent(ScriptedLLM([]),workspace=tmp_path,capability_db=graph_path,tools=FakeOpenFOAMTools())
     path='system/fvSolution';original=foam_header(path)+'value 1;\n';agent.workspace.write_text(path,original)
     state.engineering_plan=plan;state.case_seal=agent.workspace.seal(plan);state.current_state=State.SOLVE_READY;state.approve_solve()
     action=WriteCaseFileAction(type='write_case_file',path=path,content=original.replace('value 1','value 2')) if kind=='write' else PatchCaseFileAction(type='patch_case_file',patch=CaseFilePatch(path=path,old='value 1',new='value 2'))
     event=agent._dispatch_tool_action(action,step=1,native_execution=False,phase=phase,state=state)
-    assert not event.success and 'syntax evidence required' in event.summary
-    assert agent.workspace.read_text(path)==original
+    assert event.success
+    assert 'value 2' in agent.workspace.read_text(path)
 
 
-def test_rc2_legacy_whole_bundle_cannot_bypass_syntax_gate(tmp_path,graph_path):
+def test_v421_progress_first_authoring_keeps_executable_content_hard_blocked(tmp_path,graph_path):
+    state=make_state(syntax_evidence=False);agent=CFDEngineeringAgent(ScriptedLLM([]),workspace=tmp_path,capability_db=graph_path,tools=FakeOpenFOAMTools())
+    action=WriteCaseFileAction(type='write_case_file',path='system/controlDict',content=foam_header('system/controlDict')+'#codeStream { code #{ system(\"touch /tmp/nope\"); #}; }\n')
+    event=agent._dispatch_tool_action(action,step=1,native_execution=False,phase='prepare',state=state)
+    assert not event.success
+    assert 'unsafe' in event.summary.lower() or 'executable' in event.summary.lower()
+
+
+def test_v421_legacy_raw_bundle_no_longer_needs_documentary_syntax_evidence(tmp_path,graph_path):
     state=make_state(syntax_evidence=False);agent=CFDEngineeringAgent(ScriptedLLM([]),workspace=tmp_path,capability_db=graph_path,tools=FakeOpenFOAMTools())
     action=_full_execution_plan(state)
     agent._execute_case_plan(state,action,llm_step=1,progress_phase='engineering',progress_step=1,progress_limit=20,native_execution=False)
-    assert not agent.workspace.file_seals()
-    assert any('syntax evidence required' in e.output_excerpt for e in state.engineering_events)
+    assert agent.workspace.file_seals()
+    assert not any('syntax evidence required' in e.output_excerpt for e in state.engineering_events)
 
 
 def test_rc2_reference_read_explicit_targets_unlock_legacy_mutation(tmp_path,graph_path):
@@ -203,7 +211,8 @@ def test_rc2_unbound_read_windows_all_reach_stateless_authoring_prompt():
     eid=canonical_engineering_evidence_id('openfoam_reference','test:unbound')
     assert require_authoring_evidence(state,None,['system/newFile'],evidence_ids=[eid])['complete']
     assert build_bounded_json_prompt('',{'implementation_evidence_pack':pack},max_chars=40000).prompt.endswith('}')
-    with pytest.raises(ContextBudgetError):build_bounded_json_prompt('',{'implementation_evidence_pack':pack},max_chars=10000)
+    compacted=build_bounded_json_prompt('',{'implementation_evidence_pack':pack},max_chars=10000)
+    assert compacted.compacted and len(compacted.prompt)<=10000
 
 
 def test_rc2_controller_automatically_splits_routes_and_defers_bundle_commit(tmp_path,graph_path,monkeypatch):
@@ -218,7 +227,7 @@ def test_rc2_controller_automatically_splits_routes_and_defers_bundle_commit(tmp
             self.prompts.append(prompt);task=json.loads(prompt[prompt.index('{'):])
             return CaseAuthoringTurn(action=task_action(task))
     llm=Author();agent=CFDEngineeringAgent(llm,workspace=tmp_path,capability_db=graph_path,tools=FakeOpenFOAMTools(),
-        policy=EngineeringPolicy(max_model_prompt_chars=23000,preload_capabilities=False,compact_phase_schemas=True,staged_case_authoring=True))
+        policy=EngineeringPolicy(max_model_prompt_chars=14000,preload_capabilities=False,compact_phase_schemas=True,staged_case_authoring=True))
     agent._draft_design_plan=plan;calls=[]
     # Observe the existing transactional executor boundary, not a native CFD run.
     monkeypatch.setattr(agent,'_execute_case_plan',lambda state,action,**kw:calls.append(action))

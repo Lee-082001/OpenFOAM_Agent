@@ -53,7 +53,7 @@ def test_v410_design_acceptance_no_longer_requires_file_syntax_evidence(tmp_path
     assert state.engineering_events[-1].success is True
 
 
-def test_v410_typed_authoring_can_use_deterministic_validation_but_raw_text_stays_gated():
+def test_v421_raw_and_typed_authoring_use_deterministic_validation_not_document_gate():
     state = make_state(syntax_evidence=False)
     plan = make_plan(state.intake)
     plan.required_case_files = ["system/controlDict"]
@@ -64,7 +64,7 @@ def test_v410_typed_authoring_can_use_deterministic_validation_but_raw_text_stay
         state, plan, raw_paths=["system/controlDict"], typed_paths=[]
     )
     assert typed == []
-    assert raw and "Observed, explicit syntax evidence required before authoring" in raw[0]
+    assert raw == []
 
 
 def test_v410_context_partition_preserves_policy_and_verified_candidates():

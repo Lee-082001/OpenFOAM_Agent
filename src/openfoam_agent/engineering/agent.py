@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from openfoam_agent.contracts.evidence import implementation_evidence_pack, evidence_coverage_failures, require_authoring_evidence, authoring_prompt_evidence, authoring_evidence_failures_for_representations
+from openfoam_agent.contracts.evidence import implementation_evidence_pack, evidence_coverage_failures, authoring_prompt_evidence, advisory_authoring_evidence_summary
 from openfoam_agent.contracts.evidence_policy import POLICY_SUMMARY, provider_is_sufficient
 from openfoam_agent.engineering.authoring_tasks import compile_tasks, accept_task
 from openfoam_agent.llm.context import ContextBudgetError
@@ -1104,16 +1104,11 @@ class CFDEngineeringAgent:
         # repair cascade.
         candidate_bundle = {path: content for path, content in rendered_files}
         bundle_failures = self.workspace.validate_candidate_bundle(candidate_bundle)
-        # v4.1 risk/stage-aware evidence: raw free-form text remains explicitly
-        # evidence-gated. Typed dictionaries and structured blockMesh are rendered by
-        # deterministic Python and proceed to parser/native validation without forcing
-        # one observed source excerpt per ordinary file.
-        raw_paths = [item.path for item in execution.files]
-        typed_paths = [item.path for item in execution.typed_dictionaries]
-        bundle_failures.extend(authoring_evidence_failures_for_representations(
-            state, execution.plan, raw_paths=raw_paths, typed_paths=typed_paths,
-            block_mesh_path=(execution.block_mesh.path if execution.block_mesh is not None else None),
-        ))
+        # v4.2.1 progress-first authoring: syntax/reference evidence is advisory
+        # provenance, not a write permission token. Raw and typed files are both
+        # admitted to the deterministic safety/header/parser/native pipeline below.
+        # Security-sensitive directives, unsafe paths/libraries and native commands
+        # remain fail-closed in CaseWorkspace/SafeRunner.
 
         # v3.0.2: solve-critical OpenFOAM files must satisfy the IOobject-facing
         # FoamFile contract before *any* candidate file is committed. This closes the
@@ -3585,10 +3580,10 @@ class CFDEngineeringAgent:
                 text = self.workspace.read_text(action.path)
                 return self._event(step, action.type, True, f"Read {action.path}.", text)
 
-            if isinstance(action, (WriteCaseFileAction, PatchCaseFileAction)):
-                path = action.patch.path if isinstance(action, PatchCaseFileAction) else action.path
-                plan = self._pending_execution_plan or self._draft_design_plan or (state.engineering_plan if state else None)
-                require_authoring_evidence(state, plan, [path], evidence_ids=action.evidence_ids)
+            # v4.2.1: do not require a reference excerpt merely to mutate an
+            # OpenFOAM case file. Workspace policy rejects executable directives,
+            # unsafe includes/libraries/paths and oversized content; downstream
+            # dictionary/native validation establishes implementation correctness.
 
             if isinstance(action, WriteCaseFileAction):
                 if action.path.startswith("postprocessConfig/"):
@@ -4694,8 +4689,8 @@ class CFDEngineeringAgent:
             evidence_plan = self._pending_execution_plan or self._draft_design_plan or state.engineering_plan
             if self._pending_candidate_execution is not None:
                 evidence_plan = self._pending_candidate_execution.plan
-            payload["implementation_evidence_pack"] = authoring_prompt_evidence(state,evidence_plan)
-            instruction += " Every case mutation requires explicit file bindings to observed syntax. Use target_case_files on reference reads or evidence_ids on primitive writes/patches; search summaries alone do not authorize writes. "
+            payload["implementation_evidence_summary"] = advisory_authoring_evidence_summary(state, evidence_plan)
+            instruction += " Observed syntax/reference evidence is advisory provenance. Use it when helpful, but missing syntax evidence alone must not block a file mutation; deterministic workspace, parser, native validation and safety gates decide whether the artifact can proceed. "
 
         if contract_phase in {"replan", "block_mesh_replan"}:
             payload["retained_candidate"] = self._candidate_repair_context()

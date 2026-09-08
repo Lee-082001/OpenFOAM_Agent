@@ -1,4 +1,10 @@
-# Release notice: OpenFOAM Agent 4.2.0
+## v4.2.1 progress-first authoring correction
+
+- Syntax/reference evidence is now advisory provenance rather than a file-mutation permission token.
+- Raw and typed OpenFOAM files both proceed through deterministic workspace safety, header/parser checks, pre-solve validation and native OpenFOAM checks.
+- Repair/revision prompts receive compact evidence summaries instead of protected full evidence bodies, reducing secondary ContextBudgetError failures.
+
+# Release notice: OpenFOAM Agent 4.2.1
 
 > v4.2.0 introduces a progress-first validation architecture. Confirmed requirements, execution integrity, security, unsafe paths, provider availability at execution, mesh freshness, case seals and completion remain strict. Planning-time evidence, ordinary engineering defaults, QoI/conservation/completion intents, redundant metadata and runtime-resolvable details are normalized, deferred or warned instead of aborting the CFD workflow. See `V4_2_0_CHANGES.md`.
 

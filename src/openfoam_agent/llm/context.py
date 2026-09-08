@@ -254,8 +254,8 @@ _PROTECTED_KEYS = frozenset({
     "frozen_engineering_plan", "approved_plan", "engineering_plan", "plan",
     "required_case_files", "required_files", "confirmed_fact_bindings", "confirmed_fact_ids",
     "execution", "execution_approval", "region_layouts", "interfaces", "geometry",
-    "geometry_data", "implementation_evidence_pack", "bindings", "current_case_files",
-    "authoring_task", "authoring_contract", "conservation_checks", "assets", "physical_quantities", "quantity_analyses", "quantities_of_interest", "execution_contract",
+    "geometry_data", "bindings", "current_case_files",
+    "authoring_task", "authoring_contract", "assets", "physical_quantities", "execution_contract",
 })
 
 

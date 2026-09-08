@@ -2,7 +2,7 @@
 
 Current v4 additions are organized under `contracts/`, `tools/execution_policy.py`, `tools/dictionary_policy.py`, `tools/assets.py`, `runtime/completion.py`, `runtime/parallel.py`, `workflow/checkpoint.py`, and `postprocessing/context.py` / `quantities.py`. Engineering remains the coordinator; its full decomposition is not complete.
 
-Approval covers execution topology, physical inputs, goals and resource limits. Regions, immutable assets, syntax evidence, process accounting and completion are checked across their relevant workflow boundaries. These connections have Python/mock and synthetic-process regression evidence, not end-to-end native CFD qualification.
+Approval covers execution topology, physical inputs, goals and resource limits. Regions, immutable assets, process accounting and completion are checked across their relevant workflow boundaries. Syntax/reference evidence is retained as advisory provenance; file mutation authorization comes from deterministic workspace/content safety plus parser/native validation rather than documentary completeness. These connections have Python/mock and synthetic-process regression evidence, not end-to-end native CFD qualification.
 
 See `docs/V4_AUDIT_33.json` and `docs/V4_IMPLEMENTATION_VERIFICATION_KO.md` for exact implementation/test mapping. The following architecture describes the historical v3.6 and earlier design.
 
@@ -10,6 +10,11 @@ See `docs/V4_AUDIT_33.json` and `docs/V4_IMPLEMENTATION_VERIFICATION_KO.md` for 
 
 # OpenFOAM Agent v3.0 Architecture
 
+
+
+## v4.2.1 progress-first authoring boundary
+
+Documentary syntax evidence is no longer a permission token for `write_case_file` or `patch_case_file`. Both raw and typed artifacts may advance when the workspace sandbox/content policy accepts them. Correctness is then established at the appropriate stage by deterministic `FoamFile`/dictionary checks, pre-solve completeness, native OpenFOAM utilities and `checkMesh`. The hard boundary remains security and execution integrity: unsafe directives/includes, non-allowlisted libraries, path escape, unauthorized native commands, stale seals/checkMesh and approval violations still fail closed. Repair/revision prompts receive compact evidence summaries so missing or large reference bodies cannot become a secondary context-budget blocker.
 
 
 ## v3.1 semantic blockMesh topology contract
