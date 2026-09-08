@@ -1,0 +1,27 @@
+{
+  "id": "mean_temperature",
+  "quantity": "temperature",
+  "region": "",
+  "selection": "volume:all",
+  "unit": "K",
+  "operation": "time_mean",
+  "native_field": {
+    "quantity_kind": "temperature",
+    "field": "T",
+    "time_names": [
+      "1",
+      "2"
+    ],
+    "reduction": "volume_mean",
+    "patches": [],
+    "dimensions": [
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0
+    ]
+  }
+}

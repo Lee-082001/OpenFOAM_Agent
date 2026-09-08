@@ -20,6 +20,7 @@ src/openfoam_agent/capabilities/graph.py
 src/openfoam_agent/contracts/__init__.py
 src/openfoam_agent/contracts/evidence.py
 src/openfoam_agent/contracts/execution.py
+src/openfoam_agent/contracts/mesh_dependencies.py
 src/openfoam_agent/contracts/models.py
 src/openfoam_agent/contracts/quantities.py
 src/openfoam_agent/contracts/regions.py
@@ -28,6 +29,8 @@ src/openfoam_agent/data/openfoam13_capability_graph.json
 src/openfoam_agent/data/openfoam14_capability_graph.json
 src/openfoam_agent/engineering/__init__.py
 src/openfoam_agent/engineering/agent.py
+src/openfoam_agent/engineering/authoring_tasks.py
+src/openfoam_agent/engineering/design_context.py
 src/openfoam_agent/llm/__init__.py
 src/openfoam_agent/llm/claude_client.py
 src/openfoam_agent/llm/codex_client.py
@@ -47,7 +50,9 @@ src/openfoam_agent/llm/prompts/review.py
 src/openfoam_agent/postprocessing/__init__.py
 src/openfoam_agent/postprocessing/agent.py
 src/openfoam_agent/postprocessing/analysis.py
+src/openfoam_agent/postprocessing/conservation.py
 src/openfoam_agent/postprocessing/context.py
+src/openfoam_agent/postprocessing/native_fields.py
 src/openfoam_agent/postprocessing/quantities.py
 src/openfoam_agent/review/__init__.py
 src/openfoam_agent/review/agent.py
@@ -55,6 +60,7 @@ src/openfoam_agent/runtime/__init__.py
 src/openfoam_agent/runtime/completion.py
 src/openfoam_agent/runtime/orchestrator.py
 src/openfoam_agent/runtime/parallel.py
+src/openfoam_agent/runtime/restart.py
 src/openfoam_agent/schemas/__init__.py
 src/openfoam_agent/schemas/capability.py
 src/openfoam_agent/schemas/common.py
@@ -76,6 +82,7 @@ src/openfoam_agent/tools/execution_policy.py
 src/openfoam_agent/tools/foam_file.py
 src/openfoam_agent/tools/foam_serializer.py
 src/openfoam_agent/tools/installation.py
+src/openfoam_agent/tools/linux_isolation.py
 src/openfoam_agent/tools/openfoam.py
 src/openfoam_agent/tools/parsers.py
 src/openfoam_agent/tools/references.py
@@ -141,3 +148,7 @@ tests/test_v360_bounded_staged_context.py
 tests/test_v400_audit_domains.py
 tests/test_v400_execution_contracts.py
 tests/test_v400_release_edges.py
+tests/test_v400rc2_context_mesh.py
+tests/test_v400rc2_physics.py
+tests/test_v400rc2_runtime.py
+tests/test_v402_design_context_partition.py

@@ -1,0 +1,183 @@
+usage: openfoam-agent [-h] [--prepare-parallel-restart TIME_OR_LATEST]
+                      [--isolation-policy ISOLATION_POLICY] [--resume RESUME]
+                      [--geometry GEOMETRY] [--data DATA]
+                      [--import-case IMPORT_CASE] [--prompt PROMPT_OPTION]
+                      [-i] [--mode {easy,guided,strict}] [--confirm-intake]
+                      [--solve] [--dry-run]
+                      [--backend {rule-based-intake,openai,ollama,codex,claude}]
+                      [--model MODEL] [--intake-model INTAKE_MODEL]
+                      [--engineering-model ENGINEERING_MODEL]
+                      [--postprocess-model POSTPROCESS_MODEL]
+                      [--review-model REVIEW_MODEL]
+                      [--llm-max-output-tokens LLM_MAX_OUTPUT_TOKENS]
+                      [--confirm-api-calls] [--base-url BASE_URL]
+                      [--ollama-health-timeout OLLAMA_HEALTH_TIMEOUT]
+                      [--codex-timeout CODEX_TIMEOUT]
+                      [--claude-timeout CLAUDE_TIMEOUT]
+                      [--workspace WORKSPACE] [--capability-db CAPABILITY_DB]
+                      [--progress {quiet,normal,verbose}]
+                      [--engineering-steps ENGINEERING_STEPS]
+                      [--engineering-hard-cap ENGINEERING_HARD_CAP]
+                      [--engineering-extension ENGINEERING_EXTENSION]
+                      [--engineering-context-chars ENGINEERING_CONTEXT_CHARS]
+                      [--engineering-evidence-items ENGINEERING_EVIDENCE_ITEMS]
+                      [--engineering-retrieval-cycles ENGINEERING_RETRIEVAL_CYCLES]
+                      [--finalization-steps FINALIZATION_STEPS]
+                      [--engineering-tool-budget ENGINEERING_TOOL_BUDGET]
+                      [--native-command-budget NATIVE_COMMAND_BUDGET]
+                      [--mesh-repair-cycles MESH_REPAIR_CYCLES]
+                      [--runtime-repair-cycles RUNTIME_REPAIR_CYCLES]
+                      [--runtime-repair-steps RUNTIME_REPAIR_STEPS]
+                      [--runtime-repair-tool-budget RUNTIME_REPAIR_TOOL_BUDGET]
+                      [--postprocess-steps POSTPROCESS_STEPS]
+                      [--postprocess-native-budget POSTPROCESS_NATIVE_BUDGET]
+                      [--skip-postprocess] [--json] [--output OUTPUT]
+                      [--force]
+                      [prompt]
+
+OpenFOAM Agent v2: autonomous CFD engineering behind deterministic safety
+gates.
+
+positional arguments:
+  prompt                One-shot CFD prompt.
+
+options:
+  -h, --help            show this help message and exit
+  --prepare-parallel-restart TIME_OR_LATEST
+                        With --resume: preserve partial outputs and prepare an
+                        MPI restart without running it.
+  --isolation-policy ISOLATION_POLICY
+                        Operator-owned strict Linux sandbox/quota JSON;
+                        missing OS support refuses execution.
+  --resume RESUME       Restore a checkpoint directory/file after integrity
+                        checks; /solve approval is not reused.
+  --geometry GEOMETRY   Explicitly authorize a geometry input file
+                        (repeatable).
+  --data DATA           Explicitly authorize a data/table input file
+                        (repeatable).
+  --import-case IMPORT_CASE
+                        Import immutable 0/constant/system inputs from an
+                        existing case.
+  --prompt PROMPT_OPTION
+                        Alternative one-shot prompt.
+  -i, --interactive     Conversational mode.
+  --mode {easy,guided,strict}
+                        easy authorizes exploratory completion; guided
+                        requires user wording; strict forbids it.
+  --confirm-intake      Confirm a review-ready intake and authorize bounded
+                        case preparation/mesh tools.
+  --solve               One-shot only: after a passing mesh gate, approve
+                        bounded OpenFOAM runtime execution.
+  --dry-run             Allow agent file authoring but do not execute native
+                        OpenFOAM tools or solver.
+  --backend {rule-based-intake,openai,ollama,codex,claude}
+                        rule-based-intake is an offline intake regression
+                        baseline only; autonomous engineering supports
+                        --backend openai, --backend ollama, --backend codex,
+                        or --backend claude.
+  --model MODEL         Default model for every role. OpenAI otherwise uses
+                        OPENAI_MODEL; Ollama otherwise uses OLLAMA_MODEL or
+                        gemma4:31b; Codex otherwise uses CODEX_MODEL or the
+                        Codex CLI default; Claude otherwise uses CLAUDE_MODEL
+                        or the Claude Code CLI default. Role-specific flags
+                        override it.
+  --intake-model INTAKE_MODEL
+                        Override the model used for intake analysis for the
+                        selected backend.
+  --engineering-model ENGINEERING_MODEL
+                        Override the model used for engineering, mesh/case
+                        repair, runtime repair, and confirmed revisions for
+                        the selected backend.
+  --postprocess-model POSTPROCESS_MODEL
+                        Override the model used for post-processing for the
+                        selected backend.
+  --review-model REVIEW_MODEL
+                        Override the model used for human-feedback review for
+                        the selected backend.
+  --llm-max-output-tokens LLM_MAX_OUTPUT_TOKENS
+                        Per-response LLM output-token cap (default: 24000).
+                        This bounds rate-limit reservation and prevents one
+                        structured action from reserving the model's full
+                        output window.
+  --confirm-api-calls   Explicitly authorize cloud model calls for --backend
+                        openai, --backend codex, or --backend claude. The CFD
+                        request and bounded engineering observations/log
+                        excerpts are sent to OpenAI/Codex/Claude; local
+                        absolute paths are redacted. Codex/Claude run isolated
+                        and non-persistent with model-side tools disabled or
+                        read-only.
+  --base-url BASE_URL   Ollama OpenAI-compatible base URL. Defaults to
+                        OLLAMA_BASE_URL or http://localhost:11434/v1. Only
+                        loopback URLs are accepted so remote Ollama stays
+                        behind SSH local port forwarding.
+  --ollama-health-timeout OLLAMA_HEALTH_TIMEOUT
+                        Startup Ollama /v1/models health-check timeout in
+                        seconds (default: 3).
+  --codex-timeout CODEX_TIMEOUT
+                        Maximum wall-clock seconds for one Codex CLI model
+                        call (default: 900). Normal/verbose progress emits a
+                        wait heartbeat.
+  --claude-timeout CLAUDE_TIMEOUT
+                        Maximum wall-clock seconds for one Claude Code model
+                        call (default: 900). Normal/verbose progress emits a
+                        wait heartbeat.
+  --workspace WORKSPACE
+  --capability-db CAPABILITY_DB
+  --progress {quiet,normal,verbose}
+                        Live progress verbosity: quiet disables progress,
+                        normal shows major engineering/runtime/postprocess
+                        events, verbose shows every agent action and raw
+                        OpenFOAM runtime output.
+  --engineering-steps ENGINEERING_STEPS
+                        Initial autonomous engineering LLM-turn soft budget
+                        (default: 12 turns).
+  --engineering-hard-cap ENGINEERING_HARD_CAP
+                        Absolute engineering LLM-turn cap after progress-aware
+                        extensions (default: 24).
+  --engineering-extension ENGINEERING_EXTENSION
+                        Progress-aware LLM-turn extension chunk size (default:
+                        6 turns).
+  --engineering-context-chars ENGINEERING_CONTEXT_CHARS
+                        Hard character cap for each Engineering model prompt
+                        before schema/system text (default: 18000). Smaller
+                        values reduce Codex/Claude context cost.
+  --engineering-evidence-items ENGINEERING_EVIDENCE_ITEMS
+                        Maximum evidence descriptors projected into normal
+                        Engineering turns (default: 10; decision-only turns
+                        may use two additional items).
+  --engineering-retrieval-cycles ENGINEERING_RETRIEVAL_CYCLES
+                        Maximum prepare evidence-retrieval cycles before
+                        forced design decision (default: 2).
+  --finalization-steps FINALIZATION_STEPS
+                        Plan-finalization-only actions after validated case
+                        preparation (default: 2).
+  --engineering-tool-budget ENGINEERING_TOOL_BUDGET
+                        Maximum deterministic engineering actions executed
+                        across single actions and short sequences/execution
+                        plans in one engineering round (default: 160).
+  --native-command-budget NATIVE_COMMAND_BUDGET
+                        Maximum executed OpenFOAM validation/mesh commands
+                        across engineering (default: 40).
+  --mesh-repair-cycles MESH_REPAIR_CYCLES
+                        Maximum file-repair cycles triggered by failed mesh
+                        commands (default: 6).
+  --runtime-repair-cycles RUNTIME_REPAIR_CYCLES
+                        Maximum autonomous OpenFOAM runtime failure-repair-
+                        retry cycles (default: 3).
+  --runtime-repair-steps RUNTIME_REPAIR_STEPS
+                        Maximum LLM turns inside each runtime repair cycle
+                        (default: 4).
+  --runtime-repair-tool-budget RUNTIME_REPAIR_TOOL_BUDGET
+                        Maximum deterministic actions inside each runtime
+                        repair cycle (default: 48).
+  --postprocess-steps POSTPROCESS_STEPS
+                        Maximum post-processing LLM plans after a successful
+                        solve (default: 4).
+  --postprocess-native-budget POSTPROCESS_NATIVE_BUDGET
+                        Maximum foamPostProcess executions after a successful
+                        solve (default: 8).
+  --skip-postprocess    Stop at successful OpenFOAM runtime instead of
+                        launching the automatic post-processing agent.
+  --json
+  --output OUTPUT
+  --force

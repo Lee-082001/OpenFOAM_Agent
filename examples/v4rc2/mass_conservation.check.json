@@ -1,0 +1,21 @@
+{
+  "id": "mass_closure",
+  "kind": "mass",
+  "time_names": [
+    "1",
+    "2",
+    "3"
+  ],
+  "absolute_tolerance": 1e-08,
+  "relative_tolerance": 0.001,
+  "check_interfaces": true,
+  "regions": [
+    {
+      "region": "",
+      "flux_field": "rhoPhi",
+      "storage_mode": "density_field",
+      "storage_density_field": "rho",
+      "source_mode": "zero"
+    }
+  ]
+}

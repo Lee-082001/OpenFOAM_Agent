@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/mnt/data/rc2_installed_venv/bin/openfoam-agent", line 5, in <module>
+    from openfoam_agent.cli import main
+  File "/mnt/data/rc2_installed_venv/lib/python3.13/site-packages/openfoam_agent/cli.py", line 15, in <module>
+    from openfoam_agent.conversation import ConversationSession, InteractionMode
+  File "/mnt/data/rc2_installed_venv/lib/python3.13/site-packages/openfoam_agent/conversation.py", line 9, in <module>
+    from openfoam_agent.schemas.intake import CFDIntakeSpec
+  File "/mnt/data/rc2_installed_venv/lib/python3.13/site-packages/openfoam_agent/schemas/__init__.py", line 1, in <module>
+    from .common import *
+  File "/mnt/data/rc2_installed_venv/lib/python3.13/site-packages/openfoam_agent/schemas/common.py", line 4, in <module>
+    from pydantic import BaseModel, Field
+ModuleNotFoundError: No module named 'pydantic'
