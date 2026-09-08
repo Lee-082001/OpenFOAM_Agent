@@ -1,4 +1,6 @@
-# Release notice: OpenFOAM Agent 4.0.1
+# Release notice: OpenFOAM Agent 4.0.2
+
+> v4.0.2 fixes evidence-heavy `prepare_design` context exhaustion by automatically projecting a bounded design/evidence capsule while preserving confirmed requirements. See `V4_0_2_CHANGES.md`.
 
 This candidate extends rc1 with bounded file-task authoring, shared syntax-evidence
 gates, a mesh dependency DAG, opt-in strict Linux isolation/aggregate budgets,

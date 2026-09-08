@@ -3,6 +3,7 @@ from __future__ import annotations
 from openfoam_agent.contracts.evidence import implementation_evidence_pack, evidence_coverage_failures, require_authoring_evidence, authoring_prompt_evidence
 from openfoam_agent.engineering.authoring_tasks import compile_tasks, accept_task
 from openfoam_agent.llm.context import ContextBudgetError
+from openfoam_agent.engineering.design_context import build_partitioned_design_prompt
 from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
 from openfoam_agent.tools.execution_policy import (
     deny_unapproved_engineering_solve, command_effect, ExecutionPolicyError,
@@ -4578,15 +4579,25 @@ class CFDEngineeringAgent:
 
         if contract_phase == "author_case" and self._authoring_task_queue is not None:
             payload = self._authoring_task_queue["tasks"][self._authoring_task_queue["cursor"]]
+        context_partition_metrics: dict[str, int] = {}
         try:
             prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=self.policy.max_model_prompt_chars)
         except ContextBudgetError:
-            if contract_phase != "author_case":
+            if contract_phase == "author_case":
+                self._authoring_task_queue = compile_tasks(instruction, payload, self.policy.max_model_prompt_chars)
+                self.checkpoint(state, "authoring-partition-created")
+                payload = self._authoring_task_queue["tasks"][0]
+                prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=self.policy.max_model_prompt_chars)
+            elif contract_phase in {"prepare_design", "prepare_design_decide"}:
+                prompt_result, payload, context_partition_metrics = build_partitioned_design_prompt(
+                    instruction,
+                    payload,
+                    max_chars=self.policy.max_model_prompt_chars,
+                    initial_evidence_limit=len(evidence_records),
+                )
+                self.checkpoint(state, "design-context-partitioned")
+            else:
                 raise
-            self._authoring_task_queue = compile_tasks(instruction, payload, self.policy.max_model_prompt_chars)
-            self.checkpoint(state, "authoring-partition-created")
-            payload = self._authoring_task_queue["tasks"][0]
-            prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=self.policy.max_model_prompt_chars)
         metrics = structured_request_metrics(
             schema,
             prompt_result.prompt,
@@ -4598,6 +4609,7 @@ class CFDEngineeringAgent:
         metrics["evidenceShown"] = len(evidence_records)
         metrics["evidenceObserved"] = evidence_total
         metrics["stagedAuthoring"] = bool(self.policy.staged_case_authoring)
+        metrics.update(context_partition_metrics)
         model_name = getattr(self.llm, "model", None)
         if isinstance(model_name, str) and model_name:
             metrics["model"] = model_name
