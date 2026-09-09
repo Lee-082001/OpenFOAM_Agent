@@ -142,10 +142,24 @@ class CFDWorkflow:
             try:
                 self.step(state)
             except Exception as exc:
-                state.transition(
-                    State.FAILED,
-                    f"{type(exc).__name__} during {failed_stage.value}: {str(exc) or repr(exc)}",
-                )
+                recovery = {
+                    "stage": failed_stage.value,
+                    "type": type(exc).__name__,
+                    "message": str(exc) or repr(exc),
+                }
+                if state.primary_failure is not None:
+                    if len(state.secondary_failures) < 16:
+                        state.secondary_failures.append(recovery)
+                    primary = state.primary_failure
+                    note = (
+                        "Primary engineering failure preserved: "
+                        f"[{primary.get('category', 'case')}] {primary.get('action_type', 'unknown')}: "
+                        f"{primary.get('summary', '')}. Secondary recovery failure: "
+                        f"{type(exc).__name__} during {failed_stage.value}: {str(exc) or repr(exc)}"
+                    )
+                else:
+                    note = f"{type(exc).__name__} during {failed_stage.value}: {str(exc) or repr(exc)}"
+                state.transition(State.FAILED, note)
                 return state
         state.transition(State.FAILED, "Workflow max_steps exceeded.")
         return state

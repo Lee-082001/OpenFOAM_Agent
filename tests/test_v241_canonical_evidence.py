@@ -14,7 +14,7 @@ from openfoam_agent.schemas.engineering import (
     canonical_engineering_evidence_id,
 )
 
-from conftest import FakeOpenFOAMTools, ScriptedLLM, make_plan, make_state
+from conftest import FakeOpenFOAMTools, ScriptedLLM, foam_header, make_plan, make_state
 
 
 def test_engineering_evidence_accepts_only_canonical_ids() -> None:
@@ -182,8 +182,9 @@ def test_finish_preview_needs_no_llm_claim_for_checkmesh_or_confirmed_intake(
                 type="write_case_file",
                 path="system/controlDict",
                 content=(
-                    "solver incompressibleFluid;\n"
-                    "startFrom startTime;\nstartTime 0;\nendTime 1;\ndeltaT 0.01;\n"
+                    foam_header("system/controlDict")
+                    + "solver incompressibleFluid;\n"
+                    + "startFrom startTime;\nstartTime 0;\nendTime 1;\ndeltaT 0.01;\n"
                 ),
                 rationale="Create minimal bounded runtime control.",
             ),

@@ -69,7 +69,9 @@ def test_blockmesh_failure_is_shown_to_user_and_next_agent_turn(tmp_path, graph_
     failed = state.engineering_events[0]
     assert failed.action_type == "run_mesh_command"
     assert not failed.success
-    assert "native diagnostic captured" in failed.summary
+    assert "explicit OpenFOAM fatal diagnostic" in failed.summary
+    assert failed.validation_status == "fail"
+    assert failed.failure_category == "case"
     assert "FOAM FATAL ERROR" in failed.output_excerpt
     assert "inward-pointing faces" in failed.output_excerpt
 
@@ -79,7 +81,7 @@ def test_blockmesh_failure_is_shown_to_user_and_next_agent_turn(tmp_path, graph_
     assert "inward-pointing faces" in llm.prompts[1]
 
     progress = stream.getvalue()
-    assert "blockMesh returned status 1; native diagnostic captured." in progress
+    assert "blockMesh reported an explicit OpenFOAM fatal diagnostic." in progress
     assert "reason:" in progress
     assert "FOAM FATAL ERROR" in progress
     assert "inward-pointing faces" in progress

@@ -116,6 +116,30 @@ class ProcessBudget:
             self._persist()
 
 
+
+@dataclass
+class ValidationExecutionContext:
+    """Exact, serial, short-lived pre-approval consumer validation context."""
+
+    expected_command: list[str]
+    case_dir: Path
+    workspace_root: Path
+    max_wall_seconds: int = 60
+
+    def validate(self, command: list[str], cwd: Path, timeout: int, ranks: int = 1) -> None:
+        expected_dir = self.case_dir.resolve()
+        root = self.workspace_root.resolve()
+        if cwd.resolve() != expected_dir:
+            raise ExecutionPolicyError("Validation execution cwd differs from the Python-owned shadow case.")
+        if expected_dir == root or root not in expected_dir.parents:
+            raise ExecutionPolicyError("Validation execution must stay inside the bounded workspace.")
+        if ranks != 1:
+            raise ExecutionPolicyError("Zero-step consumer validation is serial only.")
+        if timeout > self.max_wall_seconds:
+            raise ExecutionPolicyError("Validation execution exceeds the bounded validation wall time.")
+        if command != self.expected_command:
+            raise ExecutionPolicyError("Validation execution argv differs from the Python-owned exact command.")
+
 @dataclass
 class ExecutionContext:
     approval: ExecutionApproval

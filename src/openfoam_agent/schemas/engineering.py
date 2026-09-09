@@ -1682,16 +1682,19 @@ class EngineeringEvent(_EngineeringModel):
 
         if not isinstance(value, dict):
             return value
-        observed = value.get("observed_evidence")
+        normalized = dict(value)
+        observed = normalized.get("observed_evidence")
         if isinstance(observed, (list, tuple)) and len(observed) > ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT:
-            normalized = dict(value)
             normalized["observed_evidence"] = list(observed)[:ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT]
-            return normalized
-        return value
+        if "validation_status" not in normalized:
+            normalized["validation_status"] = "pass" if bool(normalized.get("success")) else "fail"
+        return normalized
 
     step: int = Field(ge=1)
     action_type: str = Field(min_length=1, max_length=80)
     success: bool
+    validation_status: Literal["pass", "fail", "inconclusive"] = "pass"
+    failure_category: Literal["case", "tool", "infra", "security", "user_contract"] | None = None
     summary: str = Field(min_length=1, max_length=4000)
     output_excerpt: str = Field(default="", max_length=12000)
     payload_ref: str | None = Field(default=None, pattern=r"^evrec_[0-9a-f]{20}$")
@@ -1710,6 +1713,8 @@ class EngineeringEvent(_EngineeringModel):
     def validate_resource_markers(self) -> Self:
         if self.mesh_command_executed and not self.native_command_executed:
             raise ValueError("A mesh command event must also be a native command event.")
+        if self.validation_status == "fail" and self.success:
+            raise ValueError("A failed validation cannot be marked workflow-successful.")
         return self
 
 

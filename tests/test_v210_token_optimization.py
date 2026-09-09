@@ -91,7 +91,13 @@ class FlexibleScriptedLLM:
 
 
 def _boundary_file() -> str:
-    return """FoamFile { object boundary; }
+    return """FoamFile
+{
+    version 2.0;
+    format ascii;
+    class polyBoundaryMesh;
+    object boundary;
+}
 2
 (
 inlet

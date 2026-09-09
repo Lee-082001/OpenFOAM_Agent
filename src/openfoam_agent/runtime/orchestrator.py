@@ -21,7 +21,7 @@ from openfoam_agent.schemas.simulation import (
     RuntimeReport,
     SimulationAttempt,
 )
-from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
+from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure, classify_native_validation
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.parsers import parse_runtime_log
 from openfoam_agent.tools.workspace import WorkspaceSafetyError
@@ -183,19 +183,35 @@ class RuntimeOrchestrator:
             attempt = SimulationAttempt(attempt=attempt_number, result=result)
             attempts.append(attempt)
 
-            diagnostic = None if result.success else diagnose_openfoam_failure(
-                run, command_name=runtime_driver
+            assessment = None if result.success else classify_native_validation(
+                run, command_name=runtime_driver, probe=False
             )
+            diagnostic = None if assessment is None else assessment.diagnostic
             diagnostic_text = diagnostic.render() if diagnostic is not None else ""
+            if result.success:
+                runtime_message = f"{runtime_driver} attempt {attempt_number} 완료"
+                runtime_status = "success"
+            elif result.process_success:
+                runtime_message = (
+                    f"{runtime_driver} attempt {attempt_number} completed but result/completion evidence is incomplete"
+                )
+                runtime_status = "failure"
+            elif assessment is not None and assessment.status == "inconclusive":
+                runtime_message = (
+                    f"{runtime_driver} attempt {attempt_number} infrastructure/tool result is inconclusive; "
+                    "CFD repair is not invoked"
+                )
+                runtime_status = "failure"
+            else:
+                runtime_message = (
+                    f"{runtime_driver} attempt {attempt_number} 실패; native diagnostic captured; case-level failure로 분류되어 repair 판단으로 이동"
+                )
+                runtime_status = "failure"
             self.progress.emit(
                 ProgressEvent(
                     phase="runtime",
-                    message=(
-                        f"{runtime_driver} attempt {attempt_number} 완료"
-                        if result.success
-                        else f"{runtime_driver} attempt {attempt_number} 실패; native diagnostic captured; repair 판단으로 이동"
-                    ),
-                    status="success" if result.success else "failure",
+                    message=runtime_message,
+                    status=runtime_status,
                     metrics={
                         "lastTime": result.last_time,
                         "maxCo": result.courant_max,
@@ -231,6 +247,28 @@ class RuntimeOrchestrator:
                 state.solve_approved = False
                 state.transition(State.RESULT_REVIEW_REQUIRED,
                     "Process exited normally but requested completion/output evidence is incomplete; user review required.")
+                return state
+
+            if assessment is not None and assessment.status == "inconclusive":
+                event = self.engineering._event(
+                    attempt_number,
+                    "runtime_execution",
+                    False,
+                    assessment.reason,
+                    diagnostic_text or log[-4000:],
+                    native_command_executed=True,
+                    validation_status="inconclusive",
+                    failure_category=assessment.category or "infra",
+                )
+                state.engineering_events.append(event)
+                self.engineering._record_unresolved_failure(state, event)
+                state.runtime_report = RuntimeReport(success=False, attempts=attempts, final_result=result)
+                state.solve_approved = False
+                state.transition(
+                    State.ENGINEERING_BLOCKED,
+                    "Runtime execution was inconclusive because of tool/infrastructure failure; "
+                    "the CFD case was not rewritten and the native log was preserved.",
+                )
                 return state
 
             if attempt_number >= self.policy.max_attempts:

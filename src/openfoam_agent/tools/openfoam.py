@@ -4,10 +4,14 @@ import os
 import hashlib
 import json
 import re
+import shutil
+import uuid
 from pathlib import Path
 from typing import Callable
 
 from openfoam_agent.schemas.engineering import OpenFOAMExecutionSpec
+from openfoam_agent.schemas.common import ToolResult
+from openfoam_agent.tools.execution_policy import ValidationExecutionContext
 
 from .safe_runner import SafeRunner
 
@@ -271,6 +275,110 @@ class OpenFOAMTools:
         if result.success:
             self._dictionary_cache[key] = result.model_copy(deep=True)
         return result
+
+
+    def zero_step_consumer_validate(
+        self,
+        case_dir: str | Path,
+        execution: OpenFOAMExecutionSpec,
+        *,
+        timeout: int = 60,
+        max_shadow_bytes: int = 512_000_000,
+    ) -> tuple[ToolResult | None, str]:
+        """Initialize the selected OpenFOAM consumer in a temporary endTime=0 case.
+
+        The production case is never modified. If a bounded, side-effect-minimized
+        shadow cannot be proven safe, return ``None`` and let the caller report
+        INCONCLUSIVE rather than inventing case invalidity.
+        """
+
+        case = Path(case_dir).resolve()
+        if execution.parallel.mode != "serial" or execution.parallel.ranks != 1:
+            return None, "Zero-step consumer validation is deferred for parallel execution topologies."
+        if execution.arguments:
+            return None, "Custom production solver arguments are not replayed before approval; zero-step consumer validation deferred."
+        control = case / "system" / "controlDict"
+        if not control.is_file():
+            return None, "system/controlDict is missing; zero-step consumer validation was not attempted."
+
+        total = 0
+        for top in ("0", "constant", "system"):
+            root = case / top
+            if not root.exists():
+                continue
+            for item in root.rglob("*"):
+                if item.is_symlink():
+                    return None, "Zero-step shadow validation refuses symlinked case inputs."
+                if item.is_file():
+                    total += item.stat().st_size
+                    if total > max_shadow_bytes:
+                        return None, "Case inputs exceed the bounded zero-step shadow-copy budget."
+
+        text = control.read_text(encoding="utf-8", errors="replace")
+        function_marker = re.search(r"(?m)^\s*functions\s*\{", text)
+        if function_marker and not re.search(r"(?ms)^\s*functions\s*\{\s*\}\s*", text):
+            return None, "Non-empty controlDict functions are deferred to approved runtime; zero-step probe skipped."
+
+        def set_entry(source: str, key: str, value: str) -> str:
+            pattern = re.compile(rf"(?m)^(?P<indent>[ \t]*){re.escape(key)}\s+[^;\n]+;")
+            matches = list(pattern.finditer(source))
+            if len(matches) > 1:
+                raise ValueError(f"controlDict contains duplicate literal {key} entries.")
+            replacement = f"{key}    {value};"
+            if matches:
+                match = matches[0]
+                if match.group("indent"):
+                    raise ValueError(f"controlDict {key} is not a literal top-level entry.")
+                return source[:match.start()] + replacement + source[match.end():]
+            return source.rstrip() + "\n" + replacement + "\n"
+
+        try:
+            for key, value in (
+                ("startFrom", "startTime"),
+                ("startTime", "0"),
+                ("stopAt", "endTime"),
+                ("endTime", "0"),
+                ("writeControl", "timeStep"),
+                ("writeInterval", "1"),
+                ("purgeWrite", "0"),
+                ("runTimeModifiable", "false"),
+            ):
+                text = set_entry(text, key, value)
+        except ValueError as exc:
+            return None, f"Zero-step controlDict normalization was inconclusive: {exc}"
+
+        shadow_root = (self.runner.workspace_root or case.parent) / ".validation-shadow"
+        shadow = shadow_root / uuid.uuid4().hex
+        shadow_root.mkdir(parents=True, exist_ok=True)
+        shadow.mkdir(parents=True, exist_ok=False)
+        try:
+            for top in ("0", "constant", "system"):
+                source = case / top
+                if source.exists():
+                    shutil.copytree(source, shadow / top)
+            (shadow / "system" / "controlDict").write_text(text, encoding="utf-8")
+
+            args = list(execution.arguments)
+            if execution.driver == "foamRun":
+                if not execution.solver_module:
+                    return None, "foamRun zero-step validation requires a selected solver module."
+                args = ["-solver", execution.solver_module, *args]
+            command = [execution.driver, *args]
+            context = ValidationExecutionContext(
+                expected_command=command,
+                case_dir=shadow,
+                workspace_root=(self.runner.workspace_root or case.parent),
+                max_wall_seconds=min(timeout, 60),
+            )
+            with self.runner.validation_execution(context):
+                result = self.runner.run(command, cwd=shadow, timeout=min(timeout, 60))
+            return result, "Zero-step consumer validation executed in a temporary shadow case."
+        finally:
+            shutil.rmtree(shadow, ignore_errors=True)
+            try:
+                shadow_root.rmdir()
+            except OSError:
+                pass
 
     def run_mesh_command(self, command: str, case_dir: str | Path):
         dispatch = {

@@ -16,7 +16,7 @@ from openfoam_agent.schemas.engineering import (
 from openfoam_agent.schemas.simulation import RuntimePolicy
 from openfoam_agent.workflow.states import State
 
-from conftest import FakeOpenFOAMTools, ScriptedLLM, control_dict, make_plan, make_state, mesh_ok_log, tool_result
+from conftest import FakeOpenFOAMTools, ScriptedLLM, control_dict, foam_header, make_plan, make_state, mesh_ok_log, tool_result
 
 
 def _prepared_agent(tmp_path, graph_path, tools, extra_actions):
@@ -66,7 +66,7 @@ def test_runtime_failure_log_returns_to_agent_and_retries(tmp_path, graph_path):
             WriteCaseFileAction(
                 type="write_case_file",
                 path="system/fvSolution",
-                content="solvers {};\n",
+                content=foam_header("system/fvSolution") + "solvers {};\n",
                 rationale="Repair dictionary based on the real foamRun failure.",
             ),
             RunMeshCommandAction(type="run_mesh_command", command="checkMesh", rationale="Refresh evidence after edit."),

@@ -10,6 +10,7 @@ from openfoam_agent.schemas.common import ToolResult
 from openfoam_agent.schemas.engineering import EngineeringPlan, MeshEvidence
 from openfoam_agent.schemas.intake import CFDIntakeSpec
 from openfoam_agent.tools.openfoam import OpenFOAMTools
+from openfoam_agent.tools.foam_file import validate_foam_file_header
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
 from openfoam_agent.verification.foam_semantics.parser import parse_named_dictionary_assignments
 
@@ -277,6 +278,12 @@ class DeterministicSafetyGate:
         return failures
 
     def validate_native_inputs(self) -> SafetyCheckResult:
+        """Cheap deterministic checks before invoking actual OpenFOAM consumers.
+
+        foamDictionary is intentionally not a hard permission gate in v4.3.
+        Workspace content policy and FoamFile/header semantics run here; stronger
+        case compatibility is established by blockMesh/checkMesh/solver consumers.
+        """
         failures = list(self.workspace.validate_all_content())
         tool_results: list[ToolResult] = []
         if failures:
@@ -284,13 +291,19 @@ class DeterministicSafetyGate:
 
         for relative in self.workspace.list_authored():
             path = self.workspace.resolve_case_path(relative, must_exist=True)
-            if path.suffix in _DATA_EXTENSIONS:
+            # constant/polyMesh is a native-generated artifact domain. Its topology
+            # and file set are validated by checkMesh/mesh freshness, not by treating
+            # every generated mesh file as an LLM-authored dictionary input. Tests and
+            # imported meshes may stage these files through CaseWorkspace as well.
+            if relative.startswith("constant/polyMesh/"):
                 continue
-            result = self.tools.foam_dictionary_validate(path, cwd=self.workspace.case_dir)
-            tool_results.append(result)
-            if not result.success:
-                excerpt = _combined_output(result)[-1200:]
-                failures.append(f"foamDictionary rejected {relative}: {excerpt}")
+            if path.suffix.lower() in {item.lower() for item in _DATA_EXTENSIONS}:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            header = validate_foam_file_header(
+                relative, text, expected_class=("dictionary" if relative.startswith("system/") else None)
+            )
+            failures.extend(header.failures)
         return SafetyCheckResult(not failures, failures, tool_results)
 
     def verify_seal(self, plan: EngineeringPlan, seal) -> None:

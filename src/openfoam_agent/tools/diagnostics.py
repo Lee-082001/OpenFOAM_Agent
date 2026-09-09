@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from openfoam_agent.schemas.common import ToolResult
 
@@ -43,6 +44,85 @@ class NativeFailureDiagnostic:
             lines.append("(no stdout/stderr diagnostic text was captured)")
         return "\n".join(lines)
 
+
+
+ValidationStatus = Literal["pass", "fail", "inconclusive"]
+FailureCategory = Literal["case", "tool", "infra", "security", "user_contract"]
+
+
+@dataclass(frozen=True)
+class NativeValidationAssessment:
+    """Tri-state interpretation of a native validation observation.
+
+    PASS proves the requested probe/consumer accepted the input. FAIL is reserved
+    for explicit case-level evidence. INCONCLUSIVE means the tool/runner did not
+    establish validity either way and must not trigger blind CFD repair.
+    """
+
+    status: ValidationStatus
+    category: FailureCategory | None
+    diagnostic: NativeFailureDiagnostic | None
+    reason: str
+
+    @property
+    def workflow_success(self) -> bool:
+        return self.status != "fail"
+
+
+def classify_native_validation(
+    result: ToolResult,
+    *,
+    command_name: str | None = None,
+    probe: bool = False,
+) -> NativeValidationAssessment:
+    """Separate case invalidity from validator/runner uncertainty."""
+
+    command = command_name or _logical_command_name(result)
+    if result.success:
+        return NativeValidationAssessment("pass", None, None, f"{command} completed successfully.")
+
+    diagnostic = diagnose_openfoam_failure(result, command_name=command)
+    if diagnostic.kind in {"foam_fatal_io_error", "foam_fatal_error", "fatal_error"}:
+        return NativeValidationAssessment(
+            "fail", "case", diagnostic, f"{command} reported an explicit OpenFOAM fatal diagnostic."
+        )
+
+    termination = (result.termination_reason or "").strip().lower()
+    if not termination and result.return_code == 124:
+        termination = "timeout"
+    elif not termination and result.return_code in {125, 126}:
+        termination = "runner_limit"
+    if termination in {
+        "timeout", "output_limit", "log_io_error", "spawn_or_io_error",
+        "cancelled", "workspace_quota", "aggregate_cpu_limit",
+        "aggregate_memory_limit", "runner_limit",
+    }:
+        category: FailureCategory = "tool" if termination == "timeout" else "infra"
+        return NativeValidationAssessment(
+            "inconclusive", category, diagnostic,
+            f"{command} validation was inconclusive because the runner terminated with {termination}."
+        )
+
+    if diagnostic.kind in {"terminate", "abort", "segmentation_fault", "floating_point_exception"}:
+        if probe:
+            return NativeValidationAssessment(
+                "inconclusive", "tool", diagnostic,
+                f"{command} advisory validator terminated abnormally without proving the case invalid.",
+            )
+        return NativeValidationAssessment(
+            "fail", "case", diagnostic,
+            f"{command} consumer terminated abnormally while using the authored case.",
+        )
+
+    if probe:
+        return NativeValidationAssessment(
+            "inconclusive", "tool", diagnostic,
+            f"{command} returned non-zero without proving the case invalid."
+        )
+
+    return NativeValidationAssessment(
+        "fail", "case", diagnostic, f"{command} consumer returned non-zero without an infrastructure termination."
+    )
 
 def diagnose_openfoam_failure(
     result: ToolResult,

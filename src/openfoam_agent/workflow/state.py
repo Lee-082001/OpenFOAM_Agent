@@ -51,6 +51,8 @@ class CFDState(BaseModel):
     parallel_evidence: dict | None = None
     result_output_evidence: list[dict] = Field(default_factory=list)
     engineering_checkpoint: dict = Field(default_factory=dict)
+    primary_failure: dict | None = None
+    secondary_failures: list[dict] = Field(default_factory=list)
     engineering_next_step: int = Field(default=1, ge=1)
     pending_action: dict | None = None
     native_process_records: list[dict] = Field(default_factory=list)

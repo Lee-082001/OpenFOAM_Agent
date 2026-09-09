@@ -12,7 +12,7 @@ from openfoam_agent.schemas.engineering import (
 from openfoam_agent.tools.workspace import CaseWorkspace
 from openfoam_agent.workflow.states import State
 
-from conftest import FakeOpenFOAMTools, ScriptedLLM, control_dict, make_plan, make_state, mesh_ok_log, tool_result
+from conftest import FakeOpenFOAMTools, ScriptedLLM, control_dict, foam_header, make_plan, make_state, mesh_ok_log, tool_result
 
 
 def test_mesh_manifest_ignores_solver_inputs_but_tracks_mesh_artifacts(tmp_path):
@@ -101,7 +101,7 @@ def test_runtime_solver_input_repair_does_not_require_checkmesh_rerun(tmp_path, 
             WriteCaseFileAction(
                 type="write_case_file",
                 path="system/fvSolution",
-                content="solvers {};\n",
+                content=foam_header("system/fvSolution") + "solvers {};\n",
                 rationale="repair solver dictionary",
             ),
             RetrySolverAction(type="retry_solver", plan=plan, rationale="retry without redundant checkMesh"),
@@ -178,7 +178,7 @@ def test_rehydrated_runtime_agent_restores_mesh_freshness_from_sealed_case(tmp_p
                 WriteCaseFileAction(
                     type="write_case_file",
                     path="system/fvSolution",
-                    content="solvers {};\n",
+                    content=foam_header("system/fvSolution") + "solvers {};\n",
                     rationale="repair only solver input",
                 ),
                 RetrySolverAction(type="retry_solver", plan=plan, rationale="retry with persisted mesh evidence"),

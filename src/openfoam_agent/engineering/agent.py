@@ -105,7 +105,7 @@ from openfoam_agent.schemas.engineering import (
     WriteCaseFileAction,
 )
 from openfoam_agent.tools.capability_catalog import CapabilityCatalog
-from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure
+from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure, classify_native_validation
 from openfoam_agent.tools.foam_file import validate_foam_file_header
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.foam_serializer import (
@@ -176,6 +176,13 @@ class EngineeringPolicy:
     max_mesh_cells: int = 5_000_000
     require_solve_ready_gate: bool = False
 
+    # v4.3 validation routing. Documentary dictionary probes are advisory;
+    # stronger consumer validation can initialize the selected solver in a
+    # Python-owned, serial, endTime=0 shadow case.
+    foam_dictionary_probe: bool = False
+    zero_step_consumer_validation: bool = True
+    zero_step_validation_timeout: int = 60
+
     # v2.9: when the capability graph is small, preload deterministic provider
     # evidence into the first engineering prompt so solver selection does not
     # require an extra LLM -> search_capabilities -> LLM round trip.
@@ -217,6 +224,7 @@ class EngineeringPolicy:
             "max_model_feedback_items": self.max_model_feedback_items,
             "max_mesh_cells": self.max_mesh_cells,
             "max_preloaded_capabilities": self.max_preloaded_capabilities,
+            "zero_step_validation_timeout": self.zero_step_validation_timeout,
         }
         for name, value in integer_fields.items():
             if value < 1:
@@ -758,6 +766,8 @@ class CFDEngineeringAgent:
             limit=progress_limit,
             state=state,
         )
+        if not event.success:
+            return self._route_failed_event(state, event, default_terminal=terminal)
         return terminal
 
     @staticmethod
@@ -1035,6 +1045,58 @@ class CFDEngineeringAgent:
             native_execution=native_execution,
         )
 
+    @staticmethod
+    def _failure_record(event: EngineeringEvent) -> dict[str, object]:
+        return {
+            "step": event.step,
+            "action_type": event.action_type,
+            "category": event.failure_category or "case",
+            "validation_status": event.validation_status,
+            "summary": event.summary,
+            "output_excerpt": event.output_excerpt[:4000],
+            "failure_signature": event.failure_signature,
+        }
+
+    def _record_unresolved_failure(self, state: CFDState, event: EngineeringEvent) -> None:
+        record = self._failure_record(event)
+        if state.primary_failure is None:
+            state.primary_failure = record
+            return
+        prior = state.primary_failure
+        if (
+            prior.get("action_type") == record.get("action_type")
+            and prior.get("summary") == record.get("summary")
+            and prior.get("failure_signature") == record.get("failure_signature")
+        ):
+            return
+        if len(state.secondary_failures) < 16:
+            state.secondary_failures.append(record)
+
+    def _route_failed_event(self, state: CFDState, event: EngineeringEvent, *, default_terminal: bool) -> bool:
+        """Only semantic CASE failures are eligible for another CFD repair turn."""
+        if event.success:
+            return default_terminal
+        self._record_unresolved_failure(state, event)
+        category = event.failure_category or "case"
+        if category in {"tool", "infra", "security", "user_contract"}:
+            label = {
+                "tool": "validation/tool infrastructure",
+                "infra": "workflow/runtime infrastructure",
+                "security": "security/execution policy",
+                "user_contract": "confirmed user contract",
+            }[category]
+            state.transition(
+                State.ENGINEERING_BLOCKED,
+                f"Engineering stopped by {label} failure; CFD case repair was not invoked: {event.summary}",
+            )
+            return True
+        return default_terminal
+
+    @staticmethod
+    def _clear_unresolved_failure(state: CFDState) -> None:
+        state.primary_failure = None
+        state.secondary_failures = []
+
     def _execute_case_plan(
         self,
         state: CFDState,
@@ -1120,7 +1182,7 @@ class CFDEngineeringAgent:
 
         # v3.0.2: solve-critical OpenFOAM files must satisfy the IOobject-facing
         # FoamFile contract before *any* candidate file is committed. This closes the
-        # gap where foamDictionary accepted headerless content and blockMesh/foamRun
+        # gap where a shallow dictionary probe accepted headerless content and blockMesh/foamRun
         # discovered the malformed header later, one file at a time.
         header_targets = list(dict.fromkeys([
             "system/controlDict",
@@ -1254,6 +1316,7 @@ class CFDEngineeringAgent:
                     getattr(member, "type", "unknown"),
                     False,
                     f"Engineering deterministic action budget exhausted ({self.policy.max_tool_actions}); execution plan stopped.",
+                    validation_status="fail", failure_category="infra",
                 )
                 event = self._tag_execution_plan_event(
                     event, execution, execution_id, index, total
@@ -1305,7 +1368,7 @@ class CFDEngineeringAgent:
                         metrics={"executed": index, "planned": total},
                     )
                 )
-                return terminal
+                return self._route_failed_event(state, event, default_terminal=terminal)
             if isinstance(member, WriteCaseFileAction) and member.path == "system/blockMeshDict":
                 self._structured_block_mesh = execution.block_mesh
             if terminal:
@@ -1803,6 +1866,7 @@ class CFDEngineeringAgent:
                     member.type,
                     False,
                     f"Engineering deterministic action budget exhausted ({self.policy.max_tool_actions}); sequence stopped.",
+                    validation_status="fail", failure_category="infra",
                 )
                 event = self._tag_sequence_event(event, sequence, sequence_id, index)
                 state.engineering_events.append(event)
@@ -1849,7 +1913,7 @@ class CFDEngineeringAgent:
                         metrics={"executed": index, "planned": len(sequence.actions)},
                     )
                 )
-                return terminal
+                return self._route_failed_event(state, event, default_terminal=terminal)
             if terminal:
                 self.progress.emit(
                     ProgressEvent(
@@ -2635,6 +2699,7 @@ class CFDEngineeringAgent:
                 state.engineering_plan = action.plan
                 state.case_seal = self.workspace.seal(action.plan)
                 state.case_dir = str(self.workspace.case_dir)
+                self._clear_unresolved_failure(state)
                 if proposal is not None and previous_plan is not None and previous_seal is not None:
                     state.revision_history.append(
                         self._revision_record(
@@ -3445,6 +3510,7 @@ class CFDEngineeringAgent:
                     getattr(action, "type", "unknown"),
                     False,
                     f"Native OpenFOAM command budget exhausted ({self.policy.max_native_commands}); no command was executed.",
+                    validation_status="fail", failure_category="infra",
                 )
 
             if isinstance(action, GatherEvidenceAction):
@@ -3697,77 +3763,64 @@ class CFDEngineeringAgent:
                 return self._event(step, action.type, True, f"Deleted {action.path}.")
 
             if isinstance(action, ValidateDictionaryAction):
-                if not native_execution:
-                    return self._event(
-                        step,
-                        action.type,
-                        False,
-                        "Native execution is disabled; OpenFOAM file/header validation was not run.",
-                    )
                 target = self.workspace.resolve_case_path(action.path, must_exist=True)
                 text = target.read_text(encoding="utf-8", errors="replace")
                 header = validate_foam_file_header(
-                    action.path,
-                    text,
+                    action.path, text,
                     expected_class=("dictionary" if action.path.startswith("system/") else None),
                 )
                 if not header.valid:
                     return self._event(
-                        step,
-                        action.type,
-                        False,
-                        f"OpenFOAM file header rejected {action.path} before foamDictionary.",
-                        header.render(),
+                        step, action.type, False,
+                        f"OpenFOAM file header rejected {action.path}.", header.render(),
+                        validation_status="fail", failure_category="case",
+                    )
+                if not native_execution or not self.policy.foam_dictionary_probe:
+                    return self._event(
+                        step, action.type, True,
+                        f"Static FoamFile/header validation accepted {action.path}; optional foamDictionary probe skipped.",
+                        header.render(), validation_status="pass",
                     )
                 result = self.tools.foam_dictionary_validate(target, cwd=self.workspace.case_dir)
                 output = _tool_output(result)
                 self.workspace.write_log(f"{step:03d}.foamDictionary.log", output)
-                event_output = output
-                summary = f"FoamFile header and foamDictionary accepted {action.path}."
-                if not result.success:
-                    diagnostic = diagnose_openfoam_failure(result, command_name="foamDictionary")
-                    event_output = diagnostic.render()
-                    summary = (
-                        f"foamDictionary returned status {result.return_code}; "
-                        "native diagnostic captured."
-                    )
+                assessment = classify_native_validation(result, command_name="foamDictionary", probe=True)
+                event_output = assessment.diagnostic.render() if assessment.diagnostic is not None else output
+                if assessment.status == "pass":
+                    summary = f"Optional foamDictionary probe accepted {action.path}."
+                elif assessment.status == "inconclusive":
+                    summary = f"Optional foamDictionary probe was inconclusive for {action.path}; continuing to stronger consumer validation."
+                else:
+                    summary = f"foamDictionary reported an explicit case-level fatal diagnostic for {action.path}."
                 return self._event(
-                    step,
-                    action.type,
-                    result.success,
-                    summary,
-                    event_output,
-                    native_command_executed=True,
+                    step, action.type, assessment.workflow_success, summary, event_output,
+                    native_command_executed=True, validation_status=assessment.status,
+                    failure_category=assessment.category,
                 )
 
             if isinstance(action, SurfaceCheckAction):
                 if not native_execution:
                     return self._event(
-                        step,
-                        action.type,
-                        False,
-                        "Native execution is disabled; surfaceCheck was not run.",
+                        step, action.type, True,
+                        "Native surfaceCheck unavailable; geometry validation remains inconclusive until a consumer uses the surface.",
+                        validation_status="inconclusive", failure_category="tool",
                     )
                 target = self.workspace.resolve_case_path(action.path, must_exist=True)
                 result = self.tools.surface_check(target, cwd=self.workspace.case_dir)
                 output = _tool_output(result)
                 self.workspace.write_log(f"{step:03d}.surfaceCheck.log", output)
-                event_output = output
-                summary = f"surfaceCheck {'passed' if result.success else 'failed'} for {action.path}."
-                if not result.success:
-                    diagnostic = diagnose_openfoam_failure(result, command_name="surfaceCheck")
-                    event_output = diagnostic.render()
-                    summary = (
-                        f"surfaceCheck returned status {result.return_code}; "
-                        "native diagnostic captured."
-                    )
+                assessment = classify_native_validation(result, command_name="surfaceCheck", probe=True)
+                event_output = assessment.diagnostic.render() if assessment.diagnostic is not None else output
+                summary = (
+                    f"surfaceCheck passed for {action.path}." if assessment.status == "pass"
+                    else (f"surfaceCheck was inconclusive for {action.path}; continuing to downstream consumer validation."
+                          if assessment.status == "inconclusive"
+                          else f"surfaceCheck reported a case-level fatal diagnostic for {action.path}.")
+                )
                 return self._event(
-                    step,
-                    action.type,
-                    result.success,
-                    summary,
-                    event_output,
-                    native_command_executed=True,
+                    step, action.type, assessment.workflow_success, summary, event_output,
+                    native_command_executed=True, validation_status=assessment.status,
+                    failure_category=assessment.category,
                 )
 
             if isinstance(action, RunNativeOpenFOAMAction):
@@ -3776,13 +3829,14 @@ class CFDEngineeringAgent:
                     return self._event(
                         step, action.type, False,
                         f"Native execution is disabled; {invocation.command} was not run.",
+                        validation_status="inconclusive", failure_category="infra",
                     )
                 preflight = self.safety.validate_native_inputs()
                 if not preflight.valid:
                     return self._event(
                         step, action.type, False,
-                        f"{invocation.command} blocked by generic syntax/safety preflight.",
-                        "\n".join(preflight.failures),
+                        f"{invocation.command} blocked by deterministic static preflight.",
+                        "\n".join(preflight.failures), validation_status="fail", failure_category="case",
                     )
                 if invocation.command == "snappyHexMesh":
                     precondition_ok, precondition_reason = self._mesh_command_precondition(invocation.command)
@@ -3790,25 +3844,28 @@ class CFDEngineeringAgent:
                         return self._event(
                             step, "mesh_tool_precondition", False,
                             f"{invocation.command} blocked by deterministic executable precondition.",
-                            precondition_reason,
-                            failure_signature=f"tool_contract:{invocation.command}:prerequisite",
-                            failure_scope="strategy",
+                            precondition_reason, failure_signature=f"tool_contract:{invocation.command}:prerequisite",
+                            failure_scope="strategy", validation_status="fail", failure_category="case",
                         )
                 try:
                     result = self.tools.run_native_command(
-                        invocation.command,
-                        self.workspace.case_dir,
-                        arguments=invocation.arguments,
+                        invocation.command, self.workspace.case_dir, arguments=invocation.arguments
                     )
                 except (ValueError, WorkspaceSafetyError) as exc:
-                    return self._event(step, action.type, False, str(exc))
+                    return self._event(
+                        step, action.type, False, str(exc),
+                        validation_status="fail", failure_category="security",
+                    )
                 if invocation.command != "checkMesh":
                     self._presolve_case_manifest = None
                     self._presolve_required_case_files = None
-                if command_effect(invocation.command, invocation.arguments) in {"mesh", "decomposition", "write", "initialization"}:
+                effect = command_effect(invocation.command, invocation.arguments)
+                if effect in {"mesh", "decomposition", "write", "initialization"}:
                     from openfoam_agent.contracts.mesh_dependencies import MeshDependencyGraph
-                    MeshDependencyGraph(self.workspace).record_native(invocation.command, invocation.arguments,
-                        self._pending_execution_plan or (state.engineering_plan if state else None))
+                    MeshDependencyGraph(self.workspace).record_native(
+                        invocation.command, invocation.arguments,
+                        self._pending_execution_plan or (state.engineering_plan if state else None),
+                    )
                     self._invalidate_mesh_dependencies(state)
                     self._checkmesh_mesh_manifest = None
                     if state is not None:
@@ -3818,108 +3875,132 @@ class CFDEngineeringAgent:
                         state.execution_approval = None
                 output = _tool_output(result)
                 self.workspace.write_log(f"{step:03d}.{invocation.command}.log", output)
-                success = result.success
-                summary = f"{invocation.command} returned status {result.return_code}."
-                event_output = output
+                assessment = classify_native_validation(
+                    result, command_name=invocation.command,
+                    probe=(effect == "validation" and invocation.command != "checkMesh"),
+                )
+                event_output = assessment.diagnostic.render() if assessment.diagnostic is not None else output
                 failure_signature = None
                 failure_scope = None
-                if not result.success:
-                    diagnostic = diagnose_openfoam_failure(result, command_name=invocation.command)
-                    event_output = diagnostic.render()
+                if assessment.diagnostic is not None:
                     failure_signature = self._native_failure_signature(
-                        invocation.command, diagnostic.kind, diagnostic.excerpt
+                        invocation.command, assessment.diagnostic.kind, assessment.diagnostic.excerpt
                     )
                     failure_scope = "local"
-                    summary = f"{invocation.command} returned status {result.return_code}; native diagnostic captured."
+                event_success = assessment.workflow_success
+                validation_status = assessment.status
+                failure_category = assessment.category
+                summary = assessment.reason
+                if assessment.status == "inconclusive" and effect != "validation":
+                    event_success = False
                 if invocation.command == "checkMesh" and state is not None:
-                    evidence = parse_check_mesh_evidence(result)
-                    self._record_region_mesh(state, evidence, invocation.arguments)
-                    success = evidence.passed
-                    summary = f"checkMesh returned status {result.return_code}; evidence {'passed' if evidence.passed else 'failed'}."
-                    if evidence.passed:
-                        self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
+                    if assessment.status == "pass":
+                        evidence = parse_check_mesh_evidence(result)
+                        self._record_region_mesh(state, evidence, invocation.arguments)
+                        event_success = evidence.passed
+                        validation_status = "pass" if evidence.passed else "fail"
+                        failure_category = None if evidence.passed else "case"
+                        summary = f"checkMesh returned status {result.return_code}; evidence {'passed' if evidence.passed else 'failed'}."
+                        if evidence.passed:
+                            self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
+                    else:
+                        event_success = False
+                        summary = ("checkMesh validation was inconclusive; mesh validity was not invented."
+                                   if assessment.status == "inconclusive" else assessment.reason)
                 return self._event(
-                    step, action.type, success, summary, event_output,
+                    step, action.type, event_success, summary, event_output,
                     native_command_executed=True,
-                    mesh_command_executed=(command_effect(invocation.command, invocation.arguments) in {"mesh", "validation", "decomposition"}),
-                    failure_signature=failure_signature,
-                    failure_scope=failure_scope,
+                    mesh_command_executed=(effect in {"mesh", "validation", "decomposition"}),
+                    failure_signature=failure_signature, failure_scope=failure_scope,
+                    validation_status=validation_status, failure_category=failure_category,
                 )
 
             if isinstance(action, ValidatePreSolveAction):
                 if not native_execution:
                     return self._event(
-                        step,
-                        action.type,
-                        False,
-                        "Native execution is disabled; pre-solve readiness was not validated.",
+                        step, action.type, True,
+                        "Native consumer validation is disabled; static pre-solve validation is deferred.",
+                        validation_status="inconclusive", failure_category="infra",
                     )
                 result = self.presolve.validate_required_case_files(action.required_case_files)
-                output = "\n".join(result.failures)
-                if result.valid:
-                    self._presolve_case_manifest = self.workspace.manifest_digest()
-                    self._presolve_required_case_files = tuple(action.required_case_files)
-                    output = (
-                        f"checkedFiles={len(result.checked_files)}\n"
-                        f"meshPatches={len(result.mesh_patches)}"
+                if not result.valid:
+                    return self._event(
+                        step, action.type, False, "Pre-solve deterministic readiness validation failed.",
+                        "\n".join(result.failures), validation_status="fail", failure_category="case",
                     )
+                output_lines = [f"checkedFiles={len(result.checked_files)}", f"meshPatches={len(result.mesh_patches)}"]
+                output_lines.extend(f"warning: {item}" for item in result.warnings[:12])
+                validation_status = "pass"
+                failure_category = None
+                native_ran = False
+                plan = self._pending_execution_plan or (state.engineering_plan if state is not None else None)
+                validator = getattr(self.tools, "zero_step_consumer_validate", None)
+                if (self.policy.zero_step_consumer_validation and plan is not None and plan.execution is not None and callable(validator)):
+                    native_result, note = validator(
+                        self.workspace.case_dir, plan.execution, timeout=self.policy.zero_step_validation_timeout
+                    )
+                    output_lines.append(note)
+                    if native_result is None:
+                        validation_status = "inconclusive"
+                        failure_category = "tool"
+                    else:
+                        native_ran = True
+                        native_output = _tool_output(native_result)
+                        self.workspace.write_log(f"{step:03d}.zeroStepConsumer.log", native_output)
+                        assessment = classify_native_validation(native_result, command_name=plan.execution.driver, probe=False)
+                        output_lines.append(assessment.diagnostic.render() if assessment.diagnostic is not None else native_output)
+                        if assessment.status == "fail":
+                            return self._event(
+                                step, action.type, False, "Zero-step OpenFOAM consumer initialization rejected the case.",
+                                "\n".join(output_lines), native_command_executed=True,
+                                validation_status="fail", failure_category="case",
+                            )
+                        if assessment.status == "inconclusive":
+                            validation_status = "inconclusive"
+                            failure_category = assessment.category or "tool"
+                self._presolve_case_manifest = self.workspace.manifest_digest()
+                self._presolve_required_case_files = tuple(action.required_case_files)
                 return self._event(
-                    step,
-                    action.type,
-                    result.valid,
-                    (
-                        "Pre-solve readiness validation passed."
-                        if result.valid
-                        else "Pre-solve readiness validation failed."
-                    ),
-                    output,
-                    native_command_executed=True,
+                    step, action.type, True,
+                    ("Pre-solve readiness passed; zero-step consumer validation was inconclusive but did not prove the case invalid."
+                     if validation_status == "inconclusive" else "Pre-solve readiness and consumer initialization validation passed."),
+                    "\n".join(output_lines), native_command_executed=native_ran,
+                    validation_status=validation_status, failure_category=failure_category,
                 )
 
             if isinstance(action, RunMeshCommandAction):
                 if not native_execution:
                     return self._event(
-                        step,
-                        action.type,
-                        False,
-                        f"Native execution is disabled; {action.command} was not run.",
+                        step, action.type, False, f"Native execution is disabled; {action.command} was not run.",
+                        validation_status="inconclusive", failure_category="infra",
                     )
                 preflight = self.safety.validate_native_inputs()
                 if not preflight.valid:
                     return self._event(
-                        step,
-                        action.type,
-                        False,
-                        f"{action.command} blocked by generic syntax/safety preflight.",
-                        "\n".join(preflight.failures),
+                        step, action.type, False, f"{action.command} blocked by deterministic static preflight.",
+                        "\n".join(preflight.failures), validation_status="fail", failure_category="case",
                     )
                 precondition_ok, precondition_reason = self._mesh_command_precondition(action.command)
                 if not precondition_ok:
                     signature = f"tool_contract:{action.command}:prerequisite"
                     return self._event(
-                        step,
-                        "mesh_tool_precondition",
-                        False,
-                        f"{action.command} blocked by deterministic executable precondition.",
-                        precondition_reason,
-                        failure_signature=signature,
-                        failure_scope="strategy",
+                        step, "mesh_tool_precondition", False,
+                        f"{action.command} blocked by deterministic executable precondition.", precondition_reason,
+                        failure_signature=signature, failure_scope="strategy",
+                        validation_status="fail", failure_category="case",
                     )
-
                 result = self.tools.run_mesh_command(action.command, self.workspace.case_dir)
-                if command_effect(action.command, []) in {"mesh", "decomposition", "initialization", "write"}:
+                effect = command_effect(action.command, [])
+                if effect in {"mesh", "decomposition", "initialization", "write"}:
                     from openfoam_agent.contracts.mesh_dependencies import MeshDependencyGraph
-                    MeshDependencyGraph(self.workspace).record_native(action.command, [],
-                        self._pending_execution_plan or (state.engineering_plan if state else None))
+                    MeshDependencyGraph(self.workspace).record_native(
+                        action.command, [], self._pending_execution_plan or (state.engineering_plan if state else None)
+                    )
                     self._invalidate_mesh_dependencies(state)
                 if action.command != "checkMesh":
                     self._presolve_case_manifest = None
                     self._presolve_required_case_files = None
                 if action.command in _MESH_TOPOLOGY_MUTATING_COMMANDS:
-                    # blockMesh/snappyHexMesh/createPatch can change polyMesh patch topology.
-                    # Any previous checkMesh/pre-solve/field-boundary compatibility evidence
-                    # is stale until the new topology is checked again. This holds even on a
-                    # failed native command because partial filesystem mutation is possible.
                     self._checkmesh_mesh_manifest = None
                     if state is not None:
                         state.mesh_evidence = None
@@ -3928,42 +4009,36 @@ class CFDEngineeringAgent:
                         state.execution_approval = None
                 output = _tool_output(result)
                 self.workspace.write_log(f"{step:03d}.{action.command}.log", output)
-                event_output = output
-                event_success = result.success
-                summary = f"{action.command} returned status {result.return_code}."
+                assessment = classify_native_validation(result, command_name=action.command, probe=False)
+                event_output = assessment.diagnostic.render() if assessment.diagnostic is not None else output
                 failure_signature = None
                 failure_scope = None
-                if not result.success:
-                    diagnostic = diagnose_openfoam_failure(result, command_name=action.command)
-                    event_output = diagnostic.render()
+                if assessment.diagnostic is not None:
                     failure_signature = self._native_failure_signature(
-                        action.command, diagnostic.kind, diagnostic.excerpt
+                        action.command, assessment.diagnostic.kind, assessment.diagnostic.excerpt
                     )
                     failure_scope = "local"
-                    summary = (
-                        f"{action.command} returned status {result.return_code}; "
-                        "native diagnostic captured."
-                    )
-                if action.command == "checkMesh" and state is not None:
+                event_success = assessment.status == "pass"
+                validation_status = assessment.status
+                failure_category = assessment.category
+                summary = assessment.reason
+                if action.command == "checkMesh" and state is not None and assessment.status == "pass":
                     evidence = parse_check_mesh_evidence(result)
                     self._record_region_mesh(state, evidence, [])
                     event_success = evidence.passed
-                    summary = (
-                        f"checkMesh returned status {result.return_code}; "
-                        f"evidence {'passed' if evidence.passed else 'failed'}."
-                    )
+                    validation_status = "pass" if evidence.passed else "fail"
+                    failure_category = None if evidence.passed else "case"
+                    summary = f"checkMesh returned status {result.return_code}; evidence {'passed' if evidence.passed else 'failed'}."
                     if evidence.passed:
                         self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
+                elif assessment.status == "inconclusive":
+                    event_success = False
+                    summary = f"{action.command} was inconclusive; native mesh state was not guessed."
                 return self._event(
-                    step,
-                    action.type,
-                    event_success,
-                    summary,
-                    event_output,
-                    native_command_executed=True,
-                    mesh_command_executed=True,
-                    failure_signature=failure_signature,
-                    failure_scope=failure_scope,
+                    step, action.type, event_success, summary, event_output,
+                    native_command_executed=True, mesh_command_executed=True,
+                    failure_signature=failure_signature, failure_scope=failure_scope,
+                    validation_status=validation_status, failure_category=failure_category,
                 )
         except (ValueError, FileNotFoundError, WorkspaceSafetyError, OSError, ExecutionPolicyError) as exc:
             if isinstance(action, GatherEvidenceAction):
@@ -3971,27 +4046,27 @@ class CFDEngineeringAgent:
                 self._disable_evidence_retrieval(phase, reason)
                 diagnostic = reason[:280]
                 return self._event(
-                    step,
-                    action.type,
-                    False,
+                    step, action.type, False,
                     "Evidence retrieval infrastructure failed once; further retrieval is disabled for this phase. "
                     f"Cause: {diagnostic}. Proceed with existing evidence/authorized engineering defaults or block.",
-                    reason,
-                    failure_signature=f"evidence_retrieval:{phase}:infrastructure",
-                    failure_scope="pipeline",
+                    reason, failure_signature=f"evidence_retrieval:{phase}:infrastructure",
+                    failure_scope="pipeline", validation_status="fail", failure_category="infra",
                 )
+            if isinstance(exc, (WorkspaceSafetyError, ExecutionPolicyError)):
+                category = "security"
+            elif isinstance(exc, OSError):
+                category = "infra"
+            else:
+                category = "case"
             return self._event(
-                step,
-                getattr(action, "type", "unknown"),
-                False,
+                step, getattr(action, "type", "unknown"), False,
                 f"Tool action rejected: {type(exc).__name__}: {exc}",
+                validation_status="fail", failure_category=category,
             )
 
         return self._event(
-            step,
-            getattr(action, "type", "unknown"),
-            False,
-            f"Action is not valid in {phase} phase.",
+            step, getattr(action, "type", "unknown"), False, f"Action is not valid in {phase} phase.",
+            validation_status="fail", failure_category="infra",
         )
 
     @staticmethod
@@ -5383,11 +5458,15 @@ class CFDEngineeringAgent:
                     for line in event.output_excerpt.splitlines()
                     if line.strip()
                 )[:ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT]
+        progress_status = (
+            "info" if event.validation_status == "inconclusive"
+            else ("success" if event.success else "failure")
+        )
         self.progress.emit(
             ProgressEvent(
                 phase=phase,
                 message=event.summary,
-                status="success" if event.success else "failure",
+                status=progress_status,
                 step=step,
                 limit=limit,
                 importance=action_importance(event.action_type),
@@ -5410,6 +5489,8 @@ class CFDEngineeringAgent:
         mesh_command_executed: bool = False,
         failure_signature: str | None = None,
         failure_scope: str | None = None,
+        validation_status: str | None = None,
+        failure_category: str | None = None,
         observed_evidence: list[ObservedEngineeringEvidence] | None = None,
     ) -> EngineeringEvent:
         # EngineeringEvent is a bounded progress/audit projection, never the durable
@@ -5438,6 +5519,8 @@ class CFDEngineeringAgent:
             mesh_command_executed=mesh_command_executed,
             failure_signature=failure_signature,
             failure_scope=failure_scope,
+            validation_status=(validation_status or ("pass" if success else "fail")),
+            failure_category=failure_category,
             observed_evidence=projected_evidence,
         )
 

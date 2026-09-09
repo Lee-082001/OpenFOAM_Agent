@@ -1,3 +1,17 @@
+## v4.3.0 validation and failure-routing architecture
+
+- Native validation is tri-state: `pass`, `fail`, or `inconclusive`. A validator timeout or runner uncertainty is no longer evidence that the CFD case is wrong.
+- Failures are classified as `case`, `tool`, `infra`, `security`, or `user_contract`; only explicit/semantic case failures are eligible for CFD LLM repair.
+- `foamDictionary` is no longer a hard authoring/pre-solve gate. Static workspace/FoamFile checks run first, while optional dictionary probes are advisory.
+- Pre-solve can initialize the selected OpenFOAM consumer in a bounded temporary `endTime=0` shadow case without modifying or approving production runtime.
+- `blockMesh`/`checkMesh`, actual authored-file coverage, unsafe content/path checks, case seals, solve approval, completion and result freshness remain strict.
+- SafeRunner now treats primary process exit as authoritative and performs bounded output drain instead of converting lingering descendant stdout handles into false timeout 124 failures.
+- `primary_failure` is preserved separately from `secondary_failures`, so a later context/repair failure cannot overwrite the original OpenFOAM diagnostic.
+
+# Release notice: OpenFOAM Agent 4.3.0
+
+> v4.3.0 is a validation/failure-routing refactor driven by a live v4.2.3 case where all CFD files were authored successfully but `foamDictionary` printed valid keys and was then reported as timeout 124; a secondary repair-context failure hid the original cause. v4.3.0 separates case invalidity from validator/infrastructure uncertainty and moves readiness toward deterministic checks plus real OpenFOAM consumers. See `V4_3_0_CHANGES.md`.
+
 ## v4.2.3 controller-owned authoring manifest
 
 - `EngineeringPlan.required_case_files` is now the single authoritative solve-required manifest.

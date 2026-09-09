@@ -137,13 +137,15 @@ def test_snappy_failure_reaches_user_and_next_engineering_turn(tmp_path, graph_p
 
     failed = state.engineering_events[0]
     assert not failed.success
-    assert "snappyHexMesh returned status 1; native diagnostic captured." == failed.summary
+    assert "explicit OpenFOAM fatal diagnostic" in failed.summary
+    assert failed.failure_category == "case"
+    assert failed.validation_status == "fail"
     assert "diagnosticKind: foam_fatal_io_error" in failed.output_excerpt
     assert "locationInMesh" in failed.output_excerpt
     assert "locationInMesh" in llm.prompts[1]
 
     progress = stream.getvalue()
-    assert "snappyHexMesh returned status 1; native diagnostic captured." in progress
+    assert "explicit OpenFOAM fatal diagnostic" in progress
     assert "FOAM FATAL IO ERROR" in progress
     assert "locationInMesh" in progress
     assert "/tmp/private" not in progress
@@ -214,7 +216,7 @@ def test_dictionary_and_surface_failures_use_same_native_diagnostic_path(tmp_pat
         workspace=tmp_path,
         capability_db=graph_path,
         tools=tools,
-        policy=EngineeringPolicy(max_agent_steps=6, hard_max_agent_steps=6),
+        policy=EngineeringPolicy(max_agent_steps=6, hard_max_agent_steps=6, foam_dictionary_probe=True),
         progress=CLIProgressReporter("normal", stream=stream),
     )
 
@@ -222,9 +224,11 @@ def test_dictionary_and_surface_failures_use_same_native_diagnostic_path(tmp_pat
 
     dictionary_event = next(event for event in state.engineering_events if event.action_type == "validate_dictionary")
     surface_event = next(event for event in state.engineering_events if event.action_type == "surface_check")
-    assert "native diagnostic captured" in dictionary_event.summary
+    assert "explicit case-level fatal diagnostic" in dictionary_event.summary
+    assert dictionary_event.failure_category == "case"
     assert "bad dictionary token" in dictionary_event.output_excerpt
-    assert "native diagnostic captured" in surface_event.summary
+    assert "case-level fatal diagnostic" in surface_event.summary
+    assert surface_event.failure_category == "case"
     assert "Surface is not closed" in surface_event.output_excerpt
     assert (agent.workspace.log_dir / "002.foamDictionary.log").exists()
     assert (agent.workspace.log_dir / "004.surfaceCheck.log").exists()

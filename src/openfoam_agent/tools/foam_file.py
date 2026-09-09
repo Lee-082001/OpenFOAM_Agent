@@ -9,7 +9,7 @@ from openfoam_agent.schemas.engineering import FoamDictionaryEntry
 
 
 _FIELD_CLASS_RE = re.compile(
-    r"^(?:vol|surface)(?:Scalar|Vector|SphericalTensor|SymmTensor|Tensor)Field$"
+    r"^(?:vol|surface|point)(?:Scalar|Vector|SphericalTensor|SymmTensor|Tensor)Field$"
 )
 _CLASS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _HEADER_VALUE_RE = re.compile(r"\b(version|format|class|location|object)\s+([^;{}]+);", re.DOTALL)
@@ -65,6 +65,20 @@ class FoamFileHeaderValidation:
 
 def is_field_class(class_name: str) -> bool:
     return bool(_FIELD_CLASS_RE.fullmatch(class_name.strip()))
+
+
+def field_classes_value_compatible(left: str, right: str) -> bool:
+    """Return whether field classes encode the same value shape.
+
+    ``internalField uniform (x y z)`` proves vector shape but does not prove mesh
+    association (vol/surface/point). An explicit pointVectorField must therefore
+    not be rejected merely because shape inference uses volVectorField as its
+    neutral historical default.
+    """
+    pattern = re.compile(r"^(?:vol|surface|point)(.+Field)$")
+    a = pattern.fullmatch(left.strip())
+    b = pattern.fullmatch(right.strip())
+    return bool(a and b and a.group(1) == b.group(1))
 
 
 def resolve_foam_file_contract(
@@ -124,7 +138,11 @@ def resolve_foam_file_contract(
                     f"Initial field {normalized_path!r} requires a field FoamFile class; "
                     f"got {class_name!r}."
                 )
-            if inferred_class and inferred_class != class_name:
+            if (
+                inferred_class
+                and inferred_class != class_name
+                and not field_classes_value_compatible(class_name, inferred_class)
+            ):
                 raise FoamFileContractError(
                     f"FoamFile class {class_name!r} conflicts with unambiguous internalField "
                     f"shape {inferred_class!r} for {normalized_path}."
@@ -277,7 +295,11 @@ def validate_foam_file_header(
 
     if normalized_path.startswith("0/") and header.class_name:
         inferred = infer_field_class_from_text(text)
-        if inferred and inferred != header.class_name:
+        if (
+            inferred
+            and inferred != header.class_name
+            and not field_classes_value_compatible(header.class_name, inferred)
+        ):
             failures.append(
                 f"FoamFile class/internalField mismatch in {normalized_path}: "
                 f"header={header.class_name!r}, inferred={inferred!r}."

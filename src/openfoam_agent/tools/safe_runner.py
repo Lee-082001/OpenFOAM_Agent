@@ -17,7 +17,7 @@ from typing import Callable, Mapping, Sequence
 
 from openfoam_agent.schemas.common import ToolResult
 from openfoam_agent.contracts.models import ResourceLimits
-from .execution_policy import (ExecutionContext, ExecutionPolicyError, ProcessBudget, command_effect)
+from .execution_policy import (ExecutionContext, ValidationExecutionContext, ExecutionPolicyError, ProcessBudget, command_effect)
 from openfoam_agent.tools.installation import OpenFOAMInstallationDiscovery
 
 
@@ -116,6 +116,7 @@ class SafeRunner:
         self.budget = ProcessBudget(limit=self.resource_limits.max_native_processes,
                                     ledger_path=(self.workspace_root / "process-ledger.json" if self.workspace_root else None))
         self._execution_context: ExecutionContext | None = None
+        self._validation_context: ValidationExecutionContext | None = None
         self._mpi_ranks = 1
         self._mpi_launcher: str | None = None
         self.process_observer = None
@@ -171,9 +172,14 @@ class SafeRunner:
         if effect in {"unknown", "destructive"}:
             raise UnsafeCommandError(f"Command effect {effect!r} is not authorized: {exe}")
         if effect == "solve":
-            if self._execution_context is None or resolved_cwd is None:
-                raise UnsafeCommandError("Main calculation requires an explicit execution approval and sealed runtime context.")
-            self._execution_context.validate(command, resolved_cwd, timeout, ranks=self._mpi_ranks)
+            if resolved_cwd is None:
+                raise UnsafeCommandError("Solver execution requires a bounded case directory.")
+            if self._execution_context is not None:
+                self._execution_context.validate(command, resolved_cwd, timeout, ranks=self._mpi_ranks)
+            elif self._validation_context is not None:
+                self._validation_context.validate(command, resolved_cwd, timeout, ranks=self._mpi_ranks)
+            else:
+                raise UnsafeCommandError("Main calculation requires explicit runtime approval; only Python-owned zero-step shadow validation is permitted before approval.")
         if effect == "reconstruction" and self._execution_context is None:
             raise UnsafeCommandError("Reconstruction requires the approved runtime execution context.")
         if effect == "decomposition":
@@ -223,6 +229,17 @@ class SafeRunner:
                 timeout=min(timeout, self.resource_limits.total_wall_seconds-spent_wall),
                 env=env, echo_output=stream_output, output_callback=output_callback, record=row,
             )
+
+    @contextmanager
+    def validation_execution(self, context: ValidationExecutionContext):
+        if self._execution_context is not None:
+            raise UnsafeCommandError("Validation execution cannot overlap an approved production runtime.")
+        previous = self._validation_context
+        self._validation_context = context
+        try:
+            yield
+        finally:
+            self._validation_context = previous
 
     @contextmanager
     def approved_execution(self, context: ExecutionContext):
@@ -480,7 +497,10 @@ class SafeRunner:
             def read_output() -> None:
                 try:
                     while not stop_reader.is_set():
-                        chunk = os.read(proc.stdout.fileno(), 16384)
+                        try:
+                            chunk = os.read(proc.stdout.fileno(), 16384)
+                        except OSError:
+                            break
                         if not chunk:
                             break
                         while not stop_reader.is_set():
@@ -499,9 +519,19 @@ class SafeRunner:
             reader.start()
             eof = False
             killed_at = None
-            while not eof or proc.poll() is None:
+            exited_at = None
+            group_cleanup_after_exit = False
+            drain_grace_seconds = 0.5
+            while True:
                 now = time.monotonic()
-                if now >= next_quota_check and killed_at is None:
+                return_code = proc.poll()
+                if return_code is not None and exited_at is None:
+                    exited_at = now
+
+                # Quotas and timeout govern the live primary process only. Waiting
+                # for pipe EOF after the primary has exited can otherwise misclassify
+                # a successful utility as timeout when a descendant inherited stdout.
+                if return_code is None and now >= next_quota_check and killed_at is None:
                     from openfoam_agent.tools.linux_isolation import bounded_tree_bytes
                     next_quota_check = now + 0.1
                     if bounded_tree_bytes(self.workspace_root or cwd) > limits.max_case_bytes:
@@ -512,10 +542,21 @@ class SafeRunner:
                             termination = "aggregate_memory_limit"; self._terminate_group(proc); killed_at = now
                         elif limits.total_cpu_seconds is not None and spent_cpu + metrics["cpu_seconds"] >= limits.total_cpu_seconds:
                             termination = "aggregate_cpu_limit"; self._terminate_group(proc); killed_at = now
-                if now - started >= timeout and killed_at is None:
+                if return_code is None and now - started >= timeout and killed_at is None:
                     termination = "timeout"; self._terminate_group(proc); killed_at = now
                 if killed_at is not None and now - killed_at > 2.0:
                     break
+                if return_code is not None and eof:
+                    break
+                if return_code is not None and exited_at is not None and now - exited_at >= drain_grace_seconds and output_queue.empty():
+                    if not eof and os.name == "posix":
+                        # The primary process is done, but a descendant still owns
+                        # the inherited pipe. Clean the process group without turning
+                        # the already-successful primary result into a timeout.
+                        self._terminate_group(proc)
+                        group_cleanup_after_exit = True
+                    break
+
                 try:
                     chunk = output_queue.get(timeout=0.05)
                 except queue.Empty:
@@ -548,7 +589,6 @@ class SafeRunner:
                             output_callback(line + "\n")
                         except Exception:
                             pass
-                    # A malicious/no-newline log cannot grow this observation buffer.
                     if len(partial_line) > 16384:
                         partial_line = partial_line[-16384:]
             if proc.poll() is None:
@@ -577,10 +617,13 @@ class SafeRunner:
             raise
         finally:
             stop_reader.set()
+            if proc is not None and proc.stdout is not None:
+                try:
+                    proc.stdout.close()
+                except OSError:
+                    pass
             if reader is not None:
                 reader.join(timeout=1)
-            if proc is not None and proc.stdout is not None:
-                proc.stdout.close()
             if handle is not None:
                 handle.close()
             if self.isolation is not None and self.isolation.active is not None:
@@ -606,7 +649,7 @@ class SafeRunner:
             return_code=code, stdout=tail.decode("utf-8", errors="replace"), stderr="",
             termination_reason=termination, log_path=str(log_path), log_sha256=digest.hexdigest(),
             output_bytes=total, output_truncated=total > len(tail), wall_seconds=elapsed,
-            process_id=proc.pid, process_group_terminated=termination != "exited")
+            process_id=proc.pid, process_group_terminated=(termination != "exited" or group_cleanup_after_exit))
 
     @staticmethod
     def _terminate_group(proc) -> None:

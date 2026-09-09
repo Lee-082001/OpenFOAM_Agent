@@ -136,10 +136,8 @@ class PreSolveCompletenessGate:
                 failures.extend(header.failures)
                 warnings.extend(header.warnings)
                 if header.valid:
-                    result = self.tools.foam_dictionary_validate(path, cwd=self.workspace.case_dir)
-                    if not result.success:
-                        excerpt = "\n".join(part for part in (result.stdout, result.stderr) if part)[-1200:]
-                        failures.append(f"foamDictionary rejected required solve input {relative}: {excerpt}")
+                    # The actual OpenFOAM consumer is the stronger validator.
+                    pass
 
         boundary_relative = f"{layout.mesh_dir}/boundary"
         boundary_path = self.workspace.resolve_case_path(boundary_relative)

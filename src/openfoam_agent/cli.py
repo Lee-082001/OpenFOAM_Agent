@@ -791,6 +791,8 @@ def build_report(
             "requested_is_not_observed": True,
         },
         "pending_action": state.pending_action,
+        "primary_failure": state.primary_failure,
+        "secondary_failures": list(state.secondary_failures),
         "native_process_records": state.native_process_records,
         "run_id": state.run_id,
         "prompt": request.prompt,
@@ -1092,6 +1094,16 @@ def _print_human_report(report: dict[str, Any]) -> None:
         print("limitations:")
         for item in report["limitations"]:
             print(f"- {item}")
+    if report.get("primary_failure"):
+        item = report["primary_failure"]
+        print(
+            "primary failure: "
+            f"[{item.get('category', 'case')}] {item.get('action_type', 'unknown')} - {item.get('summary', '')}"
+        )
+        if report.get("secondary_failures"):
+            print("secondary failures:")
+            for secondary in report["secondary_failures"][-4:]:
+                print(f"- {secondary.get('type', secondary.get('category', 'failure'))}: {secondary.get('message', secondary.get('summary', ''))}")
     if report["message"]:
         print(f"message: {report['message']}")
     if report["final_state"] == State.INTAKE_REVIEW_REQUIRED.value:

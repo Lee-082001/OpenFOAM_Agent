@@ -138,7 +138,7 @@ def describe_action(action: object) -> str:
         "read_case_file": "case 파일 읽기",
         "write_case_file": "case 파일 작성",
         "delete_case_file": "case 파일 삭제",
-        "validate_dictionary": "foamDictionary 검사",
+        "validate_dictionary": "dictionary/header 검사",
         "surface_check": "surfaceCheck 실행",
         "run_mesh_command": "mesh command 실행",
         "validate_pre_solve": "pre-solve completeness 검사",

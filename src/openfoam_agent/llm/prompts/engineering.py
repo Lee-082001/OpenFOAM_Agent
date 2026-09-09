@@ -24,9 +24,12 @@ error evidence on the next LLM turn to repair the plan.
 When a smaller chain is predictable from success/failure alone, prefer a `sequence` containing
 2-6 ordered actions. Python executes every sequence member through the same sandbox, allowlists,
 budgets and validators used for single actions and stops immediately on the first failure. Good
-sequence shapes include write -> foamDictionary, write STL -> surfaceCheck, write mesh input ->
-mesh command -> checkMesh, and solver-input writes -> validation -> validate_pre_solve. In
-runtime repair, a sequence may end with retry_solver.
+sequence shapes include write -> deterministic file validation, write STL -> surfaceCheck,
+write mesh input -> mesh command -> checkMesh, and solver-input writes ->
+validate_pre_solve. foamDictionary is only an optional diagnostic probe: timeout/non-zero
+without an explicit OpenFOAM fatal diagnostic does not prove a bad CFD case. Python routes
+tool/infrastructure failures separately, so only actual case/mesh semantic failures should
+trigger CFD repair. In runtime repair, a sequence may end with retry_solver.
 Do not batch searches/reference reads whose results require a new engineering judgment; use a
 single action, inspect the observation, then decide again. Do not rewrite the same case file
 multiple times in one sequence without an intervening deterministic validation/native action.
@@ -133,7 +136,7 @@ CASE_AUTHORING_SYSTEM_PROMPT = ENGINEERING_INVARIANTS + """\nA Python-held Engin
 
 CASE_PLAN_RETRY_SYSTEM_PROMPT = ENGINEERING_INVARIANTS + """\nThe previous execute_case_plan failed deterministic authoring preflight before any candidate case file was committed. Python retained that complete candidate in memory. Return only a small repair_candidate_case_plan delta against the retained candidate, or block if the deterministic policy cannot be satisfied. Change only the implicated raw/typed dictionary candidate files; do not regenerate unchanged files, search references, read the workspace, or rewrite plan metadata. Python applies the delta to the in-memory candidate, re-runs whole-bundle preflight, and commits the entire candidate only after it passes."""
 
-REPAIR_SYSTEM_PROMPT = ENGINEERING_INVARIANTS + """\nRepair the current case after deterministic execution failed. Preserve the baseline solver and update confirmed_fact_bindings when a changed file alters a fact implementation. If only EngineeringPlan metadata is wrong, return updated_plan without fake file edits. Otherwise return changed files only; prefer exact patches for stable ordinary text/dictionary edits and use replacements only when needed. Re-run only validations/mesh commands required by the change. Python preserves unchanged files and the baseline plan."""
+REPAIR_SYSTEM_PROMPT = ENGINEERING_INVARIANTS + """\nRepair the current case only after Python classified the deterministic failure as CASE semantic/mesh invalidity. Tool timeout, validator uncertainty, context/schema/infrastructure and security failures are controller-owned and must not be repaired by changing CFD files. Preserve the baseline solver and update confirmed_fact_bindings when a changed file alters a fact implementation. If only EngineeringPlan metadata is wrong, return updated_plan without fake file edits. Otherwise return changed files only; prefer exact patches for stable ordinary text/dictionary edits and use replacements only when needed. Re-run only validations/mesh commands required by the change. Python preserves unchanged files and the baseline plan."""
 
 CANDIDATE_BLOCK_MESH_REPAIR_SYSTEM_PROMPT = ENGINEERING_INVARIANTS + """\nThe retained execute_case_plan failed deterministic blockMesh topology validation before any case file was committed. Return repair_candidate_block_mesh with one corrected complete block_mesh object, or block. The supplied retained_candidate.failed_artifacts contains the exact structured block_mesh that failed. Fix the topology semantically; never use text patches, generic typed dictionaries, or regenerate unrelated case files. Python will re-run topology validation and then the original deterministic case pipeline."""
 

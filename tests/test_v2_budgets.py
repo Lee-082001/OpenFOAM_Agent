@@ -18,6 +18,7 @@ from conftest import (
     FakeOpenFOAMTools,
     ScriptedLLM,
     control_dict,
+    foam_header,
     make_plan,
     make_state,
     mesh_ok_log,
@@ -68,7 +69,7 @@ def test_progress_at_soft_boundary_extends_engineering_window(tmp_path, graph_pa
         WriteCaseFileAction(
             type="write_case_file",
             path="system/fvSchemes",
-            content="ddtSchemes { default Euler; }\n",
+            content=foam_header("system/fvSchemes") + "ddtSchemes { default Euler; }\n",
             rationale="New artifact at the soft boundary proves work progressed.",
         ),
         RunMeshCommandAction(
@@ -222,6 +223,7 @@ def test_native_command_budget_is_independent_from_agent_turn_budget(tmp_path, g
             max_agent_steps=5,
             hard_max_agent_steps=5,
             max_native_commands=1,
+            foam_dictionary_probe=True,
         ),
     )
 
@@ -253,7 +255,7 @@ def test_mesh_repair_cycle_budget_blocks_eleventh_style_repair_group(tmp_path, g
         WriteCaseFileAction(
             type="write_case_file",
             path="system/blockMeshDict",
-            content="generation 0;\n",
+            content=foam_header("system/blockMeshDict") + "generation 0;\n",
             rationale="Initial mesh input.",
         ),
         RunMeshCommandAction(
@@ -264,7 +266,7 @@ def test_mesh_repair_cycle_budget_blocks_eleventh_style_repair_group(tmp_path, g
         WriteCaseFileAction(
             type="write_case_file",
             path="system/blockMeshDict",
-            content="generation 1;\n",
+            content=foam_header("system/blockMeshDict") + "generation 1;\n",
             rationale="Allowed repair cycle one.",
         ),
         RunMeshCommandAction(
@@ -275,7 +277,7 @@ def test_mesh_repair_cycle_budget_blocks_eleventh_style_repair_group(tmp_path, g
         WriteCaseFileAction(
             type="write_case_file",
             path="system/blockMeshDict",
-            content="generation 2;\n",
+            content=foam_header("system/blockMeshDict") + "generation 2;\n",
             rationale="This second repair cycle must be blocked.",
         ),
         BlockAction(
@@ -308,7 +310,7 @@ def test_mesh_repair_cycle_budget_blocks_eleventh_style_repair_group(tmp_path, g
     agent.prepare(state, native_execution=True)
 
     assert state.current_state == State.ENGINEERING_BLOCKED
-    assert agent.workspace.read_text("system/blockMeshDict") == "generation 1;\n"
+    assert agent.workspace.read_text("system/blockMeshDict") == foam_header("system/blockMeshDict") + "generation 1;\n"
     assert "Mesh repair cycle budget exhausted (1)" in state.engineering_events[6].summary
     assert agent._mesh_repair_cycle_count(state) == 1
 
