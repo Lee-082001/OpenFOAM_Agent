@@ -272,7 +272,7 @@ def compile_tasks(instruction, payload, max_chars):
         task=project(payload,items,compact=bool(compact_mode))
         meta={"id":f"{sha(payload['frozen_engineering_plan'])[:16]}:{index+1}","index":index+1,"count":len(batches),
             "paths":items,"is_final":index==len(batches)-1,"compact_plan_projection":bool(compact_mode),
-            "response_contract":"Echo task_id. Return only these files. required_case_files is controller-owned and may be omitted. Intermediate tasks set defer_native=true; any emitted native commands are ignored. Final task supplies the complete native pipeline."}
+            "response_contract":"Echo task_id. Return exactly these assigned artifacts. required_case_files is controller-owned and may be omitted. Intermediate tasks set defer_native=true; any emitted native commands are ignored. Native/validation lists are optional strategy hints even on the final task; Python compiles the authoritative CaseBuildGraph and final checkMesh from the assembled bundle."}
         task["authoring_task"]=meta
         # If protocol metadata tips the task over the grouping reserve, the exact cap is
         # still allowed. Rebuild with compact projection before giving up.

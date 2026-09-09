@@ -3,6 +3,7 @@ from __future__ import annotations
 from openfoam_agent.contracts.evidence import implementation_evidence_pack, evidence_coverage_failures, authoring_prompt_evidence, advisory_authoring_evidence_summary
 from openfoam_agent.contracts.evidence_policy import POLICY_SUMMARY, provider_is_sufficient
 from openfoam_agent.engineering.authoring_tasks import compile_tasks, accept_task
+from openfoam_agent.engineering.case_build_graph import compile_case_build_graph
 from openfoam_agent.llm.context import ContextBudgetError
 from openfoam_agent.engineering.design_context import build_partitioned_design_prompt
 from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
@@ -832,11 +833,24 @@ class CFDEngineeringAgent:
                         "spec": candidate.block_mesh.model_dump(mode="json"),
                     }
                 )
+        authored_paths = {item["path"] for item in manifest}
+        missing_required = [
+            path for path in candidate.plan.required_case_files if path not in authored_paths
+        ]
         return {
             "goal": candidate.goal,
             "failed_paths": list(self._pending_candidate_failed_paths),
+            "missing_required_files": missing_required,
             "manifest": manifest,
             "failed_artifacts": artifacts,
+            "controller_build_policy": {
+                "manifest_authority": "EngineeringPlan.required_case_files",
+                "instruction": (
+                    "Repair only missing/conflicting authored artifacts. Do not redesign validation lists; "
+                    "Python compiles static validation, surface checks, mesh consumers and final checkMesh "
+                    "from the completed bundle."
+                ),
+            },
             "pipeline": {
                 "validate_dictionaries": candidate.validate_dictionaries,
                 "surface_checks": candidate.surface_checks,
@@ -1191,6 +1205,10 @@ class CFDEngineeringAgent:
         if execution.block_mesh is not None:
             try:
                 rendered_files.append((execution.block_mesh.path, serialize_block_mesh(execution.block_mesh)))
+                # Preserve the semantically validated structured candidate even when a
+                # later manifest-coverage check finds another missing file. This keeps
+                # blockMesh repair state available without claiming the case was committed.
+                self._structured_block_mesh = execution.block_mesh
             except (FoamSerializationError, ValueError) as exc:
                 event = self._event(
                     llm_step,
@@ -1213,6 +1231,49 @@ class CFDEngineeringAgent:
         # leaving only the preceding files behind and triggering a long missing-file
         # repair cascade.
         candidate_bundle = {path: content for path, content in rendered_files}
+
+        # A later repair turn may intentionally provide only changed files after an
+        # earlier complete candidate was committed and a native consumer failed. Reuse
+        # only controller-tracked authored files from this workspace as the immutable
+        # baseline; an initial incomplete candidate has no such baseline and therefore
+        # cannot pass manifest coverage accidentally.
+        effective_bundle = dict(candidate_bundle)
+        existing_authored = set(self.workspace.list_authored())
+        reused_existing_paths: list[str] = []
+        for required_path in execution.plan.required_case_files:
+            if required_path in effective_bundle or required_path not in existing_authored:
+                continue
+            existing_path = self.workspace.resolve_case_path(required_path, must_exist=True)
+            effective_bundle[required_path] = existing_path.read_text(encoding="utf-8", errors="replace")
+            reused_existing_paths.append(required_path)
+
+        # v4.6: compile one controller-owned build graph before the first workspace
+        # mutation. The frozen EngineeringPlan is the manifest authority; model-authored
+        # validation lists can never create actions for files that were not authored.
+        build_graph = compile_case_build_graph(execution, effective_bundle)
+        if not build_graph.valid:
+            event = self._event(
+                llm_step,
+                "case_build_graph",
+                False,
+                "Controller could not compile a complete case build graph; no candidate files were written.",
+                "\n".join(f"- {failure}" for failure in build_graph.failures),
+                validation_status="fail",
+                failure_category="case",
+            )
+            blocked = self._record_case_plan_authoring_failure(state, event)
+            self._emit_engineering_event(
+                f"{progress_phase}-execution-plan",
+                event,
+                step=progress_step,
+                limit=progress_limit,
+                state=state,
+            )
+            self._pending_candidate_execution = execution
+            self._pending_candidate_failed_paths = tuple(build_graph.missing_required_paths)[:20]
+            self._pending_execution_plan = None
+            return blocked
+
         bundle_failures = self.workspace.validate_candidate_bundle(candidate_bundle)
         # v4.2.1 progress-first authoring: syntax/reference evidence is advisory
         # provenance, not a write permission token. Raw and typed files are both
@@ -1224,15 +1285,12 @@ class CFDEngineeringAgent:
         # FoamFile contract before *any* candidate file is committed. This closes the
         # gap where a shallow dictionary probe accepted headerless content and blockMesh/foamRun
         # discovered the malformed header later, one file at a time.
-        header_targets = list(dict.fromkeys([
-            "system/controlDict",
-            "system/fvSchemes",
-            "system/fvSolution",
-            *execution.required_case_files,
-            *execution.validate_dictionaries,
-        ]))
+        # Static/header targets are compiled from the artifacts that actually exist,
+        # not from a redundant model-authored validation mirror. Surface/data inputs
+        # are intentionally left to their real consumers.
+        header_targets = list(build_graph.dictionary_paths)
         for path in header_targets:
-            content = candidate_bundle.get(path)
+            content = effective_bundle.get(path)
             if content is None:
                 continue
             suffix = Path(path).suffix.lower()
@@ -1270,6 +1328,25 @@ class CFDEngineeringAgent:
             self._pending_execution_plan = None
             return blocked
 
+        self.progress.emit(
+            ProgressEvent(
+                phase=f"{progress_phase}-case-build",
+                message="controller-owned case build graph 검증 완료; transactional commit 시작",
+                status="success",
+                step=progress_step,
+                limit=progress_limit,
+                metrics={
+                    "requiredFiles": len(build_graph.required_paths),
+                    "authoredFiles": len(build_graph.authored_paths),
+                    "staticChecks": len(build_graph.dictionary_paths),
+                    "surfaceChecks": len(build_graph.surface_paths),
+                    "nativeCommands": len(build_graph.native_pipeline),
+                    "ignoredHints": len(build_graph.warnings),
+                    "reusedExistingFiles": len(reused_existing_paths),
+                },
+            )
+        )
+
         # Only after every candidate file passes deterministic authoring preflight do
         # we start mutating the workspace.
         self._pending_candidate_execution = None
@@ -1288,44 +1365,40 @@ class CFDEngineeringAgent:
             )
 
         self._pending_execution_plan = execution.plan
-        for path in execution.validate_dictionaries:
-            actions.append(
-                ValidateDictionaryAction(
-                    type="validate_dictionary",
-                    path=path,
-                    rationale="",
-                )
-            )
-        for path in execution.surface_checks:
+
+        # v4.6: validation/native actions are compiled from the actual bundle. The
+        # model may suggest a mesh strategy, but cannot independently schedule stale
+        # per-file validators. Header/semantic checks already ran transactionally above.
+        for path in build_graph.surface_paths:
             actions.append(
                 SurfaceCheckAction(
                     type="surface_check",
                     path=path,
-                    rationale="",
+                    rationale="controller-compiled surface validation",
                 )
             )
-        if execution.native_pipeline:
-            for invocation in execution.native_pipeline:
+        legacy_mesh_dispatch = {"blockMesh", "surfaceFeatureExtract", "snappyHexMesh", "createPatch", "checkMesh"}
+        for invocation in build_graph.native_pipeline:
+            if invocation.command in legacy_mesh_dispatch and not invocation.arguments:
+                actions.append(
+                    RunMeshCommandAction(
+                        type="run_mesh_command",
+                        command=invocation.command,
+                        rationale="controller-compiled mesh/validation consumer",
+                    )
+                )
+            else:
                 actions.append(
                     RunNativeOpenFOAMAction(
                         type="run_openfoam_command",
                         invocation=invocation,
                     )
                 )
-        else:
-            for command in execution.mesh_commands:
-                actions.append(
-                    RunMeshCommandAction(
-                        type="run_mesh_command",
-                        command=command,
-                        rationale="",
-                    )
-                )
         actions.append(
             ValidatePreSolveAction(
                 type="validate_pre_solve",
-                required_case_files=execution.required_case_files,
-                rationale="",
+                required_case_files=list(build_graph.required_paths),
+                rationale="controller-compiled required manifest",
             )
         )
         actions.append(
@@ -1345,7 +1418,15 @@ class CFDEngineeringAgent:
                 status="start",
                 step=progress_step,
                 limit=progress_limit,
-                metrics={"actions": total, "files": len(execution.files) + len(execution.typed_dictionaries) + (1 if execution.block_mesh is not None else 0)},
+                metrics={
+                    "actions": total,
+                    "files": len(build_graph.authored_paths),
+                    "requiredFiles": len(build_graph.required_paths),
+                    "surfaceChecks": len(build_graph.surface_paths),
+                    "nativeCommands": len(build_graph.native_pipeline),
+                    "controllerCompiled": True,
+                    "reusedExistingFiles": len(reused_existing_paths),
+                },
             )
         )
 
@@ -4103,6 +4184,8 @@ class CFDEngineeringAgent:
                 )
             if isinstance(exc, (WorkspaceSafetyError, ExecutionPolicyError)):
                 category = "security"
+            elif isinstance(exc, FileNotFoundError):
+                category = "case"
             elif isinstance(exc, OSError):
                 category = "infra"
             else:
@@ -4169,7 +4252,7 @@ class CFDEngineeringAgent:
             for event in self._current_round_events(state)
             if (
                 not event.success
-                and event.action_type in {"typed_dictionary_serialize", "block_mesh_serialize", "case_bundle_preflight", "authoring_semantic_conflict"}
+                and event.action_type in {"typed_dictionary_serialize", "block_mesh_serialize", "case_bundle_preflight", "authoring_semantic_conflict", "case_build_graph"}
             )
         )
 
@@ -4221,7 +4304,7 @@ class CFDEngineeringAgent:
         last = events[-1]
         return (
             not last.success
-            and last.action_type in {"typed_dictionary_serialize", "case_bundle_preflight", "authoring_semantic_conflict"}
+            and last.action_type in {"typed_dictionary_serialize", "case_bundle_preflight", "authoring_semantic_conflict", "case_build_graph"}
             and self._pending_execution_plan is None
             and self._pending_candidate_execution is not None
         )

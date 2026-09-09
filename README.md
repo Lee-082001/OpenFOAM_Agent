@@ -1,3 +1,17 @@
+## v4.6.0 controller-owned case build graph
+
+- The frozen `EngineeringPlan.required_case_files` is now the sole authored-input manifest and is checked against the complete candidate bundle before any workspace mutation.
+- Model-authored `validate_dictionaries`, `surface_checks`, and native/checkMesh lists are no longer independent action authorities. Python compiles one deterministic `CaseBuildGraph` from the frozen manifest plus artifacts that actually exist.
+- An incomplete authoring response is retained in memory and routed to compact missing-file repair; partial candidates are never committed.
+- Stale validation hints that point at unauthored files are ignored instead of producing `FileNotFoundError` after partial writes.
+- Static/header targets are derived from the authored bundle, surface validation is derived from actual case-local surface artifacts, obvious blockMesh/snappy consumers are inferred from their dictionaries, and final checkMesh ordering is controller-owned.
+- Later committed-case repair turns may reuse only controller-tracked authored baseline files; this does not weaken the initial all-or-nothing manifest gate.
+- Missing case files are classified as case/authoring contract failures rather than runtime infrastructure failures.
+
+# Release notice: OpenFOAM Agent 4.6.0
+
+> v4.6.0 fixes a live v4.5.1 authoring run where the model authored only three files but separately requested validation of `system/fvSolution`, causing the executor to write the partial bundle and then fail on a file that had never been created. The controller now compiles the entire authoring/validation/native action graph from one manifest before the first write. See `V4_6_0_CHANGES.md`.
+
 ## v4.5.1 structured authoring normalization boundary
 
 - Harmless duplicate typed-dictionary leaf assignments are normalized before nested Pydantic validation, so repeated model echoes no longer consume a full structured-output retry.

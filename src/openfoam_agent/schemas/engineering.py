@@ -1162,23 +1162,23 @@ class CaseAuthoringAction(_EngineeringModel):
             if self.native_pipeline or self.mesh_commands:
                 raise ValueError("Intermediate authoring tasks cannot request native execution.")
             return self
-        if not self.native_pipeline and not self.mesh_commands:
-            raise ValueError("author_case requires a native validation pipeline.")
-        pipeline_names = [item.command for item in self.native_pipeline] if self.native_pipeline else list(self.mesh_commands)
-        if not self.native_pipeline and pipeline_names.count("checkMesh") != 1:
-            raise ValueError("Legacy author_case requires exactly one checkMesh validation command.")
+
+        # v4.6: native/validation lists are strategy hints, not execution authority.
+        # The controller compiles the final CaseBuildGraph from the frozen required
+        # manifest plus the artifacts actually authored. Therefore an otherwise valid
+        # authoring response does not need to echo checkMesh or any validation list.
+        # If hints are supplied, keep only structural safety checks here; executable
+        # ordering, prerequisites and final checkMesh ownership are deterministic.
         if self.native_pipeline:
             regions = []
             for command in self.native_pipeline:
-                if command.command != "checkMesh": continue
+                if command.command != "checkMesh":
+                    continue
                 args = command.arguments
                 region = args[args.index("-region")+1] if "-region" in args and args.index("-region")+1 < len(args) else ""
                 if region in regions:
                     raise ValueError("author_case contains duplicate checkMesh validation for a region.")
                 regions.append(region)
-            if not regions: raise ValueError("author_case requires checkMesh region validation.")
-        if pipeline_names[-1] != "checkMesh":
-            raise ValueError("author_case native pipeline must end with checkMesh.")
         return self
 
 

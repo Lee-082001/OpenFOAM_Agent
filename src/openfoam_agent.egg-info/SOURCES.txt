@@ -31,6 +31,7 @@ src/openfoam_agent/data/openfoam14_capability_graph.json
 src/openfoam_agent/engineering/__init__.py
 src/openfoam_agent/engineering/agent.py
 src/openfoam_agent/engineering/authoring_tasks.py
+src/openfoam_agent/engineering/case_build_graph.py
 src/openfoam_agent/engineering/design_context.py
 src/openfoam_agent/llm/__init__.py
 src/openfoam_agent/llm/claude_client.py
@@ -162,3 +163,5 @@ tests/test_v430_validation_failure_routing.py
 tests/test_v431_geometry_ownership.py
 tests/test_v440_semantic_assurance_policy.py
 tests/test_v450_runtime_contract_consolidation.py
+tests/test_v451_structured_authoring_normalization.py
+tests/test_v460_controller_case_build_graph.py

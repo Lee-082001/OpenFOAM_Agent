@@ -122,8 +122,9 @@ def test_candidate_repair_can_replace_block_mesh_semantically(tmp_path, graph_pa
         diagnosis="replace an internal boundary face with a true exterior face",
         block_mesh=_two_block_mesh(internal_as_boundary=False),
     )
-    # Native execution is intentionally disabled: this test proves semantic replacement
-    # and deterministic serialization occur before a native mesh command is attempted.
+    # Native execution is intentionally disabled. v4.6 preserves the repaired
+    # structured candidate but does not commit even blockMeshDict until the frozen
+    # required manifest is complete (0/U is intentionally missing in this fixture).
     agent._execute_candidate_block_mesh_repair(
         state,
         repair,
@@ -135,7 +136,9 @@ def test_candidate_repair_can_replace_block_mesh_semantically(tmp_path, graph_pa
     )
     assert agent._structured_block_mesh is not None
     assert validate_block_mesh_topology(agent._structured_block_mesh).valid
-    assert "testPatch" in agent.workspace.read_text("system/blockMeshDict")
+    assert agent.workspace.list_authored() == []
+    assert agent._pending_candidate_execution is not None
+    assert "0/U" in agent._candidate_repair_context()["missing_required_files"]
 
 
 def test_committed_mesh_repair_contract_accepts_full_block_mesh_replacement(tmp_path, graph_path):

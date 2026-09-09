@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: openfoam-agent
-Version: 4.5.0
+Version: 4.6.0
 Summary: Agent-owned OpenFOAM CFD engineering behind deterministic safety gates
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
@@ -8,6 +8,33 @@ Requires-Dist: openai<3,>=2
 Requires-Dist: pydantic<3,>=2.8
 Provides-Extra: dev
 Requires-Dist: pytest<10,>=8; extra == "dev"
+
+## v4.6.0 controller-owned case build graph
+
+- The frozen `EngineeringPlan.required_case_files` is now the sole authored-input manifest and is checked against the complete candidate bundle before any workspace mutation.
+- Model-authored `validate_dictionaries`, `surface_checks`, and native/checkMesh lists are no longer independent action authorities. Python compiles one deterministic `CaseBuildGraph` from the frozen manifest plus artifacts that actually exist.
+- An incomplete authoring response is retained in memory and routed to compact missing-file repair; partial candidates are never committed.
+- Stale validation hints that point at unauthored files are ignored instead of producing `FileNotFoundError` after partial writes.
+- Static/header targets are derived from the authored bundle, surface validation is derived from actual case-local surface artifacts, obvious blockMesh/snappy consumers are inferred from their dictionaries, and final checkMesh ordering is controller-owned.
+- Later committed-case repair turns may reuse only controller-tracked authored baseline files; this does not weaken the initial all-or-nothing manifest gate.
+- Missing case files are classified as case/authoring contract failures rather than runtime infrastructure failures.
+
+# Release notice: OpenFOAM Agent 4.6.0
+
+> v4.6.0 fixes a live v4.5.1 authoring run where the model authored only three files but separately requested validation of `system/fvSolution`, causing the executor to write the partial bundle and then fail on a file that had never been created. The controller now compiles the entire authoring/validation/native action graph from one manifest before the first write. See `V4_6_0_CHANGES.md`.
+
+## v4.5.1 structured authoring normalization boundary
+
+- Harmless duplicate typed-dictionary leaf assignments are normalized before nested Pydantic validation, so repeated model echoes no longer consume a full structured-output retry.
+- Repeated typed dictionary files for the same case path are deterministically merged before file-path validation.
+- Repeated identical raw files are deduplicated.
+- Substantive duplicate conflicts are not silently resolved: they are carried as controller-owned conflict metadata into the retained-candidate repair path, where only the implicated file is repaired.
+- Conflict metadata is hidden from the LLM JSON schema, so the model is not asked to reproduce controller bookkeeping.
+- Security/path checks, OpenFOAM serialization, native validation, checkMesh, CaseSeal and runtime gates remain strict.
+
+# Release notice: OpenFOAM Agent 4.5.1
+
+> v4.5.1 fixes a live v4.5.0 `author_case` failure where Codex emitted the same typed dictionary entry path more than once. The old nested validator raised `StructuredOutputError` before controller normalization, causing two expensive Codex retries and aborting Engineering. The structured-output boundary now normalizes harmless repetition and defers real value conflicts to deterministic retained-candidate repair. See `V4_5_1_CHANGES.md`.
 
 ## v4.5.0 runtime contract and native-pipeline consolidation
 
