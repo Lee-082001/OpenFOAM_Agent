@@ -2766,10 +2766,7 @@ class CFDEngineeringAgent:
                 False,
             )
         if isinstance(action, BlockAction):
-            if (
-                action.block_kind == "engineering_choice_missing"
-                and state.user_request.exploratory_completion_authorized
-            ):
+            if action.block_kind == "engineering_choice_missing":
                 missing = ", ".join(action.missing_items[:12]) or "delegated engineering details"
                 return (
                     self._event(
@@ -4305,6 +4302,44 @@ class CFDEngineeringAgent:
             return f"eng:{state.run_id}:revision:{suffix}"
         return f"eng:{state.run_id}:round:{state.engineering_round_start_index}"
 
+    def _geometry_authoring_policy(self, state: CFDState) -> dict[str, object]:
+        """Controller-owned geometry ownership/fidelity policy for progress-first CFD design.
+
+        Missing external CAD is not automatically missing user input. When no immutable
+        user asset is present and the confirmed intake describes geometry conceptually,
+        the Engineering Agent owns the representative procedural geometry and may create
+        safe case-local text geometry (for example blockMesh topology or ASCII STL).
+        """
+        assets = list(state.assets or [])
+        geometry_facts = []
+        if state.intake is not None:
+            for fact in state.intake.facts:
+                if str(fact.id).startswith("geometry."):
+                    geometry_facts.append({
+                        "id": fact.id,
+                        "value": fact.value,
+                        "source": fact.source,
+                    })
+        return {
+            "mode": "progress_first_geometry_v1",
+            "user_assets_present": bool(assets),
+            "user_assets": assets[:16],
+            "confirmed_geometry_facts": geometry_facts[:24],
+            "agent_generated_geometry_authorized": True,
+            "representative_geometry_defaults_authorized": True,
+            "preferred_self_contained_methods": [
+                "typed blockMesh for simple channels/pipes/obstacles",
+                "agent-authored ASCII STL/OBJ plus native meshing when a surface method is genuinely useful",
+            ],
+            "rules": [
+                "A missing external CAD/STL is not a blocking condition unless an exact user-owned asset is itself a confirmed requirement.",
+                "Creating representative procedural geometry from confirmed topology plus engineering_defaults is authorized engineering, not fabrication.",
+                "Do not overwrite or silently replace immutable user assets.",
+                "If a chosen surface-based mesh requires geometry and no user asset is required, author the case-local surface or choose an equivalent self-contained procedural mesh instead of blocking.",
+                "Record representative dimensions/angles/radii selected by the Agent as engineering_defaults and do not claim exact geometric fidelity.",
+            ],
+        }
+
     def _generate_turn(
         self,
         state: CFDState,
@@ -4468,6 +4503,7 @@ class CFDEngineeringAgent:
                 "confirmed_intake": confirmed_intake_definition(state),
                 "implementation_evidence_pack": advisory_authoring_evidence_summary(state, self._draft_design_plan, max_records=12),
                 "assets": state.assets,
+                "geometry_authoring_policy": self._geometry_authoring_policy(state),
                 "authoring_brief": self._draft_authoring_brief,
                 "environment_hint": self.tools.environment_snapshot(),
                 "tool_execution_contracts": self._mesh_tool_contracts(),
@@ -4488,6 +4524,7 @@ class CFDEngineeringAgent:
                 "confirmed_intake": confirmed_intake_definition(state),
                 "intake_sha256": state.intake_digest,
                 "engineering_assumption_policy": assumption_policy,
+                "geometry_authoring_policy": self._geometry_authoring_policy(state),
                 "evidence_policy": evidence_policy,
                 "verified_execution_candidates": verified_execution_candidates,
                 "evidence_retrieval_policy": retrieval_policy,

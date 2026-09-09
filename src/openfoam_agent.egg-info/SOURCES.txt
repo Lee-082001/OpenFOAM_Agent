@@ -157,3 +157,5 @@ tests/test_v403_codex_model_only_transport.py
 tests/test_v410_risk_stage_evidence.py
 tests/test_v420_progress_first_validation.py
 tests/test_v423_authoring_manifest_authority.py
+tests/test_v430_validation_failure_routing.py
+tests/test_v431_geometry_ownership.py

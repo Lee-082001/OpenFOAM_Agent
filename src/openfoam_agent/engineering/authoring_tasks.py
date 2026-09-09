@@ -203,6 +203,18 @@ def project(payload, paths, *, compact=False):
         evidence_ids = {eid for item in coverage for eid in item["evidence_ids"]}
         evidence = {**evidence, "file_coverage":coverage, "records":[item for item in evidence["records"] if item["evidence_id"] in evidence_ids]}
     result = {key:deepcopy(value) for key,value in payload.items() if key not in {"frozen_engineering_plan", "confirmed_intake", "implementation_evidence_pack", "current_case_files"}}
+    if compact and isinstance(result.get("geometry_authoring_policy"), dict):
+        policy = result["geometry_authoring_policy"]
+        result["geometry_authoring_policy"] = {
+            "mode": policy.get("mode", "progress_first_geometry_v1"),
+            "user_assets_present": bool(policy.get("user_assets_present")),
+            "agent_generated_geometry_authorized": bool(policy.get("agent_generated_geometry_authorized", True)),
+            "representative_geometry_defaults_authorized": bool(policy.get("representative_geometry_defaults_authorized", True)),
+            "rule": (
+                "If exact user-owned geometry is not a confirmed requirement, missing CAD/STL does not block; "
+                "author self-contained procedural geometry or a bounded case-local ASCII surface and record representative dimensions as engineering_defaults."
+            ),
+        }
     # The full controller-held plan remains immutable; compact tasks preserve the
     # authoring-relevant execution/region/interface projection plus its full-plan hash.
     result.update(frozen_engineering_plan=plan,confirmed_intake=intake,implementation_evidence_pack=evidence,

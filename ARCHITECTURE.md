@@ -1,3 +1,9 @@
+## v4.3.1 geometry ownership boundary
+
+Geometry absence is no longer equivalent to missing user input. The controller supplies a `geometry_authoring_policy` to both design and staged authoring. If the confirmed intake requires an exact user-owned CAD/surface, the asset remains immutable and cannot be fabricated or silently replaced. Otherwise, topology described conceptually by the user plus delegated ordinary dimensions is Agent-owned representative geometry. The Engineering Agent may choose a self-contained typed `blockMesh` representation or author bounded case-local ASCII surface geometry for a native meshing workflow. Such dimensions must be recorded as `engineering_default` provenance and the resulting case must not claim exact geometric fidelity.
+
+The authoring partitioner preserves this policy in compact form so file-scoped tasks retain the essential geometry-ownership rule without making small context budgets indivisible. Actual paths/content, mesh topology, native meshing, `checkMesh`, case sealing and solve approval remain deterministic hard boundaries.
+
 ## v4.3.0 validation and failure-routing boundary
 
 Validation is no longer a binary alias for tool exit status. Native observations are interpreted as `pass`, `fail`, or `inconclusive`, and failures are routed by category: `case`, `tool`, `infra`, `security`, or `user_contract`. Explicit OpenFOAM fatal diagnostics and deterministic CFD/mesh semantic violations are `case` failures and may enter bounded Engineering repair. Validator timeouts, process-wrapper uncertainty, transport/context errors and other infrastructure failures are not rewritten into CFD assumptions or case edits. Security and confirmed-user-contract failures remain terminal/review gates.

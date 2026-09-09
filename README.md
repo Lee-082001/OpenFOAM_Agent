@@ -1,3 +1,17 @@
+## v4.3.1 progress-first geometry ownership
+
+- Concept geometry with delegated dimensions is Agent-owned engineering, not a missing external-asset condition.
+- Design and staged authoring receive an explicit `geometry_authoring_policy`. When exact user-owned CAD/surface fidelity is not a confirmed requirement, the Agent must choose a self-contained procedural geometry rather than block for a missing STL/CAD file.
+- Simple generic pipe/channel/obstacle problems should prefer typed `blockMesh`; a bounded case-local ASCII STL/OBJ under `constant/triSurface` is also allowed when a surface workflow is genuinely useful.
+- Representative geometry dimensions remain `engineering_default` provenance and must not be presented as exact user geometry.
+- Immutable user assets remain protected and cannot be overwritten/replaced silently.
+- `engineering_choice_missing` is no longer allowed to terminally block ordinary delegated geometry/numerical choices merely because the legacy exploratory flag is false.
+- Compact authoring partitions carry a reduced geometry policy so the new contract does not reintroduce small-budget `ContextBudgetError` failures.
+
+# Release notice: OpenFOAM Agent 4.3.1
+
+> v4.3.1 fixes a live v4.3.0 case where design validation succeeded but staged authoring blocked because no external surface artifact existed for a generic two-branch pipe. The framework now distinguishes user-owned exact geometry from Agent-owned representative procedural geometry. See `V4_3_1_CHANGES.md`.
+
 ## v4.3.0 validation and failure-routing architecture
 
 - Native validation is tri-state: `pass`, `fail`, or `inconclusive`. A validator timeout or runner uncertainty is no longer evidence that the CFD case is wrong.
