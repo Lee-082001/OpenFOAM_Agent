@@ -1,3 +1,17 @@
+## v4.4.0 claim-based semantic assurance
+
+- Semantic preservation and machine proof are now separate concepts. Every confirmed non-context fact still has exact intake-digest/fact-ID/binding closure, but not every fact is forced to invent a case-file token.
+- Routing/interpretation facts such as derived `classification.problem_type=internal_flow` are provenance-bound and no longer require an artificial `case_assertion`.
+- Missing optional artifact/numeric assertions are advisory semantic-assurance gaps, not proof that an otherwise native-validated CFD case is invalid.
+- Any `case_assertion` or `numeric_relation` the Agent does supply is still verified strictly; contradiction with the current case remains a hard failure.
+- Direct user temporal/boundary/geometry/physics-style facts can surface advisory assurance warnings when no independent artifact proof is available.
+- `finish_preview` can seal a case that passed safety/native checks while reporting assurance warnings instead of entering a pointless repair/context loop.
+- Semantic assurance warnings are persisted in workflow state and exposed in CLI/report output.
+
+# Release notice: OpenFOAM Agent 4.4.0
+
+> v4.4.0 fixes a live v4.3.1 case that successfully authored all solver files, passed `blockMesh` and `checkMesh` (36,000 cells, max non-orthogonality 0, near-zero skewness), then failed only because the derived routing fact `classification.problem_type=internal_flow` lacked a fabricated case semantic assertion. v4.4.0 replaces category-wide mandatory assertion completeness with claim-based semantic assurance. See `V4_4_0_CHANGES.md`.
+
 ## v4.3.1 progress-first geometry ownership
 
 - Concept geometry with delegated dimensions is Agent-owned engineering, not a missing external-asset condition.

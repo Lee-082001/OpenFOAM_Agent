@@ -793,6 +793,7 @@ def build_report(
         "pending_action": state.pending_action,
         "primary_failure": state.primary_failure,
         "secondary_failures": list(state.secondary_failures),
+        "semantic_assurance_warnings": list(state.semantic_assurance_warnings),
         "native_process_records": state.native_process_records,
         "run_id": state.run_id,
         "prompt": request.prompt,
@@ -904,6 +905,10 @@ def _limitations(state: CFDState) -> list[str]:
         out.append("Pre-solve completeness validation passed; the selected OpenFOAM runtime still requires explicit /solve approval.")
     if state.current_state == State.ENGINEERING_BLOCKED:
         out.append("The autonomous engineering/retry budget ended without a safely executable result.")
+    if state.semantic_assurance_warnings:
+        out.append(
+            f"{len(state.semantic_assurance_warnings)} semantic-assurance item(s) remain advisory rather than independently machine-proven; these do not invalidate a case that passed deterministic/native checks."
+        )
     if state.current_state == State.RESULT_REVIEW_REQUIRED:
         out.append(
             "Runtime/post-processing evidence is available, but human review is still required; use /accept or /feedback in interactive mode."
@@ -995,6 +1000,10 @@ def _print_human_report(report: dict[str, Any]) -> None:
                 f"machineAssertedFacts={machine_asserted}/{len(bindings)}, "
                 f"numericRelations={numeric_relations}"
             )
+            if report.get("semantic_assurance_warnings"):
+                print("semantic assurance warnings:")
+                for item in report["semantic_assurance_warnings"][:12]:
+                    print(f"- {item}")
     budget = report.get("budget")
     if budget:
         extensions = budget["engineering_extensions"]

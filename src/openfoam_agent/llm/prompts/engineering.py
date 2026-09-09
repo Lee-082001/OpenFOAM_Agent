@@ -71,6 +71,14 @@ those are deterministic bindings validated by Python and are shown separately un
 `deterministic_bindings`. If no optional supporting evidence is needed beyond the separately
 validated solver provider, leave EngineeringPlan.evidence empty rather than fabricating one.
 
+Semantic assurance is claim-based, not completeness-by-category. Every confirmed non-context fact
+must remain in confirmed_fact_ids and confirmed_fact_bindings, but do not invent a case snippet merely
+to make a routing/interpretation fact such as classification.problem_type look machine-asserted.
+Use case_assertions or numeric_relation only when there is a stable, truthful artifact mapping. Python
+verifies every supplied assertion strictly. Missing optional machine assertions may be reported as
+advisory assurance gaps, but by themselves they are not evidence that an otherwise native-validated
+CFD case is invalid.
+
 Safety is enforced outside you: case paths are sandboxed, executable directives and
 untrusted code-loading constructs are rejected, commands are allowlisted, files are hashed,
 and solver execution requires separate user approval. Do not attempt to bypass those gates.
@@ -148,4 +156,4 @@ REVISION_SYSTEM_PROMPT = ENGINEERING_INVARIANTS + """\nYou are revising an alrea
 
 RUNTIME_REPAIR_SYSTEM_PROMPT = ENGINEERING_INVARIANTS + """\nYou are repairing a failed OpenFOAM solver execution. The user-approved execution driver, solver module(s), region assignments and confirmed intake are immutable during automatic retry. Relevant current case files and the native diagnostic are supplied directly. Prefer repair_runtime_case: group all exact edits for the same file under one file_patches entry and order its edits as they should be applied. Do not repeat the EngineeringPlan or regenerate unchanged files. If exact OpenFOAM release syntax is genuinely missing, use one gather_evidence batch with explicit tool/version evidence gaps; do not retrieve for ordinary engineering choices. Evidence-gap IDs are opaque protocol hints owned authoritatively by Python; if returned evidence is still insufficient, request a more-specific refinement with refines_gap_id. Python may reissue a colliding/self-refining child ID, so never change the intended evidence request merely to repair an ID. Request only the minimum dictionary/pre-solve/mesh validation needed before retry. Block if the failure needs a solver/intake change or cannot be repaired safely."""
 
-FINALIZATION_SYSTEM_PROMPT = ENGINEERING_INVARIANTS + """\nThe case already has deterministic validation evidence. Return only finish_preview with the final EngineeringPlan, or block with a concise reason. Do not request tools or restate case files. Re-check that confirmed_fact_bindings still describe the actual final case."""
+FINALIZATION_SYSTEM_PROMPT = ENGINEERING_INVARIANTS + """\nThe case already has deterministic validation evidence. Return only finish_preview with the final EngineeringPlan, or block with a concise reason. Do not request tools or restate case files. Re-check that confirmed_fact_bindings still describe the actual final case. Do not fabricate case_assertions for routing/interpretation metadata; a provenance-only binding is valid when no stable artifact token exists."""

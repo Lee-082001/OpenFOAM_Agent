@@ -2617,6 +2617,7 @@ class CFDEngineeringAgent:
     ) -> tuple[EngineeringEvent, bool]:
         if isinstance(action, FinishPreviewAction):
             validation = self.safety.validate_plan(action.plan, state.intake)  # type: ignore[arg-type]
+            state.semantic_assurance_warnings = list(validation.warnings)
             validation.failures.extend(self._validate_observed_provenance(action.plan, state))
             validation.failures.extend(self._validate_engineering_defaults(action.plan, state))
             validation.valid = not validation.failures
@@ -2680,6 +2681,10 @@ class CFDEngineeringAgent:
                     else:
                         self._presolve_case_manifest = current_manifest
                         self._presolve_required_case_files = tuple(action.plan.required_case_files)
+                        for warning in presolve.warnings:
+                            tagged = f"Pre-solve advisory: {warning}"
+                            if tagged not in state.semantic_assurance_warnings:
+                                state.semantic_assurance_warnings.append(tagged)
                         self.progress.emit(
                             ProgressEvent(
                                 phase="pre-solve",
@@ -2735,12 +2740,19 @@ class CFDEngineeringAgent:
                         else "Agent case preview passed static safety/integrity gates; native tools were not executed."
                     ),
                 )
+                assurance_output = "\n".join(state.semantic_assurance_warnings)
+                assurance_count = len(state.semantic_assurance_warnings)
                 return (
                     self._event(
                         step,
                         action.type,
                         True,
-                        "Engineering plan accepted and case sealed.",
+                        (
+                            f"Engineering plan accepted and case sealed with {assurance_count} advisory semantic-assurance gap(s)."
+                            if assurance_count
+                            else "Engineering plan accepted and case sealed."
+                        ),
+                        assurance_output,
                         artifact_sha256=state.case_seal.manifest_sha256,
                     ),
                     True,
@@ -5482,7 +5494,7 @@ class CFDEngineeringAgent:
                 "maxSkew": evidence.max_skewness,
             }
         details: tuple[str, ...] = ()
-        if not event.success and event.output_excerpt.strip():
+        if event.output_excerpt.strip() and (not event.success or event.action_type == "finish_preview"):
             if event.action_type == "finish_preview":
                 details = tuple(
                     self._redact_local_paths(line.strip())[:800]

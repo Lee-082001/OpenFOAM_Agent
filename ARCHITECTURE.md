@@ -1,3 +1,11 @@
+## v4.4.0 semantic assurance boundary
+
+Confirmed-fact preservation and independent machine proof are deliberately separate. Every non-context fact must remain bound to the immutable confirmed-intake digest and appear in `confirmed_fact_ids` / `confirmed_fact_bindings`. This provenance closure is always mandatory. It does not imply that every fact has a meaningful OpenFOAM dictionary token. Routing and interpretation metadata such as `classification.problem_type` may therefore be provenance-only. Requiring a fabricated snippet for such facts is prohibited.
+
+Machine assertions are claim-based. If an EngineeringPlan supplies `case_assertions` or a `numeric_relation`, Python verifies the current artifacts strictly and contradiction remains a hard failure. If a user-facing implementation fact would benefit from independent artifact proof but no stable assertion was supplied, the controller records a semantic-assurance warning instead of declaring the CFD case invalid. Native consumer checks, `blockMesh`, `checkMesh`, path/content security, required-file completeness, provider integrity, case sealing and solve approval remain independent hard gates.
+
+This prevents a metadata/evidence-completeness gap from entering CFD repair after the actual case already passed native validation. `finish_preview` persists advisory assurance gaps in `CFDState.semantic_assurance_warnings` and can seal the case when all true safety/execution gates pass. Explicit false assertions still fail closed.
+
 ## v4.3.1 geometry ownership boundary
 
 Geometry absence is no longer equivalent to missing user input. The controller supplies a `geometry_authoring_policy` to both design and staged authoring. If the confirmed intake requires an exact user-owned CAD/surface, the asset remains immutable and cannot be fabricated or silently replaced. Otherwise, topology described conceptually by the user plus delegated ordinary dimensions is Agent-owned representative geometry. The Engineering Agent may choose a self-contained typed `blockMesh` representation or author bounded case-local ASCII surface geometry for a native meshing workflow. Such dimensions must be recorded as `engineering_default` provenance and the resulting case must not claim exact geometric fidelity.

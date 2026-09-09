@@ -13,6 +13,7 @@ from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.foam_file import validate_foam_file_header
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
 from openfoam_agent.verification.foam_semantics.parser import parse_named_dictionary_assignments
+from openfoam_agent.verification.semantic_assurance import expectation_for_fact
 
 
 _SOLVER_ENTRY = re.compile(r"(?m)^\s*solver\s+(?P<solver>[A-Za-z][A-Za-z0-9_]*)\s*;")
@@ -36,6 +37,7 @@ _LINE_COMMENT = re.compile(r"//[^\n\r]*")
 class SafetyCheckResult:
     valid: bool
     failures: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     tool_results: list[ToolResult] = field(default_factory=list)
 
 
@@ -52,6 +54,7 @@ class DeterministicSafetyGate:
 
     def validate_plan(self, plan: EngineeringPlan, intake: CFDIntakeSpec) -> SafetyCheckResult:
         failures = list(self.workspace.validate_all_content())
+        warnings: list[str] = []
         if plan.confirmed_intake_sha256 != intake.digest():
             failures.append(
                 "Engineering plan is not bound to the exact confirmed intake digest."
@@ -141,9 +144,13 @@ class DeterministicSafetyGate:
                         self._validate_numeric_relation(binding.fact_id, fact.value, binding.numeric_relation)
                     )
 
-        # Selected high-impact invariants must carry machine-checkable implementation
-        # evidence.  Python does not decide the CFD implementation; the Agent chooses
-        # the snippets/relation and Python verifies them against the current case.
+        # v4.4 semantic assurance policy: absence of an optional machine assertion is
+        # not proof that the CFD case is invalid.  The immutable intake digest, exact
+        # fact-ID closure and ConfirmedFactBinding provide preservation/provenance.
+        # When the Agent *does* claim a case assertion or numeric relation, the code
+        # above verifies it strictly and any contradiction remains a hard failure.
+        # Missing higher-assurance pointers are reported as warnings only when such a
+        # representation is reasonably expected for that fact class.
         if intake.semantic_contract_version == "2":
             binding_by_id = {item.fact_id: item for item in plan.confirmed_fact_bindings}
             for fact in intake.facts:
@@ -152,16 +159,20 @@ class DeterministicSafetyGate:
                 binding = binding_by_id.get(fact.id)
                 if binding is None:
                     continue
-                if fact.category in {"classification", "temporal"} and not binding.case_assertions:
-                    failures.append(
-                        f"Confirmed {fact.category} fact {fact.id} requires at least one case semantic assertion."
-                    )
-                if fact.source == "user" and fact.category in {"physics", "scale", "property"}:
+                expectation = expectation_for_fact(fact)
+                has_machine_assertion = bool(binding.case_assertions or binding.numeric_relation is not None)
+                if not expectation.machine_assertion_recommended or has_machine_assertion:
+                    continue
+                if expectation.mode == "numeric_relation_recommended":
                     numeric_targets = _finite_numbers(fact.value)
-                    if len(numeric_targets) == 1 and binding.numeric_relation is None:
-                        failures.append(
-                            f"Numeric confirmed fact {fact.id} requires a machine-checkable numeric relation assertion."
+                    if len(numeric_targets) == 1:
+                        warnings.append(
+                            f"Semantic assurance gap for {fact.id}: direct numeric user fact has no machine-checkable numeric relation; provenance is preserved but independent artifact recomputation is unavailable."
                         )
+                        continue
+                warnings.append(
+                    f"Semantic assurance gap for {fact.id}: no independent case assertion was supplied; provenance is preserved and native case validation may still establish executable consistency."
+                )
 
         detected = self.tools.detected_foundation_version()
         if detected and plan.openfoam_version != detected:
@@ -210,7 +221,7 @@ class DeterministicSafetyGate:
                         "system/controlDict regionSolvers disagrees with the EngineeringPlan execution spec."
                     )
 
-        return SafetyCheckResult(valid=not failures, failures=failures)
+        return SafetyCheckResult(valid=not failures, failures=failures, warnings=warnings)
 
     def _validate_numeric_relation(self, fact_id: str, fact_value: str, relation) -> list[str]:
         failures: list[str] = []
@@ -287,7 +298,7 @@ class DeterministicSafetyGate:
         failures = list(self.workspace.validate_all_content())
         tool_results: list[ToolResult] = []
         if failures:
-            return SafetyCheckResult(False, failures, tool_results)
+            return SafetyCheckResult(valid=False, failures=failures, tool_results=tool_results)
 
         for relative in self.workspace.list_authored():
             path = self.workspace.resolve_case_path(relative, must_exist=True)
@@ -304,7 +315,7 @@ class DeterministicSafetyGate:
                 relative, text, expected_class=("dictionary" if relative.startswith("system/") else None)
             )
             failures.extend(header.failures)
-        return SafetyCheckResult(not failures, failures, tool_results)
+        return SafetyCheckResult(valid=not failures, failures=failures, tool_results=tool_results)
 
     def verify_seal(self, plan: EngineeringPlan, seal) -> None:
         self.workspace.verify_seal(seal, plan)

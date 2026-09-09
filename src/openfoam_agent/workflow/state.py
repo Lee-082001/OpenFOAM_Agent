@@ -53,6 +53,7 @@ class CFDState(BaseModel):
     engineering_checkpoint: dict = Field(default_factory=dict)
     primary_failure: dict | None = None
     secondary_failures: list[dict] = Field(default_factory=list)
+    semantic_assurance_warnings: list[str] = Field(default_factory=list)
     engineering_next_step: int = Field(default=1, ge=1)
     pending_action: dict | None = None
     native_process_records: list[dict] = Field(default_factory=list)
