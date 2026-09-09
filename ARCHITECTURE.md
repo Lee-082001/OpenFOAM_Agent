@@ -1,3 +1,11 @@
+## v4.5.1 normalization before semantic conflict routing
+
+Structured authoring now has an explicit three-stage boundary: **shape validation -> deterministic normalization -> semantic conflict routing**. Pydantic remains responsible for schema shape, safe path syntax and bounded field sizes, but harmless LLM repetition is normalized before it can trigger a structured-output retry. Within `TypedFoamDictionaryFile`, repeated leaf paths with equivalent authored values are collapsed. Repeated typed dictionary files with the same case path are merged before nested validation, and identical raw-file echoes are deduplicated.
+
+A repeated path with genuinely different CFD values is not silently resolved and is not rejected at the JSON/Pydantic boundary. Python preserves the first serializable candidate plus hidden controller-owned conflict metadata, then `CFDEngineeringAgent._execute_case_plan()` stops transactionally before any workspace mutation and routes the conflict into the existing retained-candidate delta-repair path. This lets the next Engineering turn repair only the implicated dictionary/file instead of regenerating the whole case or spending a full structured-output retry. Controller conflict metadata uses `SkipJsonSchema`, so it is absent from the model-facing structured-output schema but survives Python model dumps/checkpoints.
+
+This boundary does not weaken execution safety: conflicting authoring content still prevents commit, unsafe paths/directives remain fail-closed, typed serialization still checks scalar/block collisions, and blockMesh/checkMesh/pre-solve/CaseSeal/runtime approval remain unchanged.
+
 ## v4.5.0 runtime contract compilation boundary
 
 The frozen `EngineeringPlan` remains the single source of CFD engineering intent. Runtime execution no longer asks the model to restate the same steady/custom convergence information in a second mandatory schema before `/solve`. Immediately before native execution, Python deterministically compiles a `RuntimeContract` from the immutable plan, literal sealed `system/controlDict`, Agent-owned `engineering_defaults`, and the user-approved runtime policy. The compiler may formalize existing values but must not choose new CFD values.

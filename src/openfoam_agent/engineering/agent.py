@@ -1116,6 +1116,46 @@ class CFDEngineeringAgent:
         final plan/CaseSeal validation used by ordinary actions.
         """
 
+        # v4.5.1: structured-output/Pydantic accepts harmless duplicate authoring
+        # echoes and carries substantive conflicts to this deterministic boundary.
+        # Do not spend a full Codex structured-output retry on a conflict that can be
+        # repaired as a compact retained-candidate delta.
+        authoring_conflicts = list(execution.authoring_conflicts)
+        conflict_paths: list[str] = []
+        for item in execution.typed_dictionaries:
+            if item.entry_conflicts:
+                conflict_paths.append(item.path)
+                authoring_conflicts.extend(
+                    f"typed-entry:{item.path}:{entry_path}" for entry_path in item.entry_conflicts
+                )
+        if authoring_conflicts:
+            for token in authoring_conflicts:
+                parts = str(token).split(":")
+                for candidate in parts:
+                    if re.fullmatch(r"(?:0|constant|system|postprocessConfig)/[A-Za-z0-9_.\/-]+", candidate):
+                        conflict_paths.append(candidate)
+            event = self._event(
+                llm_step,
+                "authoring_semantic_conflict",
+                False,
+                "Case authoring contains conflicting duplicate representations; retained candidate repair is required.",
+                "\n".join(f"- {item}" for item in authoring_conflicts[:40]),
+                validation_status="fail",
+                failure_category="case",
+            )
+            blocked = self._record_case_plan_authoring_failure(state, event)
+            self._emit_engineering_event(
+                f"{progress_phase}-execution-plan",
+                event,
+                step=progress_step,
+                limit=progress_limit,
+                state=state,
+            )
+            self._pending_candidate_execution = execution
+            self._pending_candidate_failed_paths = tuple(dict.fromkeys(conflict_paths))[:12]
+            self._pending_execution_plan = None
+            return blocked
+
         actions: list[object] = []
         rendered_files: list[tuple[str, str]] = [
             (item.path, item.content) for item in execution.files
@@ -4129,7 +4169,7 @@ class CFDEngineeringAgent:
             for event in self._current_round_events(state)
             if (
                 not event.success
-                and event.action_type in {"typed_dictionary_serialize", "block_mesh_serialize", "case_bundle_preflight"}
+                and event.action_type in {"typed_dictionary_serialize", "block_mesh_serialize", "case_bundle_preflight", "authoring_semantic_conflict"}
             )
         )
 
@@ -4181,7 +4221,7 @@ class CFDEngineeringAgent:
         last = events[-1]
         return (
             not last.success
-            and last.action_type in {"typed_dictionary_serialize", "case_bundle_preflight"}
+            and last.action_type in {"typed_dictionary_serialize", "case_bundle_preflight", "authoring_semantic_conflict"}
             and self._pending_execution_plan is None
             and self._pending_candidate_execution is not None
         )

@@ -689,6 +689,28 @@ class CaseBundleFile(_EngineeringModel):
         return self
 
 
+def _canonical_typed_value_for_duplicate_check(value: object) -> str:
+    """Compare duplicate typed values without changing the authored value.
+
+    The deterministic serializer owns the trailing semicolon, so ``x`` and ``x;``
+    are equivalent authoring echoes. Internal whitespace is intentionally preserved:
+    quoted/string-like OpenFOAM expressions may make it semantically meaningful.
+    """
+
+    text = str(value or "").strip()
+    if text.endswith(";"):
+        text = text[:-1].rstrip()
+    return text
+
+
+def _raw_model_mapping(value: object) -> dict[str, object] | None:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="python")
+    return None
+
+
 class FoamDictionaryEntry(_EngineeringModel):
     """One deterministic OpenFOAM dictionary assignment.
 
@@ -722,14 +744,52 @@ class TypedFoamDictionaryFile(_EngineeringModel):
         pattern=r"^[A-Za-z][A-Za-z0-9_]*$",
     )
     entries: list[FoamDictionaryEntry] = Field(min_length=1, max_length=300)
+    # Controller-owned semantic conflict record. It is intentionally absent from the
+    # LLM JSON schema: structured-output validation should normalize harmless echoes
+    # rather than forcing an expensive model retry. A real conflicting duplicate is
+    # carried to deterministic candidate validation/repair instead.
+    entry_conflicts: SkipJsonSchema[list[str]] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_duplicate_entries(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        raw_entries = data.get("entries") or []
+        normalized: list[object] = []
+        seen: dict[str, tuple[str, str]] = {}
+        conflicts: list[str] = [str(x) for x in (data.get("entry_conflicts") or []) if str(x).strip()]
+        for raw in raw_entries:
+            mapping = _raw_model_mapping(raw)
+            if mapping is None:
+                normalized.append(raw)
+                continue
+            path = str(mapping.get("path") or "").strip()
+            authored_value = str(mapping.get("value") or "")
+            canonical_value = _canonical_typed_value_for_duplicate_check(authored_value)
+            prior = seen.get(path)
+            if prior is None:
+                seen[path] = (canonical_value, authored_value)
+                normalized.append(raw)
+                continue
+            prior_canonical, _ = prior
+            if canonical_value == prior_canonical:
+                # Harmless LLM echo: keep the first authored representation.
+                continue
+            if path and path not in conflicts:
+                conflicts.append(path)
+            # Keep the first value only so the object remains serializable for a
+            # compact retained-candidate repair. Python never silently chooses the
+            # later conflicting CFD value.
+        data["entries"] = normalized
+        data["entry_conflicts"] = conflicts[:40]
+        return data
 
     @model_validator(mode="after")
     def validate_path_and_entries(self) -> Self:
         if not re.fullmatch(r"(?:0|constant|system|postprocessConfig)/[A-Za-z0-9_.\/-]+", self.path) or ".." in self.path:
             raise ValueError(f"Unsafe typed dictionary path: {self.path}")
-        keys = [item.path for item in self.entries]
-        if len(keys) != len(set(keys)):
-            raise ValueError("Typed dictionary contains duplicate entry paths.")
         return self
 
 
@@ -951,6 +1011,7 @@ class CaseAuthoringAction(_EngineeringModel):
     # from rejecting an otherwise valid case bundle.
     required_case_files: list[str] = Field(default_factory=list, max_length=80)
     rationale: str = Field(default="", max_length=200)
+    authoring_conflicts: SkipJsonSchema[list[str]] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -958,6 +1019,64 @@ class CaseAuthoringAction(_EngineeringModel):
         if not isinstance(value, dict):
             return value
         data = dict(value)
+        authoring_conflicts = [str(x) for x in (data.get("authoring_conflicts") or []) if str(x).strip()]
+
+        # Normalize repeated raw files. Exact repeats are harmless; conflicting
+        # content is retained as a controller-visible semantic conflict rather than
+        # rejected at the structured-output/Pydantic boundary.
+        raw_files: list[object] = []
+        raw_by_path: dict[str, str] = {}
+        for raw in data.get("files") or []:
+            mapping = _raw_model_mapping(raw)
+            if mapping is None:
+                raw_files.append(raw)
+                continue
+            path = str(mapping.get("path") or "").strip()
+            content = str(mapping.get("content") or "")
+            if path not in raw_by_path:
+                raw_by_path[path] = content
+                raw_files.append(raw)
+            elif raw_by_path[path] != content and path and f"raw-file:{path}" not in authoring_conflicts:
+                authoring_conflicts.append(f"raw-file:{path}")
+        data["files"] = raw_files
+
+        # Merge repeated typed dictionary *files* by path. Their leaf entries are
+        # normalized by TypedFoamDictionaryFile itself, including conflict capture.
+        typed_by_path: dict[str, dict[str, object]] = {}
+        typed_order: list[str] = []
+        passthrough_typed: list[object] = []
+        for raw in data.get("typed_dictionaries") or []:
+            mapping = _raw_model_mapping(raw)
+            if mapping is None:
+                passthrough_typed.append(raw)
+                continue
+            path = str(mapping.get("path") or "").strip()
+            if not path or path not in typed_by_path:
+                typed_by_path[path] = mapping
+                typed_order.append(path)
+                continue
+            prior = typed_by_path[path]
+            prior_class = prior.get("foam_class")
+            next_class = mapping.get("foam_class")
+            if prior_class and next_class and prior_class != next_class:
+                token = f"typed-class:{path}"
+                if token not in authoring_conflicts:
+                    authoring_conflicts.append(token)
+            elif not prior_class and next_class:
+                prior["foam_class"] = next_class
+            prior["entries"] = list(prior.get("entries") or []) + list(mapping.get("entries") or [])
+            prior["entry_conflicts"] = list(prior.get("entry_conflicts") or []) + list(mapping.get("entry_conflicts") or [])
+        data["typed_dictionaries"] = [typed_by_path[path] for path in typed_order] + passthrough_typed
+
+        # Raw and typed representations may not both own one case path. Preserve the
+        # first representations for compact repair, but mark the ambiguity explicitly.
+        typed_paths = {str((_raw_model_mapping(item) or {}).get("path") or "").strip() for item in data["typed_dictionaries"]}
+        for path in set(raw_by_path).intersection(typed_paths):
+            token = f"mixed-representation:{path}"
+            if path and token not in authoring_conflicts:
+                authoring_conflicts.append(token)
+        data["authoring_conflicts"] = authoring_conflicts[:40]
+
         # These lists are execution hints/compatibility mirrors, not independent
         # sources of truth. Deduplicate harmless repeats instead of forcing the LLM
         # through another structured-output retry.

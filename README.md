@@ -1,3 +1,16 @@
+## v4.5.1 structured authoring normalization boundary
+
+- Harmless duplicate typed-dictionary leaf assignments are normalized before nested Pydantic validation, so repeated model echoes no longer consume a full structured-output retry.
+- Repeated typed dictionary files for the same case path are deterministically merged before file-path validation.
+- Repeated identical raw files are deduplicated.
+- Substantive duplicate conflicts are not silently resolved: they are carried as controller-owned conflict metadata into the retained-candidate repair path, where only the implicated file is repaired.
+- Conflict metadata is hidden from the LLM JSON schema, so the model is not asked to reproduce controller bookkeeping.
+- Security/path checks, OpenFOAM serialization, native validation, checkMesh, CaseSeal and runtime gates remain strict.
+
+# Release notice: OpenFOAM Agent 4.5.1
+
+> v4.5.1 fixes a live v4.5.0 `author_case` failure where Codex emitted the same typed dictionary entry path more than once. The old nested validator raised `StructuredOutputError` before controller normalization, causing two expensive Codex retries and aborting Engineering. The structured-output boundary now normalizes harmless repetition and defers real value conflicts to deterministic retained-candidate repair. See `V4_5_1_CHANGES.md`.
+
 ## v4.5.0 runtime contract and native-pipeline consolidation
 
 - Runtime execution bounds and result acceptance are now separate controller-compiled contracts. A bounded steady/custom solve no longer requires the LLM to duplicate an explicit `CompletionContract` before `/solve`.
