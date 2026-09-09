@@ -1,3 +1,17 @@
+## v4.5.0 runtime contract and native-pipeline consolidation
+
+- Runtime execution bounds and result acceptance are now separate controller-compiled contracts. A bounded steady/custom solve no longer requires the LLM to duplicate an explicit `CompletionContract` before `/solve`.
+- Python compiles only values already present in the immutable EngineeringPlan, Agent-owned `engineering_defaults`, literal `controlDict`, and RuntimePolicy. It does not invent new CFD termination/convergence targets.
+- `ExecutionBoundContract` captures hard runtime bounds such as transient end time, steady iteration span, and wall-time limit. These are the requirements for safe process execution.
+- `ResultAcceptanceContract` captures residual criteria and advisory QoI/conservation criteria separately. Incomplete acceptance criteria do not block a bounded solve; they remain visible for result review.
+- Existing `steady_iteration_controls` defaults such as maximum iterations and explicit residual targets are deterministically compiled instead of requiring the model to restate them in another schema.
+- Redundant `foamDictionary` commands emitted in staged authoring/repair native pipelines are dropped by the controller. Static dictionary/header checks plus real OpenFOAM mesh/solver consumers remain authoritative.
+- CLI report messages are tied to the transition that produced the current state, preventing a stale superseded failure note from being rendered as the message of a later healthy state.
+
+# Release notice: OpenFOAM Agent 4.5.0
+
+> v4.5.0 fixes a live v4.4.0 case that reached `SOLVE_READY`, already carried Agent-selected steady iteration/residual controls, then returned to `ENGINEERING_REVIEW_REQUIRED` on `/solve` only because the same convergence intent had not been duplicated into `EngineeringPlan.completion`. It also removes redundant per-file `foamDictionary` subprocesses from authoring. See `V4_5_0_CHANGES.md`.
+
 ## v4.4.0 claim-based semantic assurance
 
 - Semantic preservation and machine proof are now separate concepts. Every confirmed non-context fact still has exact intake-digest/fact-ID/binding closure, but not every fact is forced to invent a case-file token.

@@ -149,6 +149,58 @@ class CompletionContract(Contract):
         return self
 
 
+class ExecutionBoundContract(Contract):
+    """Controller-compiled upper bound for one approved native execution.
+
+    This contract answers only "how is the process safely bounded and what output
+    fields belong to this run?" It deliberately does not claim that the numerical
+    solution is converged or physically acceptable.
+    """
+
+    mode: Literal["transient", "steady", "custom"]
+    start_time: float = 0.0
+    end_time: float | None = None
+    max_iterations: int | None = Field(default=None, ge=1)
+    wall_seconds: int | None = Field(default=None, ge=1, le=86400)
+    minimum_steps: int = Field(default=1, ge=1)
+    required_result_fields: list[str] = Field(default_factory=list)
+    source: Literal["plan_completion", "controlDict", "engineering_defaults", "mixed", "runtime_policy"] = "mixed"
+    warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_bound(self) -> Self:
+        if not math.isfinite(self.start_time):
+            raise ValueError("Execution-bound start time must be finite.")
+        if self.end_time is not None and (not math.isfinite(self.end_time) or self.end_time <= self.start_time):
+            raise ValueError("Execution-bound end time must exceed the start time.")
+        if self.mode == "transient" and self.end_time is None and self.wall_seconds is None:
+            raise ValueError("Transient execution requires an end time or bounded wall time.")
+        if self.mode in {"steady", "custom"} and self.max_iterations is None and self.wall_seconds is None:
+            raise ValueError("Steady/custom execution requires an iteration or wall-time bound.")
+        return self
+
+
+class ResultAcceptanceContract(Contract):
+    """Post-execution numerical/physical acceptance criteria.
+
+    Incomplete criteria do not block a bounded solve. They are carried forward as
+    review warnings and can be evaluated after the native process has completed.
+    """
+
+    residual_thresholds: list[ResidualThreshold] = Field(default_factory=list)
+    consecutive_samples: int = Field(default=3, ge=1)
+    criteria_complete: bool = False
+    advisory_criteria: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    source: Literal["plan_completion", "engineering_defaults", "mixed", "none"] = "none"
+
+
+class RuntimeContract(Contract):
+    """Compiled runtime view derived from the immutable EngineeringPlan."""
+
+    execution_bound: ExecutionBoundContract
+    result_acceptance: ResultAcceptanceContract
+
 class NativeFieldReduction(Contract):
     quantity_kind: Literal["temperature", "pressure", "density", "mass_flow", "volume_flow", "heat_rate", "mass", "energy"]
     field: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")

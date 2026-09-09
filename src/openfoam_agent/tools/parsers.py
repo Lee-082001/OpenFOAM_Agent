@@ -5,6 +5,7 @@ import math
 import re
 
 from openfoam_agent.schemas.simulation import ResidualSample, SimulationResult
+from openfoam_agent.contracts.models import RuntimeContract
 
 
 _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
@@ -54,7 +55,12 @@ class RuntimeLogAccumulator:
     def _flush_step(self):
         if self.current_time is None or self.contract is None:
             return
-        for threshold in self.contract.residual_thresholds:
+        thresholds = (
+            self.contract.result_acceptance.residual_thresholds
+            if isinstance(self.contract, RuntimeContract)
+            else self.contract.residual_thresholds
+        )
+        for threshold in thresholds:
             sample = self._last_residuals.get(threshold.field)
             value = sample.initial_residual if sample is not None else None
             previous = self._consecutive.get(threshold.field, 0)
@@ -83,7 +89,11 @@ class RuntimeLogAccumulator:
                 self._flush_step()
                 if self.first_time is None:
                     self.first_time = value
-                start = self.contract.start_time if self.contract else 0.0
+                start = (
+                    self.contract.execution_bound.start_time
+                    if isinstance(self.contract, RuntimeContract)
+                    else (self.contract.start_time if self.contract else 0.0)
+                )
                 previous = self.current_time if self.current_time is not None else start
                 if value < previous:
                     self.time_reversed = True
@@ -140,9 +150,49 @@ class RuntimeLogAccumulator:
         if not progressed:
             failures.append("Runtime log contains no positive Time progress evidence.")
         termination = False
+        acceptance_verified = False
+        acceptance_warnings = []
         contract = self.contract
         if contract is None:
-            failures.append("Completion contract is missing; process exit does not prove requested calculation completion.")
+            failures.append("Runtime contract is missing; process exit does not prove bounded execution completion.")
+        elif isinstance(contract, RuntimeContract):
+            bound = contract.execution_bound
+            acceptance = contract.result_acceptance
+            acceptance_warnings.extend(bound.warnings)
+            acceptance_warnings.extend(acceptance.warnings)
+            if self.progress_steps < bound.minimum_steps:
+                failures.append("Insufficient progress steps for the execution-bound contract.")
+            elif bound.mode == "transient":
+                if bound.end_time is None:
+                    failures.append("Transient execution ended without a machine-verifiable end-time bound.")
+                else:
+                    tolerance = max(1e-10, abs(bound.end_time) * 1e-9)
+                    termination = self.current_time is not None and self.current_time >= bound.end_time - tolerance
+                    if not termination:
+                        failures.append(f"Requested execution end time {bound.end_time} was not reached.")
+            else:
+                # For steady/custom execution the process is bounded by max-iteration
+                # and/or wall-time policy. A clean OpenFOAM End after positive progress
+                # proves execution completion; convergence is a separate result claim.
+                termination = process_success and progressed and self.end_marker
+                if not termination:
+                    failures.append("Steady/custom bounded execution did not end cleanly.")
+
+            thresholds = acceptance.residual_thresholds
+            if thresholds:
+                residual_subset_verified = all(
+                    self._consecutive.get(x.field, 0) >= acceptance.consecutive_samples
+                    for x in thresholds
+                )
+                acceptance_verified = residual_subset_verified and acceptance.criteria_complete
+                if not residual_subset_verified:
+                    acceptance_warnings.append("Configured steady residual acceptance thresholds were not satisfied by the captured consecutive samples.")
+                elif not acceptance.criteria_complete:
+                    acceptance_warnings.append("Machine-compiled residual criteria were satisfied, but additional result-acceptance criteria remain advisory/unimplemented.")
+            elif acceptance.criteria_complete:
+                acceptance_verified = True
+            else:
+                acceptance_verified = False
         elif self.progress_steps < contract.minimum_steps:
             failures.append("Insufficient progress steps for the completion contract.")
         elif contract.mode == "transient":
@@ -155,6 +205,7 @@ class RuntimeLogAccumulator:
                               for x in contract.residual_thresholds)
             if not termination:
                 failures.append("Steady outer-iteration initial-residual convergence criterion was not met.")
+            acceptance_verified = termination
         else:
             failures.append("Custom completion requires an implemented deterministic evaluator; a model claim is insufficient.")
         completed = process_success and progressed and termination and not failures
@@ -163,7 +214,8 @@ class RuntimeLogAccumulator:
             termination_reason=termination_reason, first_time=self.first_time, last_time=self.current_time,
             progress_steps=self.progress_steps, residuals=list(self.residuals), residual_sample_count=self.residual_count,
             residuals_truncated=self.residual_count > len(self.residuals), courant_max=self.courant_max,
-            continuity_error=self.continuity_max, fatal_error="".join(self.fatal_lines) or None,
+            continuity_error=self.continuity_max, numerical_quality_verified=acceptance_verified,
+            acceptance_warnings=acceptance_warnings, fatal_error="".join(self.fatal_lines) or None,
             non_finite_detected=self.non_finite, end_marker_found=self.end_marker,
             log_sha256=self.hash.hexdigest(), evidence_failures=failures)
 

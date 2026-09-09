@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from openfoam_agent.tools.safe_runner import SafeRunner
 from openfoam_agent.tools.execution_policy import ExecutionContext, ExecutionPolicyError
 from openfoam_agent.tools.parsers import parse_runtime_stream
-from openfoam_agent.runtime.completion import completion_contract, verify_result_outputs, snapshot_result_outputs
+from openfoam_agent.runtime.completion import compile_runtime_contract, verify_result_outputs, snapshot_result_outputs
 from openfoam_agent.runtime.parallel import prepare_parallel, verify_parallel_inputs, reconstruct_parallel
 
 from openfoam_agent.engineering import CFDEngineeringAgent
@@ -70,9 +70,14 @@ class RuntimeOrchestrator:
             state.assert_confirmed_intake()
             state.execution_approval.check_plan(state.engineering_plan)
             state.execution_approval.check_repair_files(state.case_seal)
-            contract = completion_contract(state.engineering_plan, self.engineering.workspace)
+            contract = compile_runtime_contract(
+                state.engineering_plan,
+                self.engineering.workspace,
+                wall_seconds=self.policy.solver_timeout_seconds,
+            )
+            state.runtime_contract = contract
         except (ValueError, OSError) as exc:
-            state.transition(State.ENGINEERING_REVIEW_REQUIRED, f"Runtime contract requires review: {exc}")
+            state.transition(State.ENGINEERING_REVIEW_REQUIRED, f"Runtime execution bound requires review: {exc}")
             return state
         attempts: list[SimulationAttempt] = []
         parallel_manifest = None
@@ -235,10 +240,16 @@ class RuntimeOrchestrator:
                     attempts=attempts,
                     final_result=result,
                 )
+                acceptance_note = (
+                    "Compiled result-acceptance criteria were satisfied. "
+                    if result.numerical_quality_verified
+                    else "Result-acceptance criteria are incomplete or not fully satisfied; human/result review remains required. "
+                )
                 state.transition(
                     State.EXECUTION_DONE,
-                    f"{runtime_driver} met its termination contract and bounded output checks. "
-                    "Numerical accuracy and physical goal achievement remain unverified pending result review.",
+                    f"{runtime_driver} completed within its compiled execution bound and bounded output checks. "
+                    + acceptance_note
+                    + "Physical goal achievement remains unverified pending result review.",
                 )
                 return state
 

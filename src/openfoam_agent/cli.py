@@ -752,6 +752,20 @@ def _policies_from_args(
     return engineering, runtime, postprocessing
 
 
+def _current_state_message(state: CFDState) -> str:
+    """Return the latest transition note that actually produced current_state.
+
+    Interactive recovery/retry paths may preserve older diagnostic history. A stale
+    failure from a superseded state must never be rendered as the message for a later
+    healthy state merely because it is the last list element.
+    """
+    target = state.current_state.value
+    for item in reversed(state.history):
+        if item.get("to") == target:
+            return item.get("note", "")
+    return ""
+
+
 def build_report(
     state: CFDState,
     *,
@@ -809,7 +823,7 @@ def build_report(
             "review": model,
         },
         "final_state": state.current_state.value,
-        "message": state.history[-1]["note"] if state.history else "",
+        "message": _current_state_message(state),
         "workspace": str(workspace),
         "intake": state.intake.model_dump(mode="json") if state.intake else None,
         "intake_confirmed": state.intake_confirmed,
@@ -871,6 +885,9 @@ def build_report(
         "runtime_report": (
             state.runtime_report.model_dump(mode="json") if state.runtime_report else None
         ),
+        "runtime_contract": (
+            state.runtime_contract.model_dump(mode="json") if state.runtime_contract else None
+        ),
         "postprocessing_report": (
             state.postprocessing_report.model_dump(mode="json")
             if state.postprocessing_report
@@ -908,6 +925,10 @@ def _limitations(state: CFDState) -> list[str]:
     if state.semantic_assurance_warnings:
         out.append(
             f"{len(state.semantic_assurance_warnings)} semantic-assurance item(s) remain advisory rather than independently machine-proven; these do not invalidate a case that passed deterministic/native checks."
+        )
+    if state.runtime_contract is not None and state.runtime_contract.result_acceptance.warnings:
+        out.append(
+            f"{len(state.runtime_contract.result_acceptance.warnings)} runtime result-acceptance item(s) remain advisory/incomplete; bounded solver execution is independent of those review criteria."
         )
     if state.current_state == State.RESULT_REVIEW_REQUIRED:
         out.append(
@@ -1030,6 +1051,20 @@ def _print_human_report(report: dict[str, Any]) -> None:
             f"cells={mesh['cell_count']}, maxNonOrtho={mesh['max_non_orthogonality']}, "
             f"maxSkew={mesh['max_skewness']}"
         )
+    runtime_contract = report.get("runtime_contract")
+    if runtime_contract:
+        bound = runtime_contract["execution_bound"]
+        acceptance = runtime_contract["result_acceptance"]
+        print(
+            "runtime contract: "
+            f"mode={bound['mode']}, maxIterations={bound.get('max_iterations')}, "
+            f"endTime={bound.get('end_time')}, wallSeconds={bound.get('wall_seconds')}, "
+            f"acceptanceComplete={acceptance.get('criteria_complete', False)}"
+        )
+        for item in (bound.get("warnings") or [])[:4]:
+            print(f"- runtime bound warning: {item}")
+        for item in (acceptance.get("warnings") or [])[:4]:
+            print(f"- result acceptance warning: {item}")
     runtime = report["runtime_report"]
     if runtime:
         final = runtime["final_result"]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 from openfoam_agent.contracts.execution import ExecutionApproval
-from openfoam_agent.contracts.models import ResourceLimits
+from openfoam_agent.contracts.models import ResourceLimits, RuntimeContract
 
 from openfoam_agent.schemas.engineering import (
     CaseSeal,
@@ -60,6 +60,7 @@ class CFDState(BaseModel):
     checkpoint_schema_version: int = 1
     simulation: SimulationResult | None = None
     runtime_report: RuntimeReport | None = None
+    runtime_contract: RuntimeContract | None = None
     simulation_attempts: int = 0
     last_runtime_log_excerpt: str | None = None
 

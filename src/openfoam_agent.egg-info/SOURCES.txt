@@ -92,6 +92,7 @@ src/openfoam_agent/tools/workspace.py
 src/openfoam_agent/verification/__init__.py
 src/openfoam_agent/verification/presolve.py
 src/openfoam_agent/verification/safety.py
+src/openfoam_agent/verification/semantic_assurance.py
 src/openfoam_agent/verification/foam_semantics/__init__.py
 src/openfoam_agent/verification/foam_semantics/boundary.py
 src/openfoam_agent/verification/foam_semantics/mesh.py
@@ -159,3 +160,5 @@ tests/test_v420_progress_first_validation.py
 tests/test_v423_authoring_manifest_authority.py
 tests/test_v430_validation_failure_routing.py
 tests/test_v431_geometry_ownership.py
+tests/test_v440_semantic_assurance_policy.py
+tests/test_v450_runtime_contract_consolidation.py

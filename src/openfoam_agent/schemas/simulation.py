@@ -63,6 +63,7 @@ class SimulationResult(_RuntimeModel):
     end_marker_found: bool = False
     log_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     evidence_failures: list[str] = Field(default_factory=list)
+    acceptance_warnings: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_success_claim(self) -> Self:

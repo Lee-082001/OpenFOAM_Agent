@@ -1,3 +1,13 @@
+## v4.5.0 runtime contract compilation boundary
+
+The frozen `EngineeringPlan` remains the single source of CFD engineering intent. Runtime execution no longer asks the model to restate the same steady/custom convergence information in a second mandatory schema before `/solve`. Immediately before native execution, Python deterministically compiles a `RuntimeContract` from the immutable plan, literal sealed `system/controlDict`, Agent-owned `engineering_defaults`, and the user-approved runtime policy. The compiler may formalize existing values but must not choose new CFD values.
+
+The compiled runtime view is split into two independent contracts. `ExecutionBoundContract` answers whether the process is safely bounded: transient end time, steady iteration span when literal/selected, wall-time limit, minimum progress, and required result fields. `ResultAcceptanceContract` carries numerical/result claims such as residual thresholds plus advisory QoI/conservation criteria. Missing or partially machine-compilable result-acceptance criteria do not prevent a bounded solve. They remain review warnings and keep numerical/physical acceptance unverified. A clean native process can therefore reach execution completion while still entering human/result review for convergence or physics quality.
+
+Authoring native pipelines are likewise consolidated. `foamDictionary` is an optional diagnostic probe and is removed from model-authored mandatory native pipelines; deterministic `FoamFile`/dictionary checks already run in Python, while `blockMesh`, `checkMesh`, zero-step consumer initialization, and the approved solver are stronger real consumers. Exact unsafe paths/content, mesh failures, case-seal integrity, process/resource bounds, and explicit false assertions remain hard gates.
+
+CLI state messages are derived from the latest history transition whose destination equals the current state, so a superseded timeout/failure record cannot masquerade as the active message after successful recovery.
+
 ## v4.4.0 semantic assurance boundary
 
 Confirmed-fact preservation and independent machine proof are deliberately separate. Every non-context fact must remain bound to the immutable confirmed-intake digest and appear in `confirmed_fact_ids` / `confirmed_fact_bindings`. This provenance closure is always mandatory. It does not imply that every fact has a meaningful OpenFOAM dictionary token. Routing and interpretation metadata such as `classification.problem_type` may therefore be provenance-only. Requiring a fabricated snippet for such facts is prohibited.

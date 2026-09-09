@@ -964,6 +964,15 @@ class CaseAuthoringAction(_EngineeringModel):
         for key in ("validate_dictionaries", "surface_checks", "mesh_commands", "required_case_files"):
             raw = data.get(key) or []
             data[key] = list(dict.fromkeys(str(x) for x in raw if str(x).strip()))
+        # v4.5: foamDictionary is an advisory probe, not part of the mandatory native
+        # authoring pipeline. Static header/semantic checks plus the actual OpenFOAM
+        # mesh/solver consumers are stronger and avoid N redundant subprocesses.
+        data["mesh_commands"] = [x for x in data.get("mesh_commands", []) if x != "foamDictionary"]
+        raw_pipeline = data.get("native_pipeline") or []
+        data["native_pipeline"] = [
+            item for item in raw_pipeline
+            if (item.get("command") if isinstance(item, dict) else getattr(item, "command", None)) != "foamDictionary"
+        ]
         # Intermediate partition tasks are controller-owned and may never run native
         # commands. If the model redundantly emits them, dropping them is safer and
         # more useful than rejecting the entire task.
@@ -1126,6 +1135,19 @@ class RepairCasePlanAction(_EngineeringModel):
     retry_solver: bool = False
     updated_plan: EngineeringPlan | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_repair_native_probes(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        data["mesh_commands"] = [str(x) for x in (data.get("mesh_commands") or []) if str(x) != "foamDictionary"]
+        data["native_pipeline"] = [
+            item for item in (data.get("native_pipeline") or [])
+            if (item.get("command") if isinstance(item, dict) else getattr(item, "command", None)) != "foamDictionary"
+        ]
+        return data
+
     @model_validator(mode="after")
     def validate_repair(self) -> Self:
         # A repair may be artifact-changing or metadata-only.  The latter is
@@ -1176,6 +1198,19 @@ class RuntimeCaseRepairAction(_EngineeringModel):
     native_pipeline: list[NativeOpenFOAMCommand] = Field(default_factory=list, max_length=12)
     validate_pre_solve: bool = True
     retry_solver: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_runtime_native_probes(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        data["mesh_commands"] = [str(x) for x in (data.get("mesh_commands") or []) if str(x) != "foamDictionary"]
+        data["native_pipeline"] = [
+            item for item in (data.get("native_pipeline") or [])
+            if (item.get("command") if isinstance(item, dict) else getattr(item, "command", None)) != "foamDictionary"
+        ]
+        return data
 
     @model_validator(mode="after")
     def validate_runtime_repair(self) -> Self:
