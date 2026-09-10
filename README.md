@@ -1,3 +1,14 @@
+## v4.7.4 failure-local validation repair
+
+> v4.7.4 fixes a live v4.7.3 OpenFOAM 13 run where `blockMesh` and `checkMesh` passed, the real zero-step `foamRun` consumer correctly rejected `system/fvSchemes` because `laplacianSchemes` was missing, but the subsequent case-repair turn rebuilt a broad Engineering context and failed the deterministic 18k prompt budget before any repair could be attempted. Committed-case validation repair is now a dedicated failure-local delta workflow. See `V4_7_4_CHANGES.md`.
+
+- The zero-step/native consumer remains a hard validation gate; Python does not auto-insert or choose `laplacianSchemes`, interpolation, convection or solver settings.
+- A failed pre-solve/dictionary/native case event now selects the exact implicated committed files (including basename recovery from redacted `<LOCAL_PATH:...>` diagnostics), a compact baseline plan projection, the primary failure, bounded contract scan/evidence, and nothing from the full historical Engineering context that is not needed for that repair.
+- Repair-support reads/searches survive into the following compact repair turn, so the Agent can inspect one companion file/reference without re-entering the large generic context.
+- The model returns only a minimal `repair_case_plan`; Python compiles the existing `CaseDeltaGraph`, validates the complete effective case before mutation, and re-runs the real consumer.
+- Mesh-independent dictionary repairs do not rebuild or re-check an unchanged mesh. A mesh-affecting delta still invalidates mesh evidence and triggers the normal controller-owned mesh/checkMesh pipeline.
+- Large baseline plan prose and unrelated case files can no longer make a one-file native validation defect consume the entire 18k Engineering context.
+
 ## v4.7.3 pre-commit authoring feasibility recovery
 
 > v4.7.3 fixes a live v4.7.2 staged-authoring run where the Engineering Agent selected an Agent-owned snappyHexMesh surface workflow, then terminally blocked because it could not truthfully complete the required generated surface artifact. Authoring-feasibility failure is now a strategy signal, not missing user geometry: Python keeps the intake/draft immutable, performs no case mutation, and asks the Agent for a compact pre-commit `plan_patch` before retrying the full CaseBuildGraph. See `V4_7_3_CHANGES.md`.

@@ -272,8 +272,12 @@ def test_failure_uses_repair_turn_exact_patch_and_delta_state(tmp_path, graph_pa
 
     assert state.current_state == State.SOLVE_READY
     assert llm.schemas == [PrepareTurn, RepairTurn]
-    assert '"state_mode": "delta_from_previous_response"' in llm.prompts[1]
+    # v4.7.4: committed-case validation repair is failure-local rather than a
+    # conversation-state delta over the entire prior Engineering response.
+    assert '"state_mode": "case_validation_repair_v1"' in llm.prompts[1]
     assert "bad topology" in llm.prompts[1]
+    assert '"path": "system/blockMeshDict"' in llm.prompts[1]
+    assert "pending_engineering_plan" not in llm.prompts[1]
     repaired = agent.workspace.read_text("system/blockMeshDict")
     assert "corrected topology" in repaired and "bad topology" not in repaired
 

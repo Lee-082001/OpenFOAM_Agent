@@ -13,6 +13,10 @@ from openfoam_agent.engineering.revision_context import (
     project_revision_proposal,
     project_strategy_plan,
 )
+from openfoam_agent.engineering.repair_context import (
+    build_partitioned_validation_repair_prompt,
+    project_validation_repair_plan,
+)
 from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
 from openfoam_agent.tools.execution_policy import (
     deny_unapproved_engineering_solve, command_effect, ExecutionPolicyError,
@@ -3883,6 +3887,89 @@ class CFDEngineeringAgent:
                 break
         return result
 
+    def _validation_relevant_case_files(
+        self,
+        state: CFDState,
+        plan: EngineeringPlan | None,
+        diagnostic: str,
+        *,
+        max_files: int = 8,
+    ) -> list[dict[str, object]]:
+        """Return exact current files implicated by one committed-case validation failure.
+
+        This is deliberately narrower than ``current_case_files``.  The live failure
+        that motivated v4.7.4 named only ``fvSchemes`` but the old repair path resent
+        the entire Engineering state and exceeded the 18k context budget before the
+        Agent could fix the file.  Basename matching is required because path
+        redaction intentionally turns an absolute ``.../system/fvSchemes`` path into
+        ``<LOCAL_PATH:fvSchemes>`` in model-facing diagnostics.
+        """
+        seals = {item.path: item for item in self.workspace.file_seals()}
+        text = diagnostic or ""
+        candidates: list[str] = []
+
+        # Prefer literal case-relative paths that survived diagnostic redaction.
+        for match in re.findall(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", text):
+            probe = match.rstrip("./")
+            parts = probe.split("/")
+            while parts:
+                candidate = "/".join(parts)
+                if candidate in seals:
+                    candidates.append(candidate)
+                    break
+                parts.pop()
+
+        # Redacted native diagnostics often preserve only the basename.  Match it
+        # against currently sealed files rather than guessing a directory.
+        for path in seals:
+            base = path.rsplit("/", 1)[-1]
+            if base and re.search(
+                rf"(?<![A-Za-z0-9_]){re.escape(base)}(?![A-Za-z0-9_])",
+                text,
+            ):
+                candidates.append(path)
+
+        # If the diagnostic names a confirmed implementation binding, include that
+        # artifact even when the native text did not print a path.
+        if plan is not None:
+            for binding in plan.confirmed_fact_bindings:
+                for path in binding.case_files:
+                    base = path.rsplit("/", 1)[-1]
+                    if path in seals and base and re.search(
+                        rf"(?<![A-Za-z0-9_]){re.escape(base)}(?![A-Za-z0-9_])",
+                        text,
+                    ):
+                        candidates.append(path)
+
+        # Core dictionaries are small, useful neighbours for otherwise path-poor
+        # pre-solve diagnostics.  They come after explicit matches, so the failed
+        # file always receives the first content budget.
+        for core in ("system/fvSchemes", "system/fvSolution", "system/controlDict"):
+            if core in seals:
+                candidates.append(core)
+
+        result: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for path in candidates:
+            if path in seen or path not in seals:
+                continue
+            seen.add(path)
+            try:
+                content = self.workspace.read_text(path)
+            except (OSError, WorkspaceSafetyError):
+                continue
+            result.append(
+                {
+                    "path": path,
+                    "sha256": seals[path].sha256,
+                    "content": content,
+                    "truncated": False,
+                }
+            )
+            if len(result) >= max_files:
+                break
+        return result
+
     def _dispatch_tool_action(self, action, *, step, native_execution, phase, state=None):
         if state is not None:
             state.pending_action = {"status": "intent", "phase": phase, "step": step,
@@ -5029,7 +5116,7 @@ class CFDEngineeringAgent:
             and (true_stateful_delta or not self.policy.bounded_evidence_context)
             and contract_phase not in {
                 "runtime_repair", "block_mesh_replan", "block_mesh_repair",
-                "prepare_design", "prepare_design_decide", "author_case", "revision",
+                "prepare_design", "prepare_design_decide", "author_case", "revision", "repair",
             }
         )
         previous_snapshot = self._phase_context_snapshots.get(conversation_key, {})
@@ -5252,6 +5339,91 @@ class CFDEngineeringAgent:
                 "is true and an explicit missing tool/version fact cannot be resolved from the supplied files/native diagnostic. "
                 "If retrieval is unavailable, use existing evidence or block once with the correct block_kind:\n"
             )
+        elif contract_phase == "repair":
+            baseline_plan = self._pending_execution_plan or state.engineering_plan or self._draft_design_plan
+            recent_failures = [
+                event for event in self._current_round_events(state) if not event.success
+            ]
+            trigger = recent_failures[-1] if recent_failures else None
+            diagnostic = ""
+            if trigger is not None:
+                diagnostic = "\n".join(
+                    part for part in (trigger.summary, trigger.output_excerpt) if str(part).strip()
+                )
+            relevant_files = self._validation_relevant_case_files(
+                state,
+                baseline_plan,
+                diagnostic,
+            )
+            support_types = {
+                "read_case_file", "read_reference", "search_references",
+                "search_capabilities", "gather_evidence",
+            }
+            supporting_observations = [
+                compact_event_for_model(event, excerpt_chars=1400, summary_chars=500)
+                for event in self._current_round_events(state)[-16:]
+                if event.success and event.action_type in support_types
+            ][-4:]
+            payload = {
+                "state_mode": "case_validation_repair_v1",
+                "phase": phase,
+                "step": step,
+                "confirmed_facts": [
+                    {"id": fact.id, "value": fact.value, "source": fact.source}
+                    for fact in (state.intake.facts if state.intake is not None else [])
+                    if fact.category != "context"
+                ],
+                "intake_sha256": state.intake_digest,
+                "baseline_plan_sha256": baseline_plan.digest() if baseline_plan is not None else None,
+                "baseline_plan_core": project_validation_repair_plan(baseline_plan),
+                "validation_failure": (
+                    compact_event_for_model(
+                        trigger,
+                        excerpt_chars=3500,
+                        summary_chars=1200,
+                    )
+                    if trigger is not None else None
+                ),
+                "relevant_case_files": relevant_files,
+                "case_file_contract_scan": self._runtime_case_file_contract_scan(state),
+                "case_inventory": case_files[:40],
+                "mesh_evidence": {
+                    "passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
+                    "cell_count": state.mesh_evidence.cell_count if state.mesh_evidence else None,
+                    "max_non_orthogonality": state.mesh_evidence.max_non_orthogonality if state.mesh_evidence else None,
+                    "max_skewness": state.mesh_evidence.max_skewness if state.mesh_evidence else None,
+                    "manifest_current": bool(
+                        self._checkmesh_mesh_manifest
+                        and self._checkmesh_mesh_manifest == self.workspace.mesh_manifest_digest()
+                    ),
+                },
+                "supporting_evidence": evidence_records[-4:],
+                "supporting_observations": supporting_observations,
+                "bindings": bindings,
+                "budget": budget,
+                "repair_contract": {
+                    "mode": "failure_local_delta_only",
+                    "case_mutation_authority": "CaseDeltaGraph",
+                    "preserve_confirmed_intake": True,
+                    "preserve_unimplicated_engineering_choices": True,
+                    "controller_revalidates_after_delta": True,
+                    "read_results_return_on_next_repair_turn": True,
+                    "rule": (
+                        "Fix the observed case validation failure, not the whole design. "
+                        "Use plan_patch only if the diagnostic proves plan metadata must change."
+                    ),
+                },
+            }
+            instruction = (
+                "Repair one committed-case deterministic/native validation failure from this failure-local capsule. "
+                "The controller has already supplied the current files most directly implicated by the diagnostic. "
+                "Return repair_case_plan with the minimum justified delta, or block only if the observed case defect "
+                "cannot be repaired without changing a confirmed user fact or unsupported capability. Do not redesign "
+                "unrelated physics/geometry, do not repeat the complete EngineeringPlan, and do not regenerate unchanged "
+                "files. For a missing fvSchemes/fvSolution dictionary section, choose the engineering/numerical content "
+                "consistent with the supplied baseline plan and current file; Python will re-run CaseDeltaGraph and the "
+                "actual OpenFOAM pre-solve consumer after the delta:\n"
+            )
         elif use_delta:
             payload = {
                 "state_mode": "delta_from_previous_response",
@@ -5448,7 +5620,7 @@ class CFDEngineeringAgent:
             else:
                 instruction = "Finalize or block from the validated state:\n"
 
-        if contract_phase not in {"author_case", "prepare_design", "prepare_design_decide", "revision", "strategy_revision"}:
+        if contract_phase not in {"author_case", "prepare_design", "prepare_design_decide", "revision", "strategy_revision", "repair"}:
             evidence_plan = self._pending_execution_plan or self._draft_design_plan or state.engineering_plan
             if self._pending_candidate_execution is not None:
                 evidence_plan = self._pending_candidate_execution.plan
@@ -5491,6 +5663,12 @@ class CFDEngineeringAgent:
                     payload,
                     max_chars=prompt_char_limit,
                 )
+            elif contract_phase == "repair":
+                prompt_result, payload, context_partition_metrics = build_partitioned_validation_repair_prompt(
+                    instruction,
+                    payload,
+                    max_chars=prompt_char_limit,
+                )
             else:
                 prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=prompt_char_limit)
         except ContextBudgetError:
@@ -5511,6 +5689,11 @@ class CFDEngineeringAgent:
                 # build_partitioned_revision_prompt already performed every bounded
                 # projection.  Preserve the explicit domain-specific diagnostic.
                 raise
+            elif contract_phase == "repair":
+                # build_partitioned_validation_repair_prompt already exhausted only
+                # optional supporting file/evidence projections. Preserve the
+                # primary validation failure and refuse unsafe silent truncation.
+                raise
             else:
                 raise
         metrics = structured_request_metrics(
@@ -5521,7 +5704,11 @@ class CFDEngineeringAgent:
         metrics["compacted"] = prompt_result.compacted
         metrics["deltaContext"] = use_delta
         metrics["contractPhase"] = contract_phase
-        metrics["evidenceShown"] = len(evidence_records)
+        metrics["evidenceShown"] = (
+            len(payload.get("supporting_evidence", []))
+            if contract_phase == "repair" and isinstance(payload, dict)
+            else len(evidence_records)
+        )
         metrics["evidenceObserved"] = evidence_total
         metrics["stagedAuthoring"] = bool(self.policy.staged_case_authoring)
         metrics["promptLimitChars"] = prompt_char_limit
