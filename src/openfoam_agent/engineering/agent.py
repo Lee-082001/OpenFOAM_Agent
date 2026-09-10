@@ -1398,6 +1398,45 @@ class CFDEngineeringAgent:
             self._pending_execution_plan = None
             return blocked
 
+        # v4.7.2: selected native utilities must be loadable under the exact
+        # sanitized OpenFOAM environment before the first candidate write. This is
+        # an infrastructure gate, not a CFD repair trigger. In particular, a missing
+        # ThirdParty/Scotch shared library must never cause the Agent to rewrite a
+        # valid snappyHexMesh case.
+        if native_execution:
+            native_commands = [item.command for item in build_graph.native_pipeline]
+            if build_graph.surface_paths:
+                native_commands.insert(0, "surfaceCheck")
+            ready, toolchain_failures, toolchain_checked = self._native_toolchain_preflight(native_commands)
+            if not ready:
+                event = self._event(
+                    llm_step,
+                    "native_toolchain_preflight",
+                    False,
+                    "Selected OpenFOAM native toolchain is not runnable under the sanitized environment; no candidate case files were written and CFD repair was not invoked.",
+                    "\n".join(f"- {failure}" for failure in toolchain_failures),
+                    validation_status="inconclusive",
+                    failure_category="infra",
+                )
+                state.engineering_events.append(event)
+                self._record_unresolved_failure(state, event)
+                self._emit_engineering_event(
+                    f"{progress_phase}-case-build", event,
+                    step=progress_step, limit=progress_limit, state=state,
+                )
+                state.transition(
+                    State.ENGINEERING_BLOCKED,
+                    "OpenFOAM native toolchain preflight failed before case commit; "
+                    "source/fix the OpenFOAM ThirdParty/shared-library environment and retry. "
+                    + event.summary,
+                )
+                self._pending_candidate_execution = None
+                self._pending_candidate_failed_paths = ()
+                self._pending_execution_plan = None
+                return True
+        else:
+            toolchain_checked = 0
+
         self.progress.emit(
             ProgressEvent(
                 phase=f"{progress_phase}-case-build",
@@ -1413,6 +1452,7 @@ class CFDEngineeringAgent:
                     "nativeCommands": len(build_graph.native_pipeline),
                     "ignoredHints": len(build_graph.warnings),
                     "reusedExistingFiles": len(reused_existing_paths),
+                    "toolchainChecked": toolchain_checked,
                 },
             )
         )
@@ -1761,6 +1801,25 @@ class CFDEngineeringAgent:
         if total > remaining:
             state.transition(State.ENGINEERING_BLOCKED, f"Engineering deterministic action budget cannot cover atomic repair graph ({total} needed, {remaining} remaining).")
             return True
+        if native_execution:
+            commands = [item.command for item in graph.native_pipeline]
+            if graph.surface_paths:
+                commands.insert(0, "surfaceCheck")
+            ready, failures, _ = self._native_toolchain_preflight(commands)
+            if not ready:
+                event = self._event(
+                    llm_step, "native_toolchain_preflight", False,
+                    "Repair delta requires an unavailable native OpenFOAM toolchain; no case mutation was committed and CFD repair was not recursively invoked.",
+                    "\n".join(f"- {item}" for item in failures),
+                    validation_status="inconclusive", failure_category="infra",
+                )
+                state.engineering_events.append(event)
+                self._record_unresolved_failure(state, event)
+                self._emit_engineering_event(
+                    f"{progress_phase}-repair-plan", event, step=1, limit=max(total, 1), state=state
+                )
+                state.transition(State.ENGINEERING_BLOCKED, event.summary)
+                return True
         if progress_phase.startswith("revision") and (graph.changed_files or graph.drop_paths):
             self._begin_confirmed_revision_mutation(state)
         committed = self.workspace.commit_text_transaction(graph.changed_files, drop_paths=graph.drop_paths)
@@ -1876,6 +1935,25 @@ class CFDEngineeringAgent:
         if total > remaining:
             state.transition(State.ENGINEERING_BLOCKED, f"Engineering deterministic action budget cannot cover atomic strategy graph ({total} needed, {remaining} remaining).")
             return True
+        if native_execution:
+            commands = [item.command for item in graph.native_pipeline]
+            if graph.surface_paths:
+                commands.insert(0, "surfaceCheck")
+            ready, failures, _ = self._native_toolchain_preflight(commands)
+            if not ready:
+                event = self._event(
+                    llm_step, "native_toolchain_preflight", False,
+                    "Mesh-strategy revision requires an unavailable native OpenFOAM toolchain; no strategy delta was committed.",
+                    "\n".join(f"- {item}" for item in failures),
+                    validation_status="inconclusive", failure_category="infra",
+                )
+                state.engineering_events.append(event)
+                self._record_unresolved_failure(state, event)
+                self._emit_engineering_event(
+                    f"{progress_phase}-strategy-revision", event, step=1, limit=max(total, 1), state=state
+                )
+                state.transition(State.ENGINEERING_BLOCKED, event.summary)
+                return True
         committed = self.workspace.commit_text_transaction(graph.changed_files, drop_paths=graph.drop_paths)
         self._precommitted_files.update(committed)
         self._precommitted_drops.update(graph.drop_paths)
@@ -2004,6 +2082,21 @@ class CFDEngineeringAgent:
         remaining = self.policy.max_runtime_repair_tool_actions - used
         if total > remaining:
             return RepairOutcome(RuntimeRepairDecision.BLOCKED, reason=f"Runtime repair action budget cannot cover atomic CaseDeltaGraph ({total} needed, {remaining} remaining).")
+        if native_execution:
+            commands = [item.command for item in graph.native_pipeline]
+            if graph.surface_paths:
+                commands.insert(0, "surfaceCheck")
+            ready, failures, _ = self._native_toolchain_preflight(commands)
+            if not ready:
+                event = self._event(
+                    llm_step, "native_toolchain_preflight", False,
+                    "Runtime repair requires an unavailable native OpenFOAM toolchain; no repair mutation was committed.",
+                    "\n".join(f"- {item}" for item in failures),
+                    validation_status="inconclusive", failure_category="infra",
+                )
+                state.engineering_events.append(event)
+                self._record_unresolved_failure(state, event)
+                return RepairOutcome(RuntimeRepairDecision.BLOCKED, reason=event.summary + " " + event.output_excerpt)
         committed = self.workspace.commit_text_transaction(graph.changed_files, drop_paths=graph.drop_paths)
         self._precommitted_files.update(committed)
         self._precommitted_drops.update(graph.drop_paths)
@@ -4448,6 +4541,39 @@ class CFDEngineeringAgent:
         if callable(checker):
             return checker(command, self.workspace.case_dir)
         return True, ""
+
+    def _native_toolchain_preflight(
+        self, commands: list[str] | tuple[str, ...]
+    ) -> tuple[bool, tuple[str, ...], int]:
+        """Check selected native executables under the actual sanitized loader env.
+
+        This is controller-owned infrastructure validation. It never chooses a CFD
+        strategy and never turns a loader/package problem into a case repair. Tool
+        doubles/offline tests that do not expose the capability remain compatible.
+        """
+        checker = getattr(self.tools, "native_command_preflight", None)
+        if not callable(checker):
+            return True, (), 0
+        failures: list[str] = []
+        checked = 0
+        for command in dict.fromkeys(str(item) for item in commands if str(item)):
+            try:
+                status = checker(command)
+            except (OSError, ValueError, RuntimeError, ExecutionPolicyError) as exc:
+                failures.append(f"{command}: native toolchain preflight failed: {type(exc).__name__}: {exc}")
+                continue
+            checked += 1
+            available = bool(status.get("available", True))
+            trusted = bool(status.get("trusted", True))
+            ready = bool(status.get("runtime_ready", available and trusted))
+            if available and trusted and ready:
+                continue
+            reason = str(status.get("reason") or "native executable/toolchain is unavailable")
+            missing = status.get("missing_libraries")
+            if isinstance(missing, list) and missing:
+                reason += " | missingLibraries=" + ",".join(str(item) for item in missing[:12])
+            failures.append(f"{command}: {reason}")
+        return not failures, tuple(failures), checked
 
     @staticmethod
     def _native_failure_signature(command: str, kind: str, excerpt: str) -> str:

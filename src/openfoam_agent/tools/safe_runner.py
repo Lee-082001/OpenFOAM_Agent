@@ -7,6 +7,7 @@ import signal
 import uuid
 from contextlib import contextmanager
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -82,8 +83,15 @@ class SafeRunner:
     }
     _TRUSTED_PATH_ENV = {
         "WM_PROJECT_DIR",
+        "WM_PROJECT_INST_DIR",
+        "WM_THIRD_PARTY_DIR",
         "FOAM_APPBIN",
         "FOAM_LIBBIN",
+        "FOAM_EXT_LIBBIN",
+        "SCOTCH_ARCH_PATH",
+        "BOOST_ARCH_PATH",
+        "CGAL_ARCH_PATH",
+        "FFTW_ARCH_PATH",
         "FOAM_ETC",
         "FOAM_SRC",
         "FOAM_TUTORIALS",
@@ -105,6 +113,7 @@ class SafeRunner:
         workspace_root: str | Path | None = None,
         max_timeout: int = 86400,
         trusted_executable_roots: Sequence[str | Path] | None = None,
+        trusted_library_roots: Sequence[str | Path] | None = None,
         base_env: Mapping[str, str] | None = None,
         resource_limits: ResourceLimits | None = None,
     ) -> None:
@@ -124,6 +133,9 @@ class SafeRunner:
         self._base_env = dict(os.environ if base_env is None else base_env)
         self.trusted_executable_roots = self._resolve_trusted_roots(
             trusted_executable_roots
+        )
+        self.trusted_library_roots = self._resolve_trusted_library_roots(
+            trusted_library_roots
         )
         self.installation = OpenFOAMInstallationDiscovery(
             base_env=self._base_env,
@@ -334,7 +346,16 @@ class SafeRunner:
             except OSError:
                 env.pop(key, None)
                 continue
-            if not any(_is_within(resolved, root) for root in self.trusted_executable_roots):
+            roots = (
+                self.trusted_library_roots
+                if key in {
+                    "WM_PROJECT_INST_DIR", "WM_THIRD_PARTY_DIR", "FOAM_LIBBIN", "FOAM_EXT_LIBBIN",
+                    "SCOTCH_ARCH_PATH", "BOOST_ARCH_PATH", "CGAL_ARCH_PATH",
+                    "FFTW_ARCH_PATH",
+                }
+                else self.trusted_executable_roots
+            )
+            if not any(_is_within(resolved, root) for root in roots):
                 env.pop(key, None)
 
         if self.workspace_root is not None:
@@ -353,6 +374,7 @@ class SafeRunner:
             env["LD_LIBRARY_PATH"] = self._filtered_search_path(
                 self._base_env.get("LD_LIBRARY_PATH", ""),
                 allowed_system_roots=self._SYSTEM_LIBRARY_ROOTS,
+                trusted_roots=self.trusted_library_roots,
             )
         return env
 
@@ -361,9 +383,11 @@ class SafeRunner:
         value: str,
         *,
         allowed_system_roots: Sequence[Path],
+        trusted_roots: Sequence[Path] | None = None,
     ) -> str:
         accepted: list[str] = []
         seen: set[str] = set()
+        trust = tuple(trusted_roots or self.trusted_executable_roots)
         for raw in value.split(os.pathsep):
             if not raw:
                 continue
@@ -371,7 +395,7 @@ class SafeRunner:
                 path = Path(raw).expanduser().resolve()
             except OSError:
                 continue
-            trusted = any(_is_within(path, root) for root in self.trusted_executable_roots)
+            trusted = any(_is_within(path, root) for root in trust)
             system = any(path == root or _is_within(path, root) for root in allowed_system_roots)
             if (trusted or system) and str(path) not in seen:
                 accepted.append(str(path))
@@ -398,6 +422,128 @@ class SafeRunner:
             if path.is_dir() and path not in roots:
                 roots.append(path)
         return tuple(roots)
+
+    def _resolve_trusted_library_roots(
+        self,
+        supplied: Sequence[str | Path] | None,
+    ) -> tuple[Path, ...]:
+        """Resolve library-only trust roots without broadening executable trust.
+
+        Foundation source installations commonly place ThirdParty-* beside the
+        OpenFOAM project tree. v4.7.1 filtered LD_LIBRARY_PATH only against
+        WM_PROJECT_DIR, which could remove FOAM_EXT_LIBBIN/Scotch paths and make a
+        healthy snappyHexMesh fail with ``libscotch.so`` missing. Library roots are
+        therefore tracked separately from executable roots.
+        """
+        if supplied is not None:
+            raw_roots: list[str | Path] = list(supplied)
+        else:
+            raw_roots = list(self.trusted_executable_roots)
+            project_text = self._base_env.get("WM_PROJECT_DIR", "").strip()
+            project = Path(project_text).expanduser().resolve() if project_text else None
+            inst_text = self._base_env.get("WM_PROJECT_INST_DIR", "").strip()
+            inst = Path(inst_text).expanduser().resolve() if inst_text else None
+            third_text = self._base_env.get("WM_THIRD_PARTY_DIR", "").strip()
+            third = Path(third_text).expanduser().resolve() if third_text else None
+
+            # WM_PROJECT_INST_DIR is the conventional common parent of OpenFOAM-*
+            # and ThirdParty-*. Trust it for libraries only when it actually contains
+            # the already-trusted project root.
+            if inst is not None and inst.is_dir() and project is not None and inst == project.parent:
+                raw_roots.append(inst)
+            if third is not None and third.is_dir():
+                sibling = project is not None and third.parent == project.parent
+                under_inst = inst is not None and inst.is_dir() and inst == project.parent and _is_within(third, inst)
+                if sibling or under_inst:
+                    raw_roots.append(third)
+
+            # Accept explicit library locations only when they are inside a library
+            # trust anchor established above. Never promote them to executable roots.
+            provisional: list[Path] = []
+            for raw in raw_roots:
+                try:
+                    candidate = Path(raw).expanduser().resolve()
+                except OSError:
+                    continue
+                if candidate.is_dir() and candidate not in provisional:
+                    provisional.append(candidate)
+            for key in (
+                "FOAM_LIBBIN", "FOAM_EXT_LIBBIN", "SCOTCH_ARCH_PATH",
+                "BOOST_ARCH_PATH", "CGAL_ARCH_PATH", "FFTW_ARCH_PATH",
+            ):
+                value = self._base_env.get(key, "").strip()
+                if not value:
+                    continue
+                try:
+                    candidate = Path(value).expanduser().resolve()
+                except OSError:
+                    continue
+                if candidate.is_dir() and any(_is_within(candidate, root) for root in provisional):
+                    raw_roots.append(candidate)
+
+        roots: list[Path] = []
+        for raw in raw_roots:
+            try:
+                path = Path(raw).expanduser().resolve()
+            except OSError:
+                continue
+            if path.is_dir() and path not in roots:
+                roots.append(path)
+        return tuple(roots)
+
+    def executable_dependency_status(self, exe: str) -> dict[str, object]:
+        """Inspect trusted ELF loader dependencies under the sanitized runtime env.
+
+        This is a bounded static/toolchain preflight, not a CFD consumer run. ``ldd``
+        is used only for an already trusted ELF executable, with shell disabled and
+        the sanitized environment. Unknown/non-ELF cases remain non-blocking; only
+        explicit missing shared libraries are reported as not ready.
+        """
+        status = self.executable_status(exe)
+        if not status.get("available"):
+            return {**status, "runtime_ready": False, "dependency_checked": False}
+        try:
+            path = self.resolve_trusted_executable(exe, env=self.sanitized_environment())
+            with path.open("rb") as handle:
+                magic = handle.read(4)
+        except (OSError, UnsafeCommandError) as exc:
+            return {**status, "runtime_ready": False, "dependency_checked": False, "reason": str(exc)}
+        if magic != b"\x7fELF" or os.name != "posix":
+            return {**status, "runtime_ready": True, "dependency_checked": False}
+        ldd = shutil.which("ldd", path="/usr/bin:/bin")
+        if not ldd:
+            return {**status, "runtime_ready": True, "dependency_checked": False}
+        env = self.sanitized_environment()
+        try:
+            completed = subprocess.run(
+                [ldd, str(path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                env=env,
+                cwd=str(self.workspace_root) if self.workspace_root is not None else None,
+                timeout=8,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {**status, "runtime_ready": True, "dependency_checked": False, "probe_note": str(exc)}
+        output = (completed.stdout or "")[:65536]
+        missing = []
+        for line in output.splitlines():
+            match = re.match(r"\s*([^\s]+)\s*=>\s*not found\s*$", line)
+            if match:
+                missing.append(match.group(1))
+        if missing:
+            return {
+                **status,
+                "runtime_ready": False,
+                "dependency_checked": True,
+                "missing_libraries": sorted(dict.fromkeys(missing)),
+                "reason": "Missing shared libraries under the sanitized OpenFOAM runtime environment: "
+                + ", ".join(sorted(dict.fromkeys(missing))),
+            }
+        return {**status, "runtime_ready": True, "dependency_checked": True}
 
     def _validate_cwd(self, cwd: str | Path | None) -> Path | None:
         if cwd is None:

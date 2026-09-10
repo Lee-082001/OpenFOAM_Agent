@@ -1,3 +1,7 @@
+## v4.7.2 native toolchain boundary
+
+> v4.7.2 separates trusted OpenFOAM executable roots from validated ThirdParty library roots, preserves legitimate Foundation ThirdParty loader paths under the sanitized runtime environment, preflights selected native ELF dependencies before case mutation, and routes loader/exit-126/127 failures to infrastructure instead of CFD repair. See `V4_7_2_CHANGES.md`.
+
 ## v4.7.1 revision delta context and retry-safe human revision
 
 - Confirmed human-feedback revision no longer rebuilds a full Engineering context. A dedicated `RevisionDeltaContext` carries the frozen-intake identity, compact baseline decision projection, confirmed revision proposal, bounded runtime/evidence summary, and only the fields needed for the requested delta.

@@ -42,6 +42,22 @@ class OpenFOAMTools:
         """Return trusted-executable availability for the minimal native preflight."""
         return self.runner.executable_status("checkMesh")
 
+    def native_command_preflight(self, command: str) -> dict[str, object]:
+        """Return cached executable + loader dependency health for one native tool.
+
+        This does not run the CFD utility. It asks SafeRunner to inspect the trusted
+        ELF executable under the same sanitized runtime environment that will be
+        used later, so missing ThirdParty/shared-library dependencies are caught
+        before candidate case mutation or an LLM repair loop.
+        """
+        cache = getattr(self, "_native_dependency_cache", None)
+        if cache is None:
+            cache = {}
+            self._native_dependency_cache = cache
+        if command not in cache:
+            cache[command] = self.runner.executable_dependency_status(command)
+        return dict(cache[command])
+
     def environment_snapshot(self) -> dict[str, object]:
         """Return a compact, path-free installation capsule for model context.
 

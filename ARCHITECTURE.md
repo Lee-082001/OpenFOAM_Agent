@@ -1,3 +1,7 @@
+## v4.7.2 native executable vs library trust boundary
+
+Native executable authority remains confined to the trusted OpenFOAM installation. Library search authority is separate: validated Foundation installation/ThirdParty roots may supply runtime libraries without becoming executable roots. Controller graph phases inspect selected native tool dependencies before transactional mutation, and dynamic-loader failures are infrastructure observations rather than case semantics.
+
 ## v4.7.1 revision delta context boundary
 
 Human-feedback revision is a delta workflow, not a second full Engineering design pass. After the user confirms a `RevisionProposal`, Python retains the complete sealed baseline plan and case internally but exposes a bounded `RevisionDeltaContext` to the model: frozen-intake identity, a compact baseline decision/default projection, the confirmed proposal, linked feedback, sealed-manifest identity, mesh/runtime summary, and bounded evidence. Historical rationale, complete capability inventories, cumulative audit evidence and unchanged plan payloads are not repeated merely to satisfy the revision turn.

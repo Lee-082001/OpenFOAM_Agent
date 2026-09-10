@@ -8,6 +8,15 @@ from typing import Literal
 from openfoam_agent.schemas.common import ToolResult
 
 _FATAL_PATTERNS = (
+    # Loader/toolchain failures must be recognized before the generic output-tail
+    # fallback. They are infrastructure observations, never evidence that the CFD
+    # dictionaries/mesh are semantically invalid.
+    ("shared_library_missing", re.compile(
+        r"error while loading shared libraries:.*(?:cannot open shared object file|no such file or directory)",
+        re.IGNORECASE,
+    )),
+    ("symbol_lookup_error", re.compile(r"\bsymbol lookup error\b", re.IGNORECASE)),
+    ("exec_format_error", re.compile(r"\bexec format error\b", re.IGNORECASE)),
     ("foam_fatal_io_error", re.compile(r"FOAM\s+FATAL\s+IO\s+ERROR", re.IGNORECASE)),
     ("foam_fatal_error", re.compile(r"FOAM\s+FATAL\s+ERROR", re.IGNORECASE)),
     ("fatal_error", re.compile(r"\bfatal\s+error\b", re.IGNORECASE)),
@@ -82,6 +91,19 @@ def classify_native_validation(
         return NativeValidationAssessment("pass", None, None, f"{command} completed successfully.")
 
     diagnostic = diagnose_openfoam_failure(result, command_name=command)
+
+    # v4.7.2: dynamic-loader / executable-launch failures are host-toolchain
+    # failures. SafeRunner already resolves a trusted executable before spawn, so
+    # exit 126/127 cannot be treated as evidence that authored CFD content is bad.
+    # Most importantly, never feed these failures to an LLM case-repair loop.
+    if diagnostic.kind in {"shared_library_missing", "symbol_lookup_error", "exec_format_error"} or result.return_code in {126, 127}:
+        return NativeValidationAssessment(
+            "inconclusive",
+            "infra",
+            diagnostic,
+            f"{command} could not start reliably because the native executable/toolchain environment is unavailable or incomplete.",
+        )
+
     if diagnostic.kind in {"foam_fatal_io_error", "foam_fatal_error", "fatal_error"}:
         return NativeValidationAssessment(
             "fail", "case", diagnostic, f"{command} reported an explicit OpenFOAM fatal diagnostic."

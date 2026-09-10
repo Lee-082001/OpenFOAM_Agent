@@ -130,3 +130,8 @@ Delta repair does not introduce fuzzy edits. `CaseFilePatch` is accepted only wh
 ## Claude Code subscription backend
 
 `--backend claude` is a cloud model transport, not an execution authority. OpenFOAM Agent requires explicit `--confirm-api-calls`, verifies `claude auth status` reports the Claude subscription/OAuth path, and strips API/provider routing variables before invoking the CLI. Calls run in an empty temporary directory with no session persistence, mandatory safe mode, built-in tools disabled, and MCP disabled; returned structured output is revalidated by Pydantic before any deterministic action. Claude Code does not expose Codex's OS-level read-only sandbox flag, so centrally managed Claude Code hooks/policies are treated as part of the trusted local installation boundary. The Agent does not pass the CFD workspace as the Claude working directory or authorize Claude model tools to read/write it.
+
+
+## Native library trust (v4.7.2)
+
+OpenFOAM executable trust and dynamic-library trust are separate. Executables must still resolve inside trusted OpenFOAM executable roots. The sanitized loader path may additionally retain validated Foundation `WM_PROJECT_INST_DIR` / sibling `WM_THIRD_PARTY_DIR` library locations and library directories beneath those anchors. Arbitrary user-controlled `LD_LIBRARY_PATH` entries remain removed. Selected trusted ELF executables may be inspected with bounded `ldd` under the sanitized environment before case mutation; this inspection cannot authorize a CFD action or broaden executable trust.
