@@ -4,6 +4,7 @@ from openfoam_agent.contracts.evidence import implementation_evidence_pack, evid
 from openfoam_agent.contracts.evidence_policy import POLICY_SUMMARY, provider_is_sufficient
 from openfoam_agent.engineering.authoring_tasks import compile_tasks, accept_task
 from openfoam_agent.engineering.case_build_graph import compile_case_build_graph
+from openfoam_agent.engineering.case_delta_graph import compile_case_delta_graph
 from openfoam_agent.llm.context import ContextBudgetError
 from openfoam_agent.engineering.design_context import build_partitioned_design_prompt
 from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
@@ -299,6 +300,8 @@ class CFDEngineeringAgent:
         self._retrieval_cycles: dict[str, int] = {}
         self._evidence_retrieval_disabled: dict[str, str] = {}
         self._active_transaction = None
+        self._precommitted_files: dict[str, str] = {}
+        self._precommitted_drops: set[str] = set()
         self._resume_pending = False
 
     def prepare(self, state: CFDState, *, native_execution: bool = True) -> CFDState:
@@ -901,15 +904,30 @@ class CFDEngineeringAgent:
             raw[patch.path] = CaseBundleFile(path=patch.path, content=content)
             typed.pop(patch.path, None)
 
+        replacement_seen: dict[str, str] = {}
         for item in repair.replacement_files:
+            prior = replacement_seen.get(item.path)
+            if prior is not None and prior != item.content:
+                raise WorkspaceSafetyError(f"Conflicting candidate replacement content for {item.path}.")
+            replacement_seen[item.path] = item.content
+            if item.path in typed:
+                raise WorkspaceSafetyError(f"Candidate delta cannot replace {item.path} in raw and typed form in one turn.")
             raw[item.path] = item
-            typed.pop(item.path, None)
             if block_mesh is not None and block_mesh.path == item.path:
                 block_mesh = None
 
+        typed_seen: dict[str, str] = {}
         for item in repair.typed_dictionaries:
+            rendered = serialize_foam_dictionary(item)
+            prior = typed_seen.get(item.path)
+            if prior is not None and prior != rendered:
+                raise WorkspaceSafetyError(f"Conflicting candidate typed content for {item.path}.")
+            typed_seen[item.path] = rendered
+            if item.path in raw and item.path not in replacement_seen:
+                raw.pop(item.path, None)
+            elif item.path in replacement_seen:
+                raise WorkspaceSafetyError(f"Candidate delta cannot replace {item.path} in raw and typed form in one turn.")
             typed[item.path] = item
-            raw.pop(item.path, None)
             if block_mesh is not None and block_mesh.path == item.path:
                 block_mesh = None
 
@@ -1348,7 +1366,8 @@ class CFDEngineeringAgent:
         )
 
         # Only after every candidate file passes deterministic authoring preflight do
-        # we start mutating the workspace.
+        # we mutate the workspace. Commit the complete text bundle atomically at the
+        # filesystem level; following write actions are audit/progress no-ops.
         self._pending_candidate_execution = None
         self._pending_candidate_failed_paths = ()
         # Since all file writes precede dictionary or
@@ -1411,6 +1430,15 @@ class CFDEngineeringAgent:
 
         execution_id = f"{progress_phase}:execution-plan:{llm_step:04d}"
         total = len(actions)
+        remaining = self.policy.max_tool_actions - self._tool_action_count(state)
+        if total > remaining:
+            state.transition(
+                State.ENGINEERING_BLOCKED,
+                f"Engineering deterministic action budget cannot cover atomic case build graph ({total} needed, {remaining} remaining).",
+            )
+            return True
+        committed = self.workspace.commit_text_transaction(candidate_bundle)
+        self._precommitted_files.update(committed)
         self.progress.emit(
             ProgressEvent(
                 phase=f"{progress_phase}-execution-plan",
@@ -1600,58 +1628,43 @@ class CFDEngineeringAgent:
         repair: RepairCasePlanAction,
         *,
         runtime: bool,
-    ) -> tuple[list[object], EngineeringPlan]:
-        """Expand one delta-only repair into existing deterministic primitive actions."""
-
-        actions: list[object] = []
-        for patch in repair.patches:
-            actions.append(PatchCaseFileAction(type="patch_case_file", patch=patch))
-        for item in repair.replacement_files:
-            actions.append(
-                WriteCaseFileAction(
-                    type="write_case_file", path=item.path, content=item.content, rationale=""
-                )
-            )
-        for item in repair.typed_dictionaries:
-            actions.append(
-                WriteCaseFileAction(
-                    type="write_case_file",
-                    path=item.path,
-                    content=serialize_foam_dictionary(item),
-                    rationale="",
-                )
-            )
-        for path in repair.validate_dictionaries:
-            actions.append(
-                ValidateDictionaryAction(type="validate_dictionary", path=path, rationale="")
-            )
-        for path in repair.surface_checks:
-            actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale=""))
-        if repair.native_pipeline:
-            for invocation in repair.native_pipeline:
-                actions.append(RunNativeOpenFOAMAction(type="run_openfoam_command", invocation=invocation))
-        else:
-            for command in repair.mesh_commands:
-                actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
-
+    ) -> tuple[list[object], EngineeringPlan, object]:
+        """Compile a controller-owned delta graph for prepare/runtime repair."""
         plan = repair.updated_plan or state.engineering_plan or self._pending_execution_plan
         if plan is None:
             raise WorkspaceSafetyError(
                 "Delta repair has no baseline EngineeringPlan. Return execute_case_plan instead."
             )
-        if repair.validate_pre_solve:
-            actions.append(
-                ValidatePreSolveAction(
-                    type="validate_pre_solve",
-                    required_case_files=plan.required_case_files,
-                    rationale="",
-                )
-            )
+        replacements = [(item.path, item.content) for item in repair.replacement_files]
+        replacements += [(item.path, serialize_foam_dictionary(item)) for item in repair.typed_dictionaries]
+        patches = [(item.path, item.old, item.new) for item in repair.patches]
+        graph = compile_case_delta_graph(
+            self.workspace, plan, patches=patches, replacements=replacements,
+            native_hints=repair.native_pipeline, mesh_commands=repair.mesh_commands,
+            validate_dictionaries=repair.validate_dictionaries, surface_checks=repair.surface_checks,
+            validate_pre_solve=repair.validate_pre_solve, phase=("runtime_repair" if runtime else "repair"),
+        )
+        if not graph.valid:
+            raise WorkspaceSafetyError("CaseDeltaGraph rejected repair before mutation: " + " | ".join(graph.failures))
+        actions: list[object] = [
+            WriteCaseFileAction(type="write_case_file", path=path, content=content, rationale="controller-compiled delta")
+            for path, content in graph.changed_files.items()
+        ]
+        for path in graph.surface_paths:
+            actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale="controller-compiled delta validation"))
+        legacy_mesh_dispatch = {"blockMesh", "surfaceFeatureExtract", "snappyHexMesh", "createPatch", "checkMesh"}
+        for invocation in graph.native_pipeline:
+            if invocation.command in legacy_mesh_dispatch and not invocation.arguments:
+                actions.append(RunMeshCommandAction(type="run_mesh_command", command=invocation.command, rationale="controller-compiled delta consumer"))
+            else:
+                actions.append(RunNativeOpenFOAMAction(type="run_openfoam_command", invocation=invocation))
+        if graph.validate_pre_solve:
+            actions.append(ValidatePreSolveAction(type="validate_pre_solve", required_case_files=plan.required_case_files, rationale="controller-compiled delta manifest"))
         if runtime or repair.retry_solver:
             actions.append(RetrySolverAction(type="retry_solver", plan=plan, rationale=""))
         else:
             actions.append(FinishPreviewAction(type="finish_preview", plan=plan, rationale=""))
-        return actions, plan
+        return actions, plan, graph
 
     def _execute_prepare_repair_plan(
         self,
@@ -1677,13 +1690,20 @@ class CFDEngineeringAgent:
             state.engineering_events.append(event)
             return False
         try:
-            actions, _ = self._repair_actions(state, repair, runtime=False)
+            actions, _, graph = self._repair_actions(state, repair, runtime=False)
         except (WorkspaceSafetyError, FoamSerializationError) as exc:
             event = self._event(llm_step, repair.type, False, str(exc))
             state.engineering_events.append(event)
             return False
         sequence_id = f"{progress_phase}:repair-plan:{llm_step:04d}"
         total = len(actions)
+        remaining = self.policy.max_tool_actions - self._tool_action_count(state)
+        if total > remaining:
+            state.transition(State.ENGINEERING_BLOCKED, f"Engineering deterministic action budget cannot cover atomic repair graph ({total} needed, {remaining} remaining).")
+            return True
+        committed = self.workspace.commit_text_transaction(graph.changed_files, drop_paths=graph.drop_paths)
+        self._precommitted_files.update(committed)
+        self._precommitted_drops.update(graph.drop_paths)
         for index, member in enumerate(actions, start=1):
             if self._tool_action_count(state) >= self.policy.max_tool_actions:
                 state.transition(
@@ -1740,33 +1760,51 @@ class CFDEngineeringAgent:
             state.engineering_events.append(event)
             return False
 
-        actions: list[object] = []
-        for path in revision.drop_paths:
-            actions.append(DeleteCaseFileAction(type="delete_case_file", path=path, rationale=""))
-        for patch in revision.patches:
-            actions.append(PatchCaseFileAction(type="patch_case_file", patch=patch))
-        for item in revision.replacement_files:
-            actions.append(WriteCaseFileAction(type="write_case_file", path=item.path, content=item.content, rationale=""))
-        for item in revision.typed_dictionaries:
-            actions.append(WriteCaseFileAction(type="write_case_file", path=item.path, content=serialize_foam_dictionary(item), rationale=""))
+        replacements = [(item.path, item.content) for item in revision.replacement_files]
+        replacements += [(item.path, serialize_foam_dictionary(item)) for item in revision.typed_dictionaries]
         if revision.block_mesh is not None:
-            actions.append(WriteCaseFileAction(type="write_case_file", path=revision.block_mesh.path, content=serialize_block_mesh(revision.block_mesh), rationale=""))
-        for path in revision.validate_dictionaries:
-            actions.append(ValidateDictionaryAction(type="validate_dictionary", path=path, rationale=""))
-        for path in revision.surface_checks:
-            actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale=""))
-        if revision.native_pipeline:
-            for invocation in revision.native_pipeline:
+            replacements.append((revision.block_mesh.path, serialize_block_mesh(revision.block_mesh)))
+        patches = [(item.path, item.old, item.new) for item in revision.patches]
+        graph = compile_case_delta_graph(
+            self.workspace, plan, patches=patches, replacements=replacements,
+            drop_paths=revision.drop_paths, native_hints=revision.native_pipeline,
+            mesh_commands=revision.mesh_commands, validate_dictionaries=revision.validate_dictionaries,
+            surface_checks=revision.surface_checks, validate_pre_solve=revision.validate_pre_solve, phase="strategy_revision",
+        )
+        if not graph.valid:
+            event = self._event(
+                llm_step, "case_delta_graph", False,
+                "Controller rejected mesh-strategy delta before mutation.",
+                "\n".join(graph.failures), validation_status="fail", failure_category="case",
+            )
+            state.engineering_events.append(event)
+            return False
+        actions: list[object] = []
+        for path in graph.drop_paths:
+            actions.append(DeleteCaseFileAction(type="delete_case_file", path=path, rationale="controller-compiled strategy delta"))
+        for path, content in graph.changed_files.items():
+            actions.append(WriteCaseFileAction(type="write_case_file", path=path, content=content, rationale="controller-compiled strategy delta"))
+        for path in graph.surface_paths:
+            actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale="controller-compiled strategy validation"))
+        legacy_mesh_dispatch = {"blockMesh", "surfaceFeatureExtract", "snappyHexMesh", "createPatch", "checkMesh"}
+        for invocation in graph.native_pipeline:
+            if invocation.command in legacy_mesh_dispatch and not invocation.arguments:
+                actions.append(RunMeshCommandAction(type="run_mesh_command", command=invocation.command, rationale="controller-compiled strategy consumer"))
+            else:
                 actions.append(RunNativeOpenFOAMAction(type="run_openfoam_command", invocation=invocation))
-        else:
-            for command in revision.mesh_commands:
-                actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
-        if revision.validate_pre_solve:
-            actions.append(ValidatePreSolveAction(type="validate_pre_solve", required_case_files=plan.required_case_files, rationale=""))
+        if graph.validate_pre_solve:
+            actions.append(ValidatePreSolveAction(type="validate_pre_solve", required_case_files=plan.required_case_files, rationale="controller-compiled delta manifest"))
         actions.append(FinishPreviewAction(type="finish_preview", plan=plan, rationale=""))
 
         sequence_id = f"{progress_phase}:strategy-revision:{llm_step:04d}"
         total = len(actions)
+        remaining = self.policy.max_tool_actions - self._tool_action_count(state)
+        if total > remaining:
+            state.transition(State.ENGINEERING_BLOCKED, f"Engineering deterministic action budget cannot cover atomic strategy graph ({total} needed, {remaining} remaining).")
+            return True
+        committed = self.workspace.commit_text_transaction(graph.changed_files, drop_paths=graph.drop_paths)
+        self._precommitted_files.update(committed)
+        self._precommitted_drops.update(graph.drop_paths)
         for index, member in enumerate(actions, start=1):
             if self._tool_action_count(state) >= self.policy.max_tool_actions:
                 state.transition(State.ENGINEERING_BLOCKED, f"Engineering deterministic action budget exhausted ({self.policy.max_tool_actions}).")
@@ -1797,54 +1835,41 @@ class CFDEngineeringAgent:
         self,
         state: CFDState,
         repair: RuntimeCaseRepairAction,
-    ) -> tuple[list[object], EngineeringPlan]:
-        """Expand grouped runtime edits into sequential deterministic primitives."""
+    ) -> tuple[list[object], EngineeringPlan, object]:
+        """Compile runtime edits through the same CaseDeltaGraph as prepare repair."""
         plan = state.engineering_plan
         if plan is None:
             raise WorkspaceSafetyError("Runtime repair requires the approved EngineeringPlan.")
-        actions: list[object] = []
+        patches: list[tuple[str, str, str]] = []
         for group in repair.file_patches:
-            for edit in group.edits:
-                actions.append(
-                    PatchCaseFileAction(
-                        type="patch_case_file",
-                        patch={"path": group.path, "old": edit.old, "new": edit.new},
-                    )
-                )
-        for item in repair.replacement_files:
-            actions.append(
-                WriteCaseFileAction(type="write_case_file", path=item.path, content=item.content, rationale="")
-            )
-        for item in repair.typed_dictionaries:
-            actions.append(
-                WriteCaseFileAction(
-                    type="write_case_file",
-                    path=item.path,
-                    content=serialize_foam_dictionary(item),
-                    rationale="",
-                )
-            )
-        for path in repair.validate_dictionaries:
-            actions.append(ValidateDictionaryAction(type="validate_dictionary", path=path, rationale=""))
-        for path in repair.surface_checks:
-            actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale=""))
-        if repair.native_pipeline:
-            for invocation in repair.native_pipeline:
+            patches.extend((group.path, edit.old, edit.new) for edit in group.edits)
+        replacements = [(item.path, item.content) for item in repair.replacement_files]
+        replacements += [(item.path, serialize_foam_dictionary(item)) for item in repair.typed_dictionaries]
+        graph = compile_case_delta_graph(
+            self.workspace, plan, patches=patches, replacements=replacements,
+            native_hints=repair.native_pipeline, mesh_commands=repair.mesh_commands,
+            validate_dictionaries=repair.validate_dictionaries, surface_checks=repair.surface_checks,
+            validate_pre_solve=repair.validate_pre_solve, phase="runtime_repair",
+        )
+        if not graph.valid:
+            raise WorkspaceSafetyError("CaseDeltaGraph rejected runtime repair before mutation: " + " | ".join(graph.failures))
+        actions: list[object] = [
+            WriteCaseFileAction(type="write_case_file", path=path, content=content, rationale="controller-compiled runtime delta")
+            for path, content in graph.changed_files.items()
+        ]
+        for path in graph.surface_paths:
+            actions.append(SurfaceCheckAction(type="surface_check", path=path, rationale="controller-compiled delta validation"))
+        legacy_mesh_dispatch = {"blockMesh", "surfaceFeatureExtract", "snappyHexMesh", "createPatch", "checkMesh"}
+        for invocation in graph.native_pipeline:
+            if invocation.command in legacy_mesh_dispatch and not invocation.arguments:
+                actions.append(RunMeshCommandAction(type="run_mesh_command", command=invocation.command, rationale="controller-compiled runtime consumer"))
+            else:
                 actions.append(RunNativeOpenFOAMAction(type="run_openfoam_command", invocation=invocation))
-        else:
-            for command in repair.mesh_commands:
-                actions.append(RunMeshCommandAction(type="run_mesh_command", command=command, rationale=""))
-        if repair.validate_pre_solve:
-            actions.append(
-                ValidatePreSolveAction(
-                    type="validate_pre_solve",
-                    required_case_files=plan.required_case_files,
-                    rationale="",
-                )
-            )
+        if graph.validate_pre_solve:
+            actions.append(ValidatePreSolveAction(type="validate_pre_solve", required_case_files=plan.required_case_files, rationale="controller-compiled delta manifest"))
         if repair.retry_solver:
             actions.append(RetrySolverAction(type="retry_solver", plan=plan, rationale=""))
-        return actions, plan
+        return actions, plan, graph
 
     def _execute_runtime_repair_plan(
         self,
@@ -1877,9 +1902,9 @@ class CFDEngineeringAgent:
         self._mark_evidence_gaps_satisfied("runtime_repair")
         try:
             if isinstance(repair, RuntimeCaseRepairAction):
-                actions, plan = self._runtime_repair_actions(state, repair)
+                actions, plan, graph = self._runtime_repair_actions(state, repair)
             else:
-                actions, plan = self._repair_actions(state, repair, runtime=True)
+                actions, plan, graph = self._repair_actions(state, repair, runtime=True)
         except FoamSerializationError as exc:
             state.engineering_events.append(
                 self._event(llm_step, repair.type, False, f"Runtime repair serialization failed: {exc}")
@@ -1900,6 +1925,13 @@ class CFDEngineeringAgent:
             )
         sequence_id = f"runtime-repair:repair-plan:{llm_step:04d}"
         total = len(actions)
+        used = len(state.engineering_events) - runtime_event_start
+        remaining = self.policy.max_runtime_repair_tool_actions - used
+        if total > remaining:
+            return RepairOutcome(RuntimeRepairDecision.BLOCKED, reason=f"Runtime repair action budget cannot cover atomic CaseDeltaGraph ({total} needed, {remaining} remaining).")
+        committed = self.workspace.commit_text_transaction(graph.changed_files, drop_paths=graph.drop_paths)
+        self._precommitted_files.update(committed)
+        self._precommitted_drops.update(graph.drop_paths)
         for index, member in enumerate(actions, start=1):
             if len(state.engineering_events) - runtime_event_start >= self.policy.max_runtime_repair_tool_actions:
                 return RepairOutcome(
@@ -3811,7 +3843,13 @@ class CFDEngineeringAgent:
                             f"Mesh repair cycle budget exhausted ({self.policy.max_mesh_repair_cycles}); case edit was not applied.",
                         )
                 mesh_affecting = self.workspace.is_mesh_affecting_path(action.path)
-                digest = self.workspace.write_text(action.path, action.content)
+                normalized_path = action.path
+                expected_digest = hashlib.sha256(action.content.encode("utf-8")).hexdigest()
+                if self._precommitted_files.get(normalized_path) == expected_digest:
+                    digest = expected_digest
+                    self._precommitted_files.pop(normalized_path, None)
+                else:
+                    digest = self.workspace.write_text(action.path, action.content)
                 self._invalidate_mesh_dependencies(state)
                 if action.path == "system/blockMeshDict":
                     # Generic text writes have no trustworthy structured topology representation.
@@ -3878,7 +3916,10 @@ class CFDEngineeringAgent:
                             f"Mesh repair cycle budget exhausted ({self.policy.max_mesh_repair_cycles}); case delete was not applied.",
                         )
                 mesh_affecting = self.workspace.is_mesh_affecting_path(action.path)
-                self.workspace.delete(action.path)
+                if action.path in self._precommitted_drops:
+                    self._precommitted_drops.discard(action.path)
+                else:
+                    self.workspace.delete(action.path)
                 self._invalidate_mesh_dependencies(state)
                 if action.path == "system/blockMeshDict":
                     self._structured_block_mesh = None
@@ -5072,6 +5113,7 @@ class CFDEngineeringAgent:
         state: CFDState,
     ) -> list[str]:
         failures: list[str] = []
+        failures.extend(f"EngineeringPlan semantic conflict: {item}" for item in getattr(plan, "plan_conflicts", []))
         # v4.2 progress-first policy: ordinary engineering defaults are allowed whenever
         # they do not override confirmed user facts. Provenance remains explicit and
         # downstream validation/review decides whether the chosen value was adequate.

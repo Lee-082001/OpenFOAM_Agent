@@ -1,3 +1,18 @@
+## v4.7.0 unified controller graphs
+
+- Initial authoring, committed-case repair, runtime repair, mesh strategy revision and human revision now share controller-owned graph compilation.
+- `CaseDeltaGraph` validates the full effective case delta before mutation; stale model validation/native hints cannot become executable authority.
+- Multi-file case mutations are rollback-capable transactions.
+- Structured repair/revision duplicates normalize before conflict routing instead of forcing whole-output retries.
+- Postprocessing now compiles a `PostProcessGraph` and validates run/config dependencies before writes.
+- Parallel restart consumes the same compiled `RuntimeContract` interval as normal execution.
+- Native command effects/prerequisites/phase permissions are centralized in `NativeToolContractRegistry`.
+- Conflicting duplicate engineering defaults are surfaced instead of silently using the first value.
+
+# Release notice: OpenFOAM Agent 4.7.0
+
+> v4.7.0 generalizes the v4.6.0 CaseBuildGraph invariant across repair, runtime repair, strategy/human revision, postprocessing and restart. The model owns CFD content and may suggest strategy; Python owns executable graph compilation. See `V4_7_0_CHANGES.md`.
+
 ## v4.6.0 controller-owned case build graph
 
 - The frozen `EngineeringPlan.required_case_files` is now the sole authored-input manifest and is checked against the complete candidate bundle before any workspace mutation.

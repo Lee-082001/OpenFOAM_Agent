@@ -215,17 +215,18 @@ def prepare_parallel_restart(workspace,plan,*,time_name="latest"):
     """
     snapshot=inspect_parallel_restart(workspace,plan,time_name)
     selected=float(snapshot["time_name"])
-    if plan.completion is None or plan.completion.mode!="transient" or plan.completion.end_time is None:
-        raise ValueError("Parallel restart requires an explicit transient completion interval.")
-    if selected<plan.completion.start_time or selected>=plan.completion.end_time:
-        raise ValueError("Restart time must lie inside the originally requested interval.")
+    from .completion import compile_runtime_contract
+    runtime_contract = compile_runtime_contract(plan, workspace)
+    bound = runtime_contract.execution_bound
+    if bound.mode != "transient" or bound.end_time is None:
+        raise ValueError("Parallel restart requires a controller-compiled transient execution interval.")
+    if selected < bound.start_time or selected >= bound.end_time:
+        raise ValueError("Restart time must lie inside the controller-compiled execution interval.")
     journal=workspace.root/"parallel-restart-intent.json"
     if journal.exists(): raise ValueError("An interrupted restart transaction needs manual reconciliation.")
     control=workspace.resolve_case_path("system/controlDict",must_exist=True)
     original=control.read_text();entries,complete=parse_top_level_assignments(original)
     if not complete: raise ValueError("Dynamic controlDict cannot be changed mechanically for restart.")
-    from .completion import completion_contract
-    completion_contract(plan,workspace)
     modified=rewrite_top_level(original,{"startFrom":"startTime","startTime":snapshot["time_name"]})
     archive=workspace.root/"restart-history"/uuid.uuid4().hex
     archive.mkdir(parents=True)
@@ -275,6 +276,8 @@ def prepare_restart_state(agent,state,*,time_name="latest"):
         state.engineering_plan=plan
         state.case_seal=agent.workspace.seal(plan)
         state.parallel_evidence=receipt
+        from .completion import compile_runtime_contract
+        state.runtime_contract=compile_runtime_contract(plan,agent.workspace)
         state.solve_approved=False;state.execution_approval=None
         state.pending_action=None
         state.transition(State.SOLVE_READY,"Parallel restart inputs selected and preserved. Fresh /solve approval is required; no solver has run.")

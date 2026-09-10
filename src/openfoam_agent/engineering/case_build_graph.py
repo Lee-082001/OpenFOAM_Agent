@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from openfoam_agent.schemas.engineering import ExecuteCasePlanAction, NativeOpenFOAMCommand
+from openfoam_agent.tools.native_contracts import required_dictionary, native_tool_contract, command_permitted
 
 
 # Files that are authored inputs but are not OpenFOAM dictionaries/fields. They are
@@ -14,18 +15,7 @@ _NON_DICTIONARY_EXTENSIONS = {
 }
 _SURFACE_EXTENSIONS = {".stl", ".obj", ".off", ".vtk", ".vtp"}
 
-# Strong utility prerequisites. These are only used when the command has its normal
-# dictionary contract. Commands not listed here remain model-selected strategy hints
-# and are still constrained by SafeRunner/provider policy later.
-_DEFAULT_DICT_PREREQUISITES = {
-    "blockMesh": "system/blockMeshDict",
-    "snappyHexMesh": "system/snappyHexMeshDict",
-    "topoSet": "system/topoSetDict",
-    "setFields": "system/setFieldsDict",
-    "createPatch": "system/createPatchDict",
-    "decomposePar": "system/decomposeParDict",
-    "extrudeMesh": "system/extrudeMeshDict",
-}
+# Native utility prerequisites/effects are centralized in native_tool_contracts.py.
 
 
 @dataclass(frozen=True)
@@ -142,7 +132,11 @@ def compile_case_build_graph(
 
     executable_strategy: list[NativeOpenFOAMCommand] = []
     for invocation in strategy:
-        required_dict = _dict_override(invocation.arguments) or _DEFAULT_DICT_PREREQUISITES.get(invocation.command)
+        required_dict = required_dictionary(invocation.command, invocation.arguments)
+        contract = native_tool_contract(invocation.command)
+        if not command_permitted(invocation.command, "authoring"):
+            warnings.append(f"Dropped native hint {invocation.command}: command is not permitted in authoring phase.")
+            continue
         if required_dict and required_dict not in authored_set:
             # Native lists are only strategy hints. A stale hint must not regain
             # authority merely because it names a real executable; drop it and let

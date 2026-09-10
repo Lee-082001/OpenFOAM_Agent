@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -190,13 +190,29 @@ class PostProcessingExecutionPlanAction(_PostModel):
     review_reasons: list[str] = Field(default_factory=list, max_length=24)
     recommended_human_checks: list[str] = Field(default_factory=list, max_length=24)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_execution_plan_repetition(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        for key in ("configs", "typed_configs", "runs", "force_analyses"):
+            out, seen = [], set()
+            for item in data.get(key) or []:
+                token = repr(sorted(item.items())) if isinstance(item, dict) else repr(item)
+                if token in seen:
+                    continue
+                seen.add(token); out.append(item)
+            data[key] = out
+        for key in ("quantity_ids", "conservation_ids", "limitations", "review_reasons", "recommended_human_checks"):
+            data[key] = list(dict.fromkeys(str(x) for x in (data.get(key) or []) if str(x).strip()))
+        return data
+
     @model_validator(mode="after")
     def validate_plan(self) -> Self:
         if not (self.configs or self.typed_configs or self.runs or self.force_analyses or self.quantity_ids or self.conservation_ids):
             raise ValueError("Post-processing execution plan must contain deterministic work.")
         paths = [x.path for x in self.configs] + [x.path for x in self.typed_configs]
-        if len(paths) != len(set(paths)):
-            raise ValueError("Post-processing plan contains duplicate config paths.")
         for path in paths:
             if not path.startswith("postprocessConfig/") or ".." in path:
                 raise ValueError("Post-processing config must live under postprocessConfig/.")

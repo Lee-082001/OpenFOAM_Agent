@@ -136,7 +136,7 @@ class CaseWorkspace:
         self._validate_content(content, relative_text)
         return hashlib.sha256(encoded).hexdigest()
 
-    def validate_candidate_bundle(self, files: dict[str, str]) -> list[str]:
+    def validate_candidate_bundle(self, files: dict[str, str], *, drop_paths: tuple[str, ...] = ()) -> list[str]:
         """Preflight a complete LLM-authored case bundle without writing any file.
 
         The check deliberately mirrors the deterministic write-time safety rules
@@ -161,8 +161,9 @@ class CaseWorkspace:
 
         total = 0
         candidate_paths = set(normalized_candidates)
+        dropped = {self._normalized(path) for path in drop_paths}
         for relative in self.list_authored():
-            if relative in candidate_paths:
+            if relative in candidate_paths or relative in dropped:
                 continue
             try:
                 total += self.resolve_case_path(relative, must_exist=True).stat().st_size
@@ -174,6 +175,61 @@ class CaseWorkspace:
                 f"Agent-authored case would exceed {self.max_total_bytes} byte limit after bundle commit."
             )
         return failures
+
+
+    def commit_text_transaction(self, changes: dict[str, str], *, drop_paths: tuple[str, ...] = ()) -> dict[str, str]:
+        """Commit a bounded text-file delta with rollback on commit-time failure.
+
+        Deterministic preflight must happen before this call. This method adds bundle
+        atomicity for filesystem failures: either every requested text mutation is
+        visible or the previous committed state is restored. User assets remain immutable.
+        """
+        failures = self.validate_candidate_bundle(changes, drop_paths=drop_paths)
+        if failures:
+            raise WorkspaceSafetyError("Transaction preflight failed: " + " | ".join(failures))
+        drops = tuple(dict.fromkeys(self._normalized(path) for path in drop_paths))
+        for path in drops:
+            if path in self._asset_paths:
+                raise WorkspaceSafetyError("User assets cannot be deleted by LLM authoring.")
+            if path not in self._authored_paths:
+                raise WorkspaceSafetyError(f"Controller transaction may drop only agent-authored files: {path}")
+            self.resolve_case_path(path, must_exist=True)
+        snapshots: dict[str, tuple[bytes | None, int | None]] = {}
+        touched = set(changes) | set(drops)
+        for relative in touched:
+            target = self.resolve_case_path(relative)
+            snapshots[relative] = (target.read_bytes(), target.stat().st_mode) if target.is_file() else (None, None)
+        authored_before = set(self._authored_paths)
+        digests: dict[str, str] = {}
+        try:
+            for relative, content in changes.items():
+                target = self.resolve_case_path(relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                self._atomic_write(target, content)
+                normalized = self._normalized(relative)
+                self._authored_paths.add(normalized)
+                digests[normalized] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            for relative in drops:
+                target = self.resolve_case_path(relative, must_exist=True)
+                target.unlink()
+                self._authored_paths.discard(relative)
+            self._assert_total_size()
+            return digests
+        except Exception:
+            self._authored_paths = authored_before
+            for relative, snapshot in snapshots.items():
+                payload, mode = snapshot
+                target = self.resolve_case_path(relative)
+                if payload is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = target.with_name(f".{target.name}.rollback.tmp")
+                    temporary.write_bytes(payload)
+                    os.replace(temporary, target)
+                    if mode is not None:
+                        os.chmod(target, mode & 0o777)
+            raise
 
     def write_text(self, relative_text: str, content: str) -> str:
         digest = self.validate_candidate_text(relative_text, content)

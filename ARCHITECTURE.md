@@ -1,3 +1,21 @@
+## v4.7.0 unified controller graphs
+
+The architecture uses one authority pattern across the workflow:
+
+```text
+Confirmed Intake
+      ↓
+Frozen EngineeringPlan
+      ├── CaseBuildGraph      (initial authoring)
+      ├── CaseDeltaGraph      (repair/runtime repair/strategy/human revision)
+      ├── RuntimeContract     (solve/restart)
+      └── PostProcessGraph    (postprocessing)
+```
+
+LLM output has three conceptual roles. **CONTENT** is authored CFD content and engineering choices. **HINT** is an optional strategy suggestion. **AUTHORITY** is controller-owned: required manifest closure, validation targets, native command ordering/prerequisites, final checkMesh, execution bounds/restart interval and postprocess dependency ordering. A model hint cannot independently create an executable action.
+
+All case-delta paths compile an effective in-memory candidate before mutation, check manifest/safety/native dependencies and deterministic action budget, then use rollback-capable multi-file transactions. This preserves the progress-first philosophy while keeping actual path/content security, OpenFOAM consumer failures, mesh freshness, CaseSeal and execution authorization strict.
+
 ## v4.6.0 controller-owned CaseBuildGraph boundary
 
 The frozen `EngineeringPlan.required_case_files` is the sole solve-input manifest. A model response may propose raw files, typed dictionaries, structured blockMesh and optional native strategy hints, but it no longer owns an executable validation list. Before the first workspace mutation, Python renders the complete candidate, overlays only previously controller-tracked authored files when processing a later committed-case repair, and compiles a `CaseBuildGraph`. Initial authoring has no baseline overlay: every frozen required path must be present in the candidate or the transaction stops with `case_build_graph` and the exact missing paths are routed to retained-candidate delta repair.

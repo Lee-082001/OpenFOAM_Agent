@@ -173,10 +173,8 @@ def compile_runtime_contract(plan, workspace, *, wall_seconds=None) -> RuntimeCo
     bound_source = "runtime_policy" if wall_seconds is not None else "controlDict"
 
     if mode == "transient":
-        if restart is not None:
-            raise ValueError("Transient restart without an explicit completion interval remains unsupported.")
         if complete and start_from not in {None, "startTime"}:
-            raise ValueError("Restart start time must be supplied explicitly in a completion contract.")
+            raise ValueError("Restart start time must be supplied by the qualified restart transaction.")
         end_time = control_end
         if end_time is None:
             warnings.append("Literal transient endTime could not be compiled; wall-time protection remains the execution bound and result completion requires review.")

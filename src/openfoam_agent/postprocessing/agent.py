@@ -24,6 +24,7 @@ from openfoam_agent.progress import (
     describe_action,
 )
 from openfoam_agent.postprocessing.analysis import analyze_force_coefficients
+from openfoam_agent.postprocessing.build_graph import compile_postprocess_graph
 from openfoam_agent.postprocessing.quantities import analyze_quantity
 from openfoam_agent.postprocessing.context import resolve_postprocess_context
 from openfoam_agent.schemas.postprocessing import AnalyzeConservationAction
@@ -108,6 +109,7 @@ class CFDPostProcessingAgent:
         self.progress = progress or NullProgressReporter()
         self._prompt_count = 0
         self._last_inventory_digest: str | None = None
+        self._precommitted_configs: dict[str, str] = {}
 
     def run(self, state: CFDState) -> CFDState:
         if (
@@ -214,23 +216,23 @@ class CFDPostProcessingAgent:
         step: int,
     ) -> bool:
         """Execute deterministic post-processing until the first real failure."""
+        graph = compile_postprocess_graph(self.workspace, plan)
+        if not graph.valid:
+            state.postprocessing_events.append(
+                self._event(step, "postprocess_build_graph", False,
+                    "Controller rejected post-processing plan before mutation: " + " | ".join(graph.failures))
+            )
+            return False
+        committed = self.workspace.commit_text_transaction(graph.config_files)
+        self._precommitted_configs.update(committed)
         actions: list[object] = []
-        for item in plan.configs:
+        for path, content in graph.config_files.items():
             actions.append(
                 WritePostProcessConfigAction(
-                    type="write_postprocess_config", path=item.path, content=item.content, rationale=""
+                    type="write_postprocess_config", path=path, content=content, rationale="controller-compiled postprocess graph"
                 )
             )
-        for item in plan.typed_configs:
-            actions.append(
-                WritePostProcessConfigAction(
-                    type="write_postprocess_config",
-                    path=item.path,
-                    content=serialize_foam_dictionary(item),
-                    rationale="",
-                )
-            )
-        for item in plan.runs:
+        for item in graph.run_specs:
             actions.append(
                 RunFoamPostProcessAction(
                     type="run_foam_postprocess",
@@ -238,7 +240,7 @@ class CFDPostProcessingAgent:
                     time_selection=item.time_selection,
                     use_solver_context=item.use_solver_context,
                     region=item.region,
-                    rationale="",
+                    rationale="controller-compiled postprocess graph",
                 )
             )
         for item in plan.force_analyses:
@@ -305,7 +307,12 @@ class CFDPostProcessingAgent:
                 return self._event(step, action.type, True, f"Read {action.reference}.", text), False
 
             if isinstance(action, WritePostProcessConfigAction):
-                digest = self.workspace.write_postprocess_config(action.path, action.content)
+                expected = hashlib.sha256(action.content.encode("utf-8")).hexdigest()
+                if self._precommitted_configs.get(action.path) == expected:
+                    digest = expected
+                    self._precommitted_configs.pop(action.path, None)
+                else:
+                    digest = self.workspace.write_postprocess_config(action.path, action.content)
                 return self._event(
                     step,
                     action.type,

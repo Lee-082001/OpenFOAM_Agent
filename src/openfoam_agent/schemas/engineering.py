@@ -430,6 +430,7 @@ class EngineeringPlan(_EngineeringModel):
     decisions: list[EngineeringDecision] = Field(default_factory=list, max_length=80)
     assumptions: list[str] = Field(default_factory=list, max_length=80)
     engineering_defaults: list[EngineeringDefaultAssumption] = Field(default_factory=list, max_length=80)
+    plan_conflicts: SkipJsonSchema[list[str]] = Field(default_factory=list)
     confirmed_fact_ids: list[str] = Field(default_factory=list, max_length=200)
     confirmed_fact_bindings: list[ConfirmedFactBinding] = Field(default_factory=list, max_length=200)
     evidence: list[EngineeringEvidence] = Field(default_factory=list, max_length=120)
@@ -470,19 +471,27 @@ class EngineeringPlan(_EngineeringModel):
                     required.append(text)
         data["required_case_files"] = required
 
+        conflicts = [str(x) for x in (data.get("plan_conflicts") or []) if str(x).strip()]
         for key, ident in (("confirmed_fact_bindings", "fact_id"), ("evidence", "evidence_id"), ("engineering_defaults", "parameter")):
             raw = data.get(key) or []
-            out, seen = [], set()
+            out, seen = [], {}
             for item in raw:
                 if not isinstance(item, dict):
                     out.append(item); continue
                 token = str(item.get(ident, "")).casefold() if ident == "parameter" else str(item.get(ident, ""))
                 if token and token in seen:
+                    prior = seen[token]
+                    if json.dumps(prior, sort_keys=True, ensure_ascii=True, default=str) != json.dumps(item, sort_keys=True, ensure_ascii=True, default=str):
+                        marker = f"conflicting-{key}:{token}"
+                        if marker not in conflicts:
+                            conflicts.append(marker)
+                        out.append(item)
                     continue
                 if token:
-                    seen.add(token)
+                    seen[token] = item
                 out.append(item)
             data[key] = out
+        data["plan_conflicts"] = conflicts[:40]
         execution = data.get("execution")
         if isinstance(execution, dict):
             driver = execution.get("driver")
@@ -1071,10 +1080,18 @@ class CaseAuthoringAction(_EngineeringModel):
         # Raw and typed representations may not both own one case path. Preserve the
         # first representations for compact repair, but mark the ambiguity explicitly.
         typed_paths = {str((_raw_model_mapping(item) or {}).get("path") or "").strip() for item in data["typed_dictionaries"]}
-        for path in set(raw_by_path).intersection(typed_paths):
+        mixed_paths = set(raw_by_path).intersection(typed_paths)
+        for path in mixed_paths:
             token = f"mixed-representation:{path}"
             if path and token not in authoring_conflicts:
                 authoring_conflicts.append(token)
+        if mixed_paths:
+            # Keep one representation so nested Pydantic validation can succeed; the
+            # controller-visible conflict marker forces retained-candidate repair before write.
+            data["typed_dictionaries"] = [
+                item for item in data["typed_dictionaries"]
+                if str((_raw_model_mapping(item) or {}).get("path") or "").strip() not in mixed_paths
+            ]
         data["authoring_conflicts"] = authoring_conflicts[:40]
 
         # These lists are execution hints/compatibility mirrors, not independent
@@ -1238,6 +1255,46 @@ class CaseFilePatchGroup(_EngineeringModel):
         return self
 
 
+
+
+def _normalize_delta_authoring_payload(value: Any) -> Any:
+    """Normalize harmless repeated repair metadata before Pydantic semantics.
+
+    Exact duplicates are collapsed. Conflicting representations are intentionally
+    retained so the controller-owned CaseDeltaGraph, not Structured Output retry,
+    can report the semantic conflict without discarding the candidate.
+    """
+    if not isinstance(value, dict):
+        return value
+    data = dict(value)
+    for key in ("validate_dictionaries", "surface_checks", "mesh_commands", "drop_paths"):
+        data[key] = list(dict.fromkeys(str(x) for x in (data.get(key) or []) if str(x).strip()))
+    for key in ("replacement_files", "typed_dictionaries", "file_patches", "patches"):
+        out, seen = [], set()
+        for item in data.get(key) or []:
+            mapping = _raw_model_mapping(item)
+            token = json.dumps(mapping, sort_keys=True, ensure_ascii=True, default=str) if mapping is not None else repr(item)
+            if token in seen:
+                continue
+            seen.add(token); out.append(item)
+        data[key] = out
+    pipeline, seen = [], set()
+    for item in data.get("native_pipeline") or []:
+        mapping = _raw_model_mapping(item)
+        token = json.dumps(mapping, sort_keys=True, ensure_ascii=True, default=str) if mapping is not None else repr(item)
+        if token in seen:
+            continue
+        seen.add(token); pipeline.append(item)
+    data["native_pipeline"] = [
+        item for item in pipeline
+        if ((_raw_model_mapping(item) or {}).get("command") if _raw_model_mapping(item) is not None else getattr(item, "command", None)) != "foamDictionary"
+    ]
+    data["mesh_commands"] = [x for x in data.get("mesh_commands", []) if x != "foamDictionary"]
+    if data.get("native_pipeline") and data.get("mesh_commands"):
+        data["mesh_commands"] = []
+    return data
+
+
 class RepairCasePlanAction(_EngineeringModel):
     """Delta-only repair plan. Existing plan and unchanged files remain Python state."""
 
@@ -1259,13 +1316,7 @@ class RepairCasePlanAction(_EngineeringModel):
     def normalize_repair_native_probes(cls, value: Any):
         if not isinstance(value, dict):
             return value
-        data = dict(value)
-        data["mesh_commands"] = [str(x) for x in (data.get("mesh_commands") or []) if str(x) != "foamDictionary"]
-        data["native_pipeline"] = [
-            item for item in (data.get("native_pipeline") or [])
-            if (item.get("command") if isinstance(item, dict) else getattr(item, "command", None)) != "foamDictionary"
-        ]
-        return data
+        return _normalize_delta_authoring_payload(value)
 
     @model_validator(mode="after")
     def validate_repair(self) -> Self:
@@ -1279,13 +1330,6 @@ class RepairCasePlanAction(_EngineeringModel):
         patch_paths = [x.path for x in self.patches]
         replacement_paths = [x.path for x in self.replacement_files]
         typed_paths = [x.path for x in self.typed_dictionaries]
-        if len(replacement_paths) != len(set(replacement_paths)) or len(typed_paths) != len(set(typed_paths)):
-            raise ValueError("repair_case_plan contains duplicate replacement file paths.")
-        non_patch_paths = replacement_paths + typed_paths
-        if len(non_patch_paths) != len(set(non_patch_paths)):
-            raise ValueError("repair_case_plan may replace a file in only one representation per turn.")
-        if set(patch_paths) & set(non_patch_paths):
-            raise ValueError("repair_case_plan cannot patch and replace the same file in one turn.")
         if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
             raise ValueError("Use block_mesh for system/blockMeshDict repairs.")
         if self.native_pipeline and self.mesh_commands:
@@ -1323,13 +1367,7 @@ class RuntimeCaseRepairAction(_EngineeringModel):
     def normalize_runtime_native_probes(cls, value: Any):
         if not isinstance(value, dict):
             return value
-        data = dict(value)
-        data["mesh_commands"] = [str(x) for x in (data.get("mesh_commands") or []) if str(x) != "foamDictionary"]
-        data["native_pipeline"] = [
-            item for item in (data.get("native_pipeline") or [])
-            if (item.get("command") if isinstance(item, dict) else getattr(item, "command", None)) != "foamDictionary"
-        ]
-        return data
+        return _normalize_delta_authoring_payload(value)
 
     @model_validator(mode="after")
     def validate_runtime_repair(self) -> Self:
@@ -1340,8 +1378,6 @@ class RuntimeCaseRepairAction(_EngineeringModel):
             + [item.path for item in self.replacement_files]
             + [item.path for item in self.typed_dictionaries]
         )
-        if len(paths) != len(set(paths)):
-            raise ValueError("repair_runtime_case may represent each file in only one repair mode per turn.")
         if self.native_pipeline and self.mesh_commands:
             raise ValueError("repair_runtime_case must use native_pipeline or mesh_commands, not both.")
         commands = [item.command for item in self.native_pipeline] if self.native_pipeline else list(self.mesh_commands)
@@ -1353,6 +1389,11 @@ class RuntimeCaseRepairAction(_EngineeringModel):
 
 class CandidateCasePlanRepairAction(_EngineeringModel):
     """Delta repair for an in-memory, not-yet-committed execute_case_plan candidate."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_candidate_delta(cls, value: Any):
+        return _normalize_delta_authoring_payload(value)
 
     type: Literal["repair_candidate_case_plan"]
     diagnosis: str = Field(min_length=1, max_length=800)
@@ -1369,13 +1410,6 @@ class CandidateCasePlanRepairAction(_EngineeringModel):
         replacement_paths = [item.path for item in self.replacement_files]
         typed_paths = [item.path for item in self.typed_dictionaries]
         drop_paths = list(self.drop_paths)
-        if len(replacement_paths) != len(set(replacement_paths)) or len(typed_paths) != len(set(typed_paths)) or len(drop_paths) != len(set(drop_paths)):
-            raise ValueError("repair_candidate_case_plan contains duplicate replacement/drop paths.")
-        exclusive_paths = replacement_paths + typed_paths + drop_paths
-        if len(exclusive_paths) != len(set(exclusive_paths)):
-            raise ValueError("repair_candidate_case_plan may replace/drop a path in only one mode per turn.")
-        if set(patch_paths) & set(exclusive_paths):
-            raise ValueError("repair_candidate_case_plan cannot patch and replace/drop the same path in one turn.")
         if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
             raise ValueError("Use block_mesh for system/blockMeshDict candidate repairs.")
         for path in self.drop_paths:
@@ -1412,6 +1446,11 @@ class StrategyRevisionAction(_EngineeringModel):
     confirmed intake remains immutable.
     """
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_strategy_delta(cls, value: Any):
+        return _normalize_delta_authoring_payload(value)
+
     type: Literal["revise_mesh_strategy"]
     diagnosis: str = Field(min_length=1, max_length=1200)
     patches: list[CaseFilePatch] = Field(default_factory=list, max_length=20)
@@ -1431,18 +1470,13 @@ class StrategyRevisionAction(_EngineeringModel):
         paths = [item.path for item in self.replacement_files] + [item.path for item in self.typed_dictionaries] + list(self.drop_paths)
         if self.block_mesh is not None:
             paths.append(self.block_mesh.path)
-        if len(paths) != len(set(paths)):
-            raise ValueError("revise_mesh_strategy may replace/drop a path in only one mode per turn.")
-        if set(item.path for item in self.patches) & set(paths):
-            raise ValueError("revise_mesh_strategy cannot patch and replace/drop the same file in one turn.")
         for path in self.drop_paths:
             if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
                 raise ValueError(f"Unsafe strategy drop path: {path}")
-        if self.native_pipeline and self.mesh_commands:
-            raise ValueError("revise_mesh_strategy must use native_pipeline or mesh_commands, not both.")
         commands = [item.command for item in self.native_pipeline] if self.native_pipeline else list(self.mesh_commands)
-        if not commands or commands[-1] != "checkMesh" or commands.count("checkMesh") != 1:
-            raise ValueError("revise_mesh_strategy native pipeline must end with exactly one checkMesh.")
+        for command in commands:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+-]*", command):
+                raise ValueError(f"Unsafe strategy command identifier: {command}")
         if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
             raise ValueError("Use block_mesh for system/blockMeshDict in strategy revisions.")
         return self

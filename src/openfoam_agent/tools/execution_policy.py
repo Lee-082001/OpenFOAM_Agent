@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from openfoam_agent.contracts.execution import ExecutionApproval
 from openfoam_agent.contracts.models import ResourceLimits
+from openfoam_agent.tools.native_contracts import native_tool_contract, registered_effects
 
 
 class ExecutionPolicyError(RuntimeError):
@@ -20,20 +21,8 @@ class ProcessBudgetExceeded(ExecutionPolicyError):
     pass
 
 
-# Trusted application code owns effects. A model-supplied `role` is never authority.
-COMMAND_EFFECTS: dict[str, str] = {
-    "blockMesh": "mesh", "snappyHexMesh": "mesh", "surfaceFeatureExtract": "mesh",
-    "createPatch": "mesh", "createBaffles": "mesh", "splitMeshRegions": "mesh",
-    "topoSet": "mesh", "setsToZones": "mesh", "extrudeMesh": "mesh",
-    "renumberMesh": "mesh", "transformPoints": "mesh", "gmshToFoam": "mesh",
-    "fluentMeshToFoam": "mesh", "surfaceTransformPoints": "mesh",
-    "checkMesh": "validation", "surfaceCheck": "validation", "foamToC": "query",
-    "foamDictionary": "validation", "foamListTimes": "query",
-    "potentialFoam": "initialization", "setFields": "initialization", "mapFields": "initialization",
-    "foamRun": "solve", "foamMultiRun": "solve", "foamPostProcess": "postprocess",
-    "decomposePar": "decomposition", "reconstructPar": "reconstruction", "reconstructParMesh": "reconstruction",
-    "foamCleanCase": "destructive", "foamCleanPolyMesh": "destructive",
-}
+# Trusted application code owns effects through the central NativeToolContract registry.
+COMMAND_EFFECTS: dict[str, str] = registered_effects()
 
 
 def command_effect(command: str, arguments: list[str], installation: Any = None) -> str:
