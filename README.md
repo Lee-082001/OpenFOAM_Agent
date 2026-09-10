@@ -1,3 +1,16 @@
+## v4.7.1 revision delta context and retry-safe human revision
+
+- Confirmed human-feedback revision no longer rebuilds a full Engineering context. A dedicated `RevisionDeltaContext` carries the frozen-intake identity, compact baseline decision projection, confirmed revision proposal, bounded runtime/evidence summary, and only the fields needed for the requested delta.
+- Human revision prefers `plan_patch` over copying a complete `EngineeringPlan`; Python merges the patch onto the sealed baseline and preserves confirmed-fact bindings, implementation evidence, audit identity, and other controller-owned metadata.
+- Case mutations still compile through the v4.7 `CaseDeltaGraph`; the revision model does not regain authority over validation/native ordering.
+- Existing runtime outputs/logs are not archived or removed merely because a revision was confirmed. Archival starts only immediately before a controller-validated mutating delta is committed.
+- If context/provider/structured-output failure happens before any revision mutation, the proposal becomes retryable again (`REVISION_READY`), prior runtime evidence remains in place, and no empty revision archive is created.
+- The revision-only context remains bounded independently from the normal 18k design context rather than solving this failure by simply increasing the model context allowance.
+
+# Release notice: OpenFOAM Agent 4.7.1
+
+> v4.7.1 fixes a live v4.7.0 human-feedback run that successfully authored, meshed, solved and runtime-repaired a case, but then failed immediately after revision confirmation because the revision path attempted to preserve a full baseline Engineering context inside the 18k prompt budget. Revision is now a true delta workflow. See `V4_7_1_CHANGES.md`.
+
 ## v4.7.0 unified controller graphs
 
 - Initial authoring, committed-case repair, runtime repair, mesh strategy revision and human revision now share controller-owned graph compilation.

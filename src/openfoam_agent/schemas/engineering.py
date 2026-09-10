@@ -552,6 +552,56 @@ class EngineeringPlan(_EngineeringModel):
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+class EngineeringPlanPatch(_EngineeringModel):
+    """Delta-only update for an existing sealed EngineeringPlan.
+
+    Human-feedback revision and strategy revision should not make the model repeat
+    immutable confirmed-fact/audit metadata just to change a solver, temporal mode,
+    mesh strategy or engineering default.  Only fields that are legitimately owned
+    by the Engineering Agent are patchable here; Python merges them onto the sealed
+    baseline and re-validates the resulting complete EngineeringPlan.
+    """
+
+    solver: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_.+-]*$", max_length=160)
+    solver_provider_id: str | None = Field(default=None, min_length=1, max_length=240)
+    execution: OpenFOAMExecutionSpec | None = None
+    region_layouts: list[RegionCaseLayout] | None = None
+    interfaces: list[RegionInterface] | None = None
+    completion: CompletionContract | None = None
+    quantities_of_interest: list[QuantityOfInterest] | None = None
+    conservation_checks: list[ConservationCheck] | None = None
+    problem_interpretation: str | None = Field(default=None, min_length=1, max_length=4000)
+    temporal_behavior: Literal["steady", "transient", "custom"] | None = None
+    motion_kind: Literal[
+        "static", "rigid_body", "prescribed_deformation", "free_body", "two_way_fsi", "custom"
+    ] | None = None
+    mesh_motion_requirement: Literal[
+        "static", "moving", "deforming", "topology_change", "custom"
+    ] | None = None
+    mesh_strategy: str | None = Field(default=None, min_length=1, max_length=1000)
+    decisions: list[EngineeringDecision] | None = Field(default=None, max_length=80)
+    assumptions: list[str] | None = Field(default=None, max_length=80)
+    engineering_defaults: list[EngineeringDefaultAssumption] | None = Field(default=None, max_length=80)
+    required_case_files: list[str] | None = Field(default=None, max_length=80)
+    postprocess_strategy: list[str] | None = Field(default=None, max_length=40)
+
+    def apply(self, baseline: EngineeringPlan) -> EngineeringPlan:
+        data = baseline.model_dump(mode="python")
+        updates = self.model_dump(mode="python", exclude_unset=True)
+        non_nullable = {
+            "solver", "solver_provider_id", "region_layouts", "interfaces",
+            "quantities_of_interest", "conservation_checks", "problem_interpretation",
+            "temporal_behavior", "motion_kind", "mesh_motion_requirement", "mesh_strategy",
+            "decisions", "assumptions", "engineering_defaults", "required_case_files",
+            "postprocess_strategy",
+        }
+        for key, value in updates.items():
+            if key in non_nullable and value is None:
+                raise ValueError(f"EngineeringPlanPatch cannot clear required/list field: {key}")
+            data[key] = value
+        return EngineeringPlan.model_validate(data)
+
+
 class InspectEnvironmentAction(_EngineeringModel):
     type: Literal["inspect_environment"]
     rationale: str = Field(default="", max_length=200)
@@ -1309,6 +1359,7 @@ class RepairCasePlanAction(_EngineeringModel):
     native_pipeline: list[NativeOpenFOAMCommand] = Field(default_factory=list, max_length=16)
     validate_pre_solve: bool = True
     retry_solver: bool = False
+    plan_patch: EngineeringPlanPatch | None = None
     updated_plan: EngineeringPlan | None = None
 
     @model_validator(mode="before")
@@ -1340,6 +1391,8 @@ class RepairCasePlanAction(_EngineeringModel):
         for command in commands:
             if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+-]*", command):
                 raise ValueError(f"Unsafe repair command identifier: {command}")
+        if self.plan_patch is not None and self.updated_plan is not None:
+            raise ValueError("repair_case_plan must use plan_patch or updated_plan, not both.")
         return self
 
 
@@ -1463,6 +1516,7 @@ class StrategyRevisionAction(_EngineeringModel):
     mesh_commands: list[str] = Field(default_factory=list, max_length=12)
     native_pipeline: list[NativeOpenFOAMCommand] = Field(default_factory=list, max_length=20)
     validate_pre_solve: bool = True
+    plan_patch: EngineeringPlanPatch | None = None
     updated_plan: EngineeringPlan | None = None
 
     @model_validator(mode="after")
@@ -1479,6 +1533,8 @@ class StrategyRevisionAction(_EngineeringModel):
                 raise ValueError(f"Unsafe strategy command identifier: {command}")
         if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
             raise ValueError("Use block_mesh for system/blockMeshDict in strategy revisions.")
+        if self.plan_patch is not None and self.updated_plan is not None:
+            raise ValueError("revise_mesh_strategy must use plan_patch or updated_plan, not both.")
         return self
 
 

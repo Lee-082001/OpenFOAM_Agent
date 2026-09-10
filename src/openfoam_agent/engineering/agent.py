@@ -7,6 +7,11 @@ from openfoam_agent.engineering.case_build_graph import compile_case_build_graph
 from openfoam_agent.engineering.case_delta_graph import compile_case_delta_graph
 from openfoam_agent.llm.context import ContextBudgetError
 from openfoam_agent.engineering.design_context import build_partitioned_design_prompt
+from openfoam_agent.engineering.revision_context import (
+    build_partitioned_revision_prompt,
+    project_revision_plan,
+    project_revision_proposal,
+)
 from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
 from openfoam_agent.tools.execution_policy import (
     deny_unapproved_engineering_solve, command_effect, ExecutionPolicyError,
@@ -24,6 +29,7 @@ from openfoam_agent.agents.intake import confirmed_intake_definition
 from openfoam_agent.llm.context import (
     build_bounded_json_prompt,
     compact_event_for_model,
+    compact_runtime_report,
     compact_text,
     structured_request_metrics,
 )
@@ -441,25 +447,17 @@ class CFDEngineeringAgent:
         if state.mesh_evidence is not None and state.mesh_evidence.passed:
             self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
 
-        revision_id = f"rev-{len(state.revision_history) + 1:04d}"
-        state.pending_revision_archive_path = self.workspace.archive_revision_outputs(revision_id)
-        self.safety.verify_seal(state.engineering_plan, state.case_seal)
-
         for feedback in state.human_feedback:
             if feedback.feedback_id in proposal.feedback_ids:
                 feedback.status = "revision_in_progress"
         state.engineering_round_start_index = len(state.engineering_events)
 
-        # Prior numerical evidence remains auditable through feedback/revision history,
-        # but it must never appear as evidence for the newly revised, unsolved case.
+        # Do not archive/remove prior outputs before the first controller-validated
+        # case delta exists. Revision reasoning/read-only turns need the baseline
+        # runtime evidence, and a context/LLM failure before mutation must leave the
+        # prior solved case/results intact. Solve approval is revoked immediately;
+        # numerical/post-processing state is cleared atomically at mutation start.
         state.solve_approved = False
-        state.simulation = None
-        state.runtime_report = None
-        state.simulation_attempts = 0
-        state.last_runtime_log_excerpt = None
-        state.postprocessing_events = []
-        state.force_coefficient_analysis = None
-        state.postprocessing_report = None
         state.transition(
             State.ENGINEERING,
             f"User confirmed revision proposal {proposal.proposal_id}; sealed case handed back to CFDEngineeringAgent.",
@@ -483,23 +481,27 @@ class CFDEngineeringAgent:
         while True:
             while local_step <= current_limit:
                 global_step = base_step + local_step
-                turn = self._generate_turn(
-                    state,
-                    step=global_step,
-                    local_step=local_step,
-                    current_step_limit=current_limit,
-                    phase="human_revision",
-                    native_execution=native_execution,
-                )
-                terminal = self._execute_prepare_decision(
-                    state,
-                    turn.action,
-                    llm_step=global_step,
-                    progress_phase="revision",
-                    progress_step=local_step,
-                    progress_limit=current_limit,
-                    native_execution=native_execution,
-                )
+                try:
+                    turn = self._generate_turn(
+                        state,
+                        step=global_step,
+                        local_step=local_step,
+                        current_step_limit=current_limit,
+                        phase="human_revision",
+                        native_execution=native_execution,
+                    )
+                    terminal = self._execute_prepare_decision(
+                        state,
+                        turn.action,
+                        llm_step=global_step,
+                        progress_phase="revision",
+                        progress_step=local_step,
+                        progress_limit=current_limit,
+                        native_execution=native_execution,
+                    )
+                except BaseException:
+                    self._restore_unmutated_revision_ready(state, proposal)
+                    raise
                 if terminal:
                     return state
                 local_step += 1
@@ -548,6 +550,45 @@ class CFDEngineeringAgent:
             f"Human-feedback revision hard step budget exhausted ({self.policy.hard_max_agent_steps}).",
         )
         return state
+
+    def _begin_confirmed_revision_mutation(self, state: CFDState) -> None:
+        """Archive baseline outputs only when a validated revision delta will commit."""
+        proposal = state.active_revision_proposal
+        if proposal is None:
+            return
+        if state.pending_revision_archive_path is None:
+            revision_id = f"rev-{len(state.revision_history) + 1:04d}"
+            state.pending_revision_archive_path = self.workspace.archive_revision_outputs(revision_id)
+            if state.engineering_plan is not None and state.case_seal is not None:
+                self.safety.verify_seal(state.engineering_plan, state.case_seal)
+
+        # Prior numerical evidence remains in the revision archive/audit history, but
+        # must not be presented as evidence for the newly mutated, unsolved case.
+        state.simulation = None
+        state.runtime_report = None
+        state.simulation_attempts = 0
+        state.last_runtime_log_excerpt = None
+        state.postprocessing_events = []
+        state.force_coefficient_analysis = None
+        state.postprocessing_report = None
+
+    def _restore_unmutated_revision_ready(self, state: CFDState, proposal) -> None:
+        """Keep an approved proposal retryable when revision planning failed pre-mutation."""
+        if state.pending_revision_archive_path is not None:
+            return
+        if state.engineering_plan is None or state.case_seal is None:
+            return
+        if state.engineering_plan.digest() != proposal.baseline_plan_sha256:
+            return
+        if self.workspace.manifest_digest() != proposal.baseline_manifest_sha256:
+            return
+        for feedback in state.human_feedback:
+            if feedback.feedback_id in proposal.feedback_ids and feedback.status == "revision_in_progress":
+                feedback.status = "revision_proposed"
+        state.transition(
+            State.REVISION_READY,
+            f"Revision planning failed before case mutation; proposal {proposal.proposal_id} remains pending and retryable.",
+        )
 
     def _execute_prepare_decision(self, state, action, **kwargs):
         self._active_transaction = {"type": action.type, "step": kwargs.get("llm_step")}
@@ -756,6 +797,17 @@ class CFDEngineeringAgent:
             step=progress_step,
             limit=progress_limit,
         )
+        if progress_phase.startswith("revision") and isinstance(
+            action,
+            (
+                WriteCaseFileAction,
+                PatchCaseFileAction,
+                DeleteCaseFileAction,
+                RunMeshCommandAction,
+                RunNativeOpenFOAMAction,
+            ),
+        ):
+            self._begin_confirmed_revision_mutation(state)
         event, terminal = self._dispatch_prepare(
             state,
             action,
@@ -1630,11 +1682,18 @@ class CFDEngineeringAgent:
         runtime: bool,
     ) -> tuple[list[object], EngineeringPlan, object]:
         """Compile a controller-owned delta graph for prepare/runtime repair."""
-        plan = repair.updated_plan or state.engineering_plan or self._pending_execution_plan
-        if plan is None:
+        baseline_plan = state.engineering_plan or self._pending_execution_plan
+        if baseline_plan is None:
             raise WorkspaceSafetyError(
                 "Delta repair has no baseline EngineeringPlan. Return execute_case_plan instead."
             )
+        if repair.plan_patch is not None:
+            try:
+                plan = repair.plan_patch.apply(baseline_plan)
+            except ValueError as exc:
+                raise WorkspaceSafetyError(f"EngineeringPlanPatch rejected: {exc}") from exc
+        else:
+            plan = repair.updated_plan or baseline_plan
         replacements = [(item.path, item.content) for item in repair.replacement_files]
         replacements += [(item.path, serialize_foam_dictionary(item)) for item in repair.typed_dictionaries]
         patches = [(item.path, item.old, item.new) for item in repair.patches]
@@ -1679,6 +1738,7 @@ class CFDEngineeringAgent:
             repair.patches
             or repair.replacement_files
             or repair.typed_dictionaries
+            or repair.plan_patch is not None
             or repair.updated_plan is not None
         ):
             event = self._event(
@@ -1701,6 +1761,8 @@ class CFDEngineeringAgent:
         if total > remaining:
             state.transition(State.ENGINEERING_BLOCKED, f"Engineering deterministic action budget cannot cover atomic repair graph ({total} needed, {remaining} remaining).")
             return True
+        if progress_phase.startswith("revision") and (graph.changed_files or graph.drop_paths):
+            self._begin_confirmed_revision_mutation(state)
         committed = self.workspace.commit_text_transaction(graph.changed_files, drop_paths=graph.drop_paths)
         self._precommitted_files.update(committed)
         self._precommitted_drops.update(graph.drop_paths)
@@ -1751,14 +1813,26 @@ class CFDEngineeringAgent:
         Python does not choose the replacement strategy. It only applies the Agent's
         explicit delta, invalidates stale mesh evidence and executes the new pipeline.
         """
-        plan = revision.updated_plan or state.engineering_plan or self._pending_execution_plan
-        if plan is None:
+        baseline_plan = state.engineering_plan or self._pending_execution_plan
+        if baseline_plan is None:
             event = self._event(
                 llm_step, revision.type, False,
-                "Strategy revision has no baseline EngineeringPlan; provide updated_plan or block.",
+                "Strategy revision has no baseline EngineeringPlan; provide plan_patch/updated_plan or block.",
             )
             state.engineering_events.append(event)
             return False
+        if revision.plan_patch is not None:
+            try:
+                plan = revision.plan_patch.apply(baseline_plan)
+            except ValueError as exc:
+                event = self._event(
+                    llm_step, revision.type, False,
+                    f"EngineeringPlanPatch rejected: {exc}",
+                )
+                state.engineering_events.append(event)
+                return False
+        else:
+            plan = revision.updated_plan or baseline_plan
 
         replacements = [(item.path, item.content) for item in revision.replacement_files]
         replacements += [(item.path, serialize_foam_dictionary(item)) for item in revision.typed_dictionaries]
@@ -1894,6 +1968,7 @@ class CFDEngineeringAgent:
             repair.patches
             or repair.replacement_files
             or repair.typed_dictionaries
+            or repair.plan_patch is not None
             or repair.updated_plan is not None
         ):
             reason = "Runtime repair contained no executable delta."
@@ -2042,6 +2117,17 @@ class CFDEngineeringAgent:
                 step=index,
                 limit=len(sequence.actions),
             )
+            if progress_phase.startswith("revision") and isinstance(
+                member,
+                (
+                    WriteCaseFileAction,
+                    PatchCaseFileAction,
+                    DeleteCaseFileAction,
+                    RunMeshCommandAction,
+                    RunNativeOpenFOAMAction,
+                ),
+            ):
+                self._begin_confirmed_revision_mutation(state)
             event, terminal = self._dispatch_prepare(
                 state,
                 member,
@@ -4663,7 +4749,7 @@ class CFDEngineeringAgent:
             and (true_stateful_delta or not self.policy.bounded_evidence_context)
             and contract_phase not in {
                 "runtime_repair", "block_mesh_replan", "block_mesh_repair",
-                "prepare_design", "prepare_design_decide", "author_case",
+                "prepare_design", "prepare_design_decide", "author_case", "revision",
             }
         )
         previous_snapshot = self._phase_context_snapshots.get(conversation_key, {})
@@ -4730,6 +4816,57 @@ class CFDEngineeringAgent:
                     "with the complete EngineeringPlan, or block only for a genuine unsupported "
                     "tool/version requirement. Do not author case files yet:\n"
                 )
+        elif contract_phase == "revision":
+            proposal = state.active_revision_proposal
+            linked_feedback = set(proposal.feedback_ids) if proposal is not None else set()
+            payload = {
+                "state_mode": "human_revision_delta_v1",
+                "phase": phase,
+                "step": step,
+                "confirmed_facts": [
+                    {"id": fact.id, "value": fact.value, "source": fact.source}
+                    for fact in (state.intake.facts if state.intake is not None else [])
+                    if fact.category != "context"
+                ],
+                "intake_sha256": state.intake_digest,
+                "baseline_plan_sha256": plan_digest,
+                "baseline_manifest_sha256": manifest_digest,
+                "baseline_plan_core": project_revision_plan(state.engineering_plan),
+                "active_revision_proposal": project_revision_proposal(proposal),
+                "feedback_observations": [
+                    {
+                        "feedback_id": item.feedback_id,
+                        "scope": item.scope,
+                        "statement": compact_text(item.statement, 1200),
+                        "status": item.status,
+                    }
+                    for item in state.human_feedback
+                    if not linked_feedback or item.feedback_id in linked_feedback
+                ][-4:],
+                "current_case_files": case_files,
+                "mesh_evidence": {
+                    "passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
+                    "cell_count": state.mesh_evidence.cell_count if state.mesh_evidence else None,
+                    "max_non_orthogonality": state.mesh_evidence.max_non_orthogonality if state.mesh_evidence else None,
+                    "max_skewness": state.mesh_evidence.max_skewness if state.mesh_evidence else None,
+                },
+                "runtime_summary": (
+                    compact_runtime_report(state.runtime_report)
+                    if state.runtime_report is not None else None
+                ),
+                "recent_observations": self._recent_observations_for_model(state)[-4:],
+                "available_evidence": evidence_records[-4:],
+                "bindings": bindings,
+                "budget": budget,
+            }
+            instruction = (
+                "Apply the user-confirmed human-feedback revision as a delta over the sealed baseline. "
+                "Return repair_case_plan (or read_case_file/search/read_reference when exact local evidence is needed). "
+                "Prefer plan_patch for EngineeringPlan changes; Python merges it onto the sealed plan and preserves "
+                "confirmed-fact/audit metadata. Do not reproduce the full EngineeringPlan or unchanged case files. "
+                "The active revision proposal is advisory engineering diagnosis, while confirmed_facts remain immutable. "
+                "CaseDeltaGraph owns validation/native ordering and no workspace mutation occurs until the delta is valid:\n"
+            )
         elif contract_phase == "runtime_repair":
             payload: dict[str, object] = {
                 "state_mode": "runtime_failure_slice",
@@ -4846,7 +4983,7 @@ class CFDEngineeringAgent:
                 "human_feedback": [
                     {
                         "feedback_id": item.feedback_id,
-                        "text": item.text,
+                        "statement": item.statement,
                         "status": item.status,
                     }
                     for item in state.human_feedback[-self.policy.max_model_feedback_items :]
@@ -4973,7 +5110,7 @@ class CFDEngineeringAgent:
                     "The current meshing strategy was invalidated by a deterministic tool contract or repeated identical native failure. "
                     "Return revise_mesh_strategy with a different compatible meshing pipeline; do not retry the invalidated command unless its prerequisite state is explicitly changed:\n"
                 )
-            elif contract_phase in {"repair", "revision"}:
+            elif contract_phase == "repair":
                 instruction = (
                     "Return a delta-only repair. Prefer exact patches and do not repeat unchanged files "
                     "or plan content. Use observed failure/evidence only:\n"
@@ -4981,7 +5118,7 @@ class CFDEngineeringAgent:
             else:
                 instruction = "Finalize or block from the validated state:\n"
 
-        if contract_phase not in {"author_case", "prepare_design", "prepare_design_decide"}:
+        if contract_phase not in {"author_case", "prepare_design", "prepare_design_decide", "revision"}:
             evidence_plan = self._pending_execution_plan or self._draft_design_plan or state.engineering_plan
             if self._pending_candidate_execution is not None:
                 evidence_plan = self._pending_candidate_execution.plan
@@ -5018,7 +5155,14 @@ class CFDEngineeringAgent:
             else self.policy.max_model_prompt_chars
         )
         try:
-            prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=prompt_char_limit)
+            if contract_phase == "revision":
+                prompt_result, payload, context_partition_metrics = build_partitioned_revision_prompt(
+                    instruction,
+                    payload,
+                    max_chars=prompt_char_limit,
+                )
+            else:
+                prompt_result = build_bounded_json_prompt(instruction, payload, max_chars=prompt_char_limit)
         except ContextBudgetError:
             if contract_phase == "author_case":
                 self._authoring_task_queue = compile_tasks(instruction, payload, prompt_char_limit)
@@ -5033,6 +5177,10 @@ class CFDEngineeringAgent:
                     initial_evidence_limit=len(evidence_records),
                 )
                 self.checkpoint(state, "design-context-partitioned")
+            elif contract_phase == "revision":
+                # build_partitioned_revision_prompt already performed every bounded
+                # projection.  Preserve the explicit domain-specific diagnostic.
+                raise
             else:
                 raise
         metrics = structured_request_metrics(

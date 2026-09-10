@@ -1,3 +1,11 @@
+## v4.7.1 revision delta context boundary
+
+Human-feedback revision is a delta workflow, not a second full Engineering design pass. After the user confirms a `RevisionProposal`, Python retains the complete sealed baseline plan and case internally but exposes a bounded `RevisionDeltaContext` to the model: frozen-intake identity, a compact baseline decision/default projection, the confirmed proposal, linked feedback, sealed-manifest identity, mesh/runtime summary, and bounded evidence. Historical rationale, complete capability inventories, cumulative audit evidence and unchanged plan payloads are not repeated merely to satisfy the revision turn.
+
+The preferred revision contract is `plan_patch`. The model may update only Agent-owned engineering fields; Python applies that patch to the complete sealed `EngineeringPlan` and preserves confirmed-fact bindings, implementation evidence, audit/provenance identity and other controller-owned metadata. File changes continue through `CaseDeltaGraph`, so model validation/native lists remain hints rather than executable authority.
+
+Revision side effects are delayed until there is a controller-validated mutating delta ready to commit. Confirmation alone does not move solver outputs or logs into `revision-history`. If context construction, provider transport, or structured-output validation fails before any delta mutation, the prior case/result evidence stays intact, feedback status returns from `revision_in_progress` to `revision_proposed`, workflow state returns to `REVISION_READY`, and the same proposal can be retried. Once a validated delta is about to commit, the old baseline/output snapshot is archived and the normal rollback-capable mutation path applies.
+
 ## v4.7.0 unified controller graphs
 
 The architecture uses one authority pattern across the workflow:
