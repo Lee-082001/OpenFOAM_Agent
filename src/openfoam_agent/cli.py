@@ -1591,6 +1591,21 @@ def _solve_session(session, args, llm, backend, model) -> None:
         print()
 
 
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_INTERACTIVE_COMMAND_IGNORABLES = str.maketrans("", "", "\ufeff\u200b\u200c\u200d\u2060")
+
+
+def _normalize_interactive_command(command: str) -> str:
+    """Remove terminal/invisible artifacts around slash commands only.
+
+    Natural-language prompts are left untouched. This makes pasted `/confirm` and
+    similar commands resilient to zero-width/BOM or ANSI cursor sequences emitted by
+    some terminals without broadening the command grammar.
+    """
+    cleaned = _ANSI_CSI_RE.sub("", str(command)).translate(_INTERACTIVE_COMMAND_IGNORABLES)
+    return cleaned.strip()
+
+
 def _handle_command(command, session, args, llm, backend, model) -> bool:
     name, _, value = command.partition(" ")
     name = name.casefold()
@@ -1720,8 +1735,9 @@ def _interactive(args, llm, backend, model) -> int:
             return 0
         if not prompt:
             continue
-        if prompt.startswith("/"):
-            if not _handle_command(prompt, session, args, llm, backend, model):
+        command_prompt = _normalize_interactive_command(prompt)
+        if command_prompt.startswith("/"):
+            if not _handle_command(command_prompt, session, args, llm, backend, model):
                 return 0
             continue
         pending = session.pending_workflow_state

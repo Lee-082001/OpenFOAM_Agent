@@ -1,3 +1,15 @@
+## v4.7.3 pre-commit authoring feasibility recovery
+
+> v4.7.3 fixes a live v4.7.2 staged-authoring run where the Engineering Agent selected an Agent-owned snappyHexMesh surface workflow, then terminally blocked because it could not truthfully complete the required generated surface artifact. Authoring-feasibility failure is now a strategy signal, not missing user geometry: Python keeps the intake/draft immutable, performs no case mutation, and asks the Agent for a compact pre-commit `plan_patch` before retrying the full CaseBuildGraph. See `V4_7_3_CHANGES.md`.
+
+- `authoring_strategy_infeasible` is an explicit non-user-input escape hatch for a frozen representation that cannot be completely authored within the bounded contract.
+- Legacy surface/STL/CAD-incomplete authoring blocks are also recognized only when the required geometry artifact is Agent-owned rather than an imported immutable user asset.
+- Pre-commit strategy revision changes the Python-held draft plan only; model-authored file/native hints are ignored until the next complete authoring turn.
+- `EngineeringPlanPatch` may update confirmed-fact implementation bindings when required implementation files change, while fact identity/value remains frozen and exact closure is revalidated.
+- Strategy-revision context has a compact plan projection and does not resend the capability/reference/history payload used by broad Engineering turns.
+- Generic conceptual geometry is steered away from large inline triangulated surfaces when a compact procedural/blockMesh representation is sufficient.
+- Slash commands tolerate terminal ANSI and zero-width/BOM noise, addressing an observed first `/confirm` being rejected while the immediately repeated command succeeded.
+
 ## v4.7.2 native toolchain boundary
 
 > v4.7.2 separates trusted OpenFOAM executable roots from validated ThirdParty library roots, preserves legitimate Foundation ThirdParty loader paths under the sanitized runtime environment, preflights selected native ELF dependencies before case mutation, and routes loader/exit-126/127 failures to infrastructure instead of CFD repair. See `V4_7_2_CHANGES.md`.

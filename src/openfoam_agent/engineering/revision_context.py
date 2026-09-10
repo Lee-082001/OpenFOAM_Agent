@@ -101,6 +101,74 @@ def project_revision_plan(plan: object) -> dict[str, object] | None:
     }
 
 
+def project_strategy_plan(plan: object) -> dict[str, object] | None:
+    """Smaller EngineeringPlan projection for mesh/authoring strategy replans.
+
+    Strategy revision needs the current physics/execution choices, geometry/mesh
+    intent, defaults and implementation bindings, but not result-analysis/audit
+    bodies. The full plan remains Python state and is revalidated after plan_patch.
+    """
+    core = project_revision_plan(plan)
+    if core is None:
+        return None
+    defaults = []
+    for item in list(core.get('engineering_defaults') or [])[:24]:
+        if not isinstance(item, dict):
+            continue
+        defaults.append({
+            'parameter': compact_text(str(item.get('parameter') or ''), 120),
+            'value': compact_text(str(item.get('value') or ''), 180),
+            'unit': compact_text(str(item.get('unit') or ''), 60),
+            'basis': item.get('basis'),
+            'source': item.get('source'),
+        })
+    bindings = []
+    for item in list(core.get('confirmed_fact_bindings') or []):
+        if not isinstance(item, dict):
+            continue
+        bindings.append({
+            'fact_id': item.get('fact_id'),
+            'plan_fields': list(item.get('plan_fields') or []),
+            'case_files': list(item.get('case_files') or []),
+        })
+    decisions = []
+    for item in list(core.get('decisions') or [])[-6:]:
+        if not isinstance(item, dict):
+            continue
+        decisions.append({
+            'area': item.get('area'),
+            'choice': compact_text(str(item.get('choice') or ''), 180),
+            'risk_level': item.get('risk_level'),
+            'verification_stage': item.get('verification_stage'),
+        })
+    return {
+        'case_name': core.get('case_name'),
+        'solver': core.get('solver'),
+        'solver_provider_id': core.get('solver_provider_id'),
+        'execution': deepcopy(core.get('execution')),
+        'openfoam_distribution': core.get('openfoam_distribution'),
+        'openfoam_version': core.get('openfoam_version'),
+        'problem_interpretation': compact_text(str(core.get('problem_interpretation') or ''), 700),
+        'temporal_behavior': core.get('temporal_behavior'),
+        'motion_kind': core.get('motion_kind'),
+        'mesh_motion_requirement': core.get('mesh_motion_requirement'),
+        'mesh_strategy': compact_text(str(core.get('mesh_strategy') or ''), 800),
+        'region_layouts': deepcopy(core.get('region_layouts') or []),
+        'interfaces': deepcopy(core.get('interfaces') or []),
+        'decisions': decisions,
+        'assumptions': _compact_list_text(core.get('assumptions'), limit=8, item_chars=180),
+        'engineering_defaults': defaults,
+        'required_case_files': list(core.get('required_case_files') or []),
+        'confirmed_intake_sha256': core.get('confirmed_intake_sha256'),
+        'confirmed_fact_ids': list(core.get('confirmed_fact_ids') or []),
+        'confirmed_fact_bindings': bindings,
+        'projection_note': (
+            'Strategy-only projection. Result-analysis and audit bodies are omitted; Python retains the full baseline. '
+            'If required_case_files change, update confirmed_fact_bindings only where their implementation file mapping changes.'
+        ),
+    }
+
+
 def project_revision_proposal(proposal: object) -> dict[str, object] | None:
     if proposal is None:
         return None

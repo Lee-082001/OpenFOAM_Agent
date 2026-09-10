@@ -11,6 +11,7 @@ from openfoam_agent.engineering.revision_context import (
     build_partitioned_revision_prompt,
     project_revision_plan,
     project_revision_proposal,
+    project_strategy_plan,
 )
 from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
 from openfoam_agent.tools.execution_policy import (
@@ -1872,13 +1873,21 @@ class CFDEngineeringAgent:
         Python does not choose the replacement strategy. It only applies the Agent's
         explicit delta, invalidates stale mesh evidence and executes the new pipeline.
         """
-        baseline_plan = state.engineering_plan or self._pending_execution_plan
+        precommit = bool(
+            state.engineering_plan is None
+            and self._pending_execution_plan is None
+            and self._draft_design_plan is not None
+        )
+        baseline_plan = state.engineering_plan or self._pending_execution_plan or self._draft_design_plan
         if baseline_plan is None:
             event = self._event(
                 llm_step, revision.type, False,
                 "Strategy revision has no baseline EngineeringPlan; provide plan_patch/updated_plan or block.",
             )
             state.engineering_events.append(event)
+            self._emit_engineering_event(
+                f"{progress_phase}-strategy-revision", event, step=1, limit=1, state=state
+            )
             return False
         if revision.plan_patch is not None:
             try:
@@ -1892,6 +1901,75 @@ class CFDEngineeringAgent:
                 return False
         else:
             plan = revision.updated_plan or baseline_plan
+
+        if precommit:
+            # No case candidate exists yet. Strategy revision may change only the
+            # Python-held EngineeringPlan; authoring will rebuild the complete bundle
+            # on the next turn through CaseBuildGraph. Any model-supplied file/native
+            # hints are intentionally ignored rather than mutating an uncommitted case.
+            failures: list[str] = []
+            if revision.plan_patch is None and revision.updated_plan is None:
+                failures.append("Pre-commit strategy revision requires plan_patch or updated_plan.")
+            if plan.digest() == baseline_plan.digest():
+                failures.append("Pre-commit strategy revision did not change the EngineeringPlan.")
+            if plan.confirmed_intake_sha256 != state.intake_digest:
+                failures.append("Pre-commit strategy revision changed confirmed_intake_sha256.")
+            failures.extend(validate_design(plan, state.intake))
+            # The staged baseline already passed design provenance validation. Re-run
+            # provider provenance only if the revision actually changes execution
+            # ownership; a mesh-only feasibility replan must not rediscover the same
+            # solver evidence before it can retry authoring.
+            execution_changed = (
+                plan.solver != baseline_plan.solver
+                or plan.solver_provider_id != baseline_plan.solver_provider_id
+                or plan.execution != baseline_plan.execution
+                or plan.openfoam_version != baseline_plan.openfoam_version
+                or plan.openfoam_distribution != baseline_plan.openfoam_distribution
+            )
+            if execution_changed:
+                failures.extend(self._validate_observed_provenance(plan, state))
+            failures.extend(self._validate_engineering_defaults(plan, state))
+            if failures:
+                event = self._event(
+                    llm_step, revision.type, False,
+                    "Pre-commit strategy revision was rejected; no case mutation occurred.",
+                    "\n".join(failures),
+                    failure_signature="authoring_feasibility:strategy_revision_invalid",
+                    failure_scope="strategy",
+                    failure_category="case",
+                )
+                state.engineering_events.append(event)
+                self._emit_engineering_event(
+                    f"{progress_phase}-strategy-revision", event, step=1, limit=1, state=state
+                )
+                return False
+            ignored = (
+                len(revision.patches)
+                + len(revision.replacement_files)
+                + len(revision.typed_dictionaries)
+                + len(revision.drop_paths)
+                + len(revision.mesh_commands)
+                + len(revision.native_pipeline)
+                + len(revision.validate_dictionaries)
+                + len(revision.surface_checks)
+                + (1 if revision.block_mesh is not None else 0)
+            )
+            self._draft_design_plan = plan
+            self._authoring_task_queue = None
+            self._draft_authoring_brief = ""
+            event = self._event(
+                llm_step, revision.type, True,
+                "Pre-commit engineering strategy revised; complete case authoring will retry from the updated frozen draft.",
+                (
+                    f"ignoredPrecommitFileOrNativeHints={ignored}; "
+                    f"requiredFiles={len(plan.required_case_files)}"
+                ),
+            )
+            state.engineering_events.append(event)
+            self._emit_engineering_event(
+                f"{progress_phase}-strategy-revision", event, step=1, limit=1, state=state
+            )
+            return False
 
         replacements = [(item.path, item.content) for item in revision.replacement_files]
         replacements += [(item.path, serialize_foam_dictionary(item)) for item in revision.typed_dictionaries]
@@ -3110,6 +3188,24 @@ class CFDEngineeringAgent:
                 False,
             )
         if isinstance(action, BlockAction):
+            recoverable, generated_paths = self._recoverable_precommit_authoring_block(state, action)
+            if recoverable:
+                details = [f"modelReason={action.reason}"]
+                if generated_paths:
+                    details.append("agentOwnedGeneratedArtifacts=" + ", ".join(generated_paths[:12]))
+                return (
+                    self._event(
+                        step,
+                        action.type,
+                        False,
+                        "Pre-commit authoring strategy is infeasible; escalating to Agent strategy revision instead of terminally blocking.",
+                        "\n".join(details),
+                        failure_signature="authoring_feasibility:precommit_strategy",
+                        failure_scope="strategy",
+                        failure_category="case",
+                    ),
+                    False,
+                )
             if action.block_kind == "engineering_choice_missing":
                 missing = ", ".join(action.missing_items[:12]) or "delegated engineering details"
                 return (
@@ -4613,19 +4709,27 @@ class CFDEngineeringAgent:
 
     def _strategy_revision_required(self, state: CFDState) -> bool:
         events = self._current_round_events(state)
-        failures = [event for event in events if not event.success]
-        if not failures:
+        failure_indexes = [index for index, event in enumerate(events) if not event.success]
+        if not failure_indexes:
             return False
-        # Escalation applies only to the *current* failure. A later unrelated
-        # validation failure must not resurrect an already-addressed strategy fault.
-        last = failures[-1]
+        # Escalation applies only to the *current unresolved* failure. A successful
+        # strategy revision after that failure resolves the trigger and allows the
+        # controller to return to authoring/validation. A later fresh failure will
+        # create a new trigger.
+        last_index = failure_indexes[-1]
+        last = events[last_index]
+        if any(
+            event.success and event.action_type == "revise_mesh_strategy"
+            for event in events[last_index + 1 :]
+        ):
+            return False
         if not last.failure_signature:
             return False
         if last.failure_scope == "strategy":
             return True
         same = [
-            event for event in failures
-            if event.failure_signature == last.failure_signature
+            event for event in events[: last_index + 1]
+            if (not event.success) and event.failure_signature == last.failure_signature
         ]
         return len(same) >= 2 and last.mesh_command_executed
 
@@ -4724,9 +4828,59 @@ class CFDEngineeringAgent:
                 "Creating representative procedural geometry from confirmed topology plus engineering_defaults is authorized engineering, not fabrication.",
                 "Do not overwrite or silently replace immutable user assets.",
                 "If a chosen surface-based mesh requires geometry and no user asset is required, author the case-local surface or choose an equivalent self-contained procedural mesh instead of blocking.",
+                "Do not require a large Agent-generated triangulated surface when it cannot be completely represented within the bounded authoring contract; use a compact procedural strategy or allow controller-routed strategy revision.",
                 "Record representative dimensions/angles/radii selected by the Agent as engineering_defaults and do not claim exact geometric fidelity.",
             ],
         }
+
+    @staticmethod
+    def _agent_owned_generated_geometry_paths(state: CFDState, plan: EngineeringPlan | None) -> tuple[str, ...]:
+        """Return solve-required geometry artifacts that are not immutable user assets."""
+        if plan is None:
+            return ()
+        asset_paths = {
+            str(item.get("case_path") or "")
+            for item in (state.assets or [])
+            if isinstance(item, dict) and item.get("case_path")
+        }
+        generated: list[str] = []
+        for path in plan.required_case_files:
+            lowered = str(path).casefold()
+            is_surface = (
+                lowered.startswith("constant/trisurface/")
+                or lowered.startswith("constant/geometry/")
+                or lowered.endswith((".stl", ".obj", ".off", ".ply"))
+            )
+            if is_surface and path not in asset_paths:
+                generated.append(path)
+        return tuple(dict.fromkeys(generated))
+
+    def _recoverable_precommit_authoring_block(
+        self, state: CFDState, action: BlockAction
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Recognize an Agent-owned authoring strategy that should be replanned, not terminally blocked.
+
+        The controller does not choose replacement geometry. It only distinguishes a
+        pre-commit implementation-feasibility failure from missing user input, then
+        routes the next model turn to strategy revision.
+        """
+        plan = self._draft_design_plan
+        if plan is None or action.needs_user_input:
+            return False, ()
+        generated = self._agent_owned_generated_geometry_paths(state, plan)
+        if action.block_kind == "authoring_strategy_infeasible":
+            return True, generated
+        if action.block_kind not in {"other", "engineering_choice_missing"}:
+            return False, generated
+        if not generated:
+            return False, generated
+        diagnostic = " ".join([action.reason, *action.missing_items]).casefold()
+        markers = (
+            "surface", "stl", "obj", "geometry", "trisurface", "cad",
+            "artifact", "incomplete", "cannot author", "unable to author",
+            "too large", "output limit", "bounded",
+        )
+        return any(marker in diagnostic for marker in markers), generated
 
     def _generate_turn(
         self,
@@ -4993,6 +5147,56 @@ class CFDEngineeringAgent:
                 "The active revision proposal is advisory engineering diagnosis, while confirmed_facts remain immutable. "
                 "CaseDeltaGraph owns validation/native ordering and no workspace mutation occurs until the delta is valid:\n"
             )
+        elif contract_phase == "strategy_revision":
+            baseline_plan = state.engineering_plan or self._pending_execution_plan or self._draft_design_plan
+            precommit_strategy = bool(
+                state.engineering_plan is None
+                and self._pending_execution_plan is None
+                and self._draft_design_plan is not None
+            )
+            recent_failures = [
+                event for event in self._current_round_events(state) if not event.success
+            ]
+            trigger = recent_failures[-1] if recent_failures else None
+            payload = {
+                "state_mode": "precommit_strategy_revision_v1" if precommit_strategy else "strategy_revision_v1",
+                "phase": phase,
+                "step": step,
+                "confirmed_facts": [
+                    {"id": fact.id, "value": fact.value, "source": fact.source}
+                    for fact in (state.intake.facts if state.intake is not None else [])
+                    if fact.category != "context"
+                ],
+                "intake_sha256": state.intake_digest,
+                "baseline_plan_sha256": baseline_plan.digest() if baseline_plan is not None else None,
+                "baseline_plan_core": project_strategy_plan(baseline_plan),
+                "strategy_revision_context": {
+                    "precommit": precommit_strategy,
+                    "trigger": compact_event_for_model(trigger, excerpt_chars=1200) if trigger is not None else None,
+                    "agent_owned_generated_geometry": list(
+                        self._agent_owned_generated_geometry_paths(state, baseline_plan)
+                    ),
+                    "case_files_committed": bool(case_files) and not precommit_strategy,
+                    "rule": (
+                        "Python does not choose replacement geometry/meshing. For precommit revision, "
+                        "change the EngineeringPlan only; the next author_case turn must author the full updated manifest."
+                    ),
+                },
+                "geometry_authoring_policy": self._geometry_authoring_policy(state),
+                "current_case_files": case_files[-24:],
+                "environment_hint": self.tools.environment_snapshot(),
+                "tool_execution_contracts": self._mesh_tool_contracts(),
+                "available_evidence": evidence_records[-4:],
+                "bindings": bindings,
+                "budget": budget,
+            }
+            instruction = (
+                "Revise the engineering/meshing strategy that failed. If strategy_revision_context.precommit is true, "
+                "no candidate case was committed: return revise_mesh_strategy with plan_patch (preferred) or updated_plan, "
+                "change mesh_strategy/required_case_files and Agent-owned defaults as needed, and do not author files or "
+                "native commands yet. If an Agent-generated surface was too large/incomplete, choose a self-contained "
+                "implementation you can actually author on the next bounded turn. Preserve confirmed facts:\n"
+            )
         elif contract_phase == "runtime_repair":
             payload: dict[str, object] = {
                 "state_mode": "runtime_failure_slice",
@@ -5244,7 +5448,7 @@ class CFDEngineeringAgent:
             else:
                 instruction = "Finalize or block from the validated state:\n"
 
-        if contract_phase not in {"author_case", "prepare_design", "prepare_design_decide", "revision"}:
+        if contract_phase not in {"author_case", "prepare_design", "prepare_design_decide", "revision", "strategy_revision"}:
             evidence_plan = self._pending_execution_plan or self._draft_design_plan or state.engineering_plan
             if self._pending_candidate_execution is not None:
                 evidence_plan = self._pending_candidate_execution.plan

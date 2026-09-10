@@ -1,3 +1,11 @@
+## v4.7.3 authoring-feasibility strategy boundary
+
+Staged case authoring is not allowed to turn an Agent-owned representation problem into a terminal request for user geometry. If a frozen pre-commit strategy requires a generated geometry artifact that the model cannot completely author within the bounded contract, the authoring turn emits `authoring_strategy_infeasible` (or Python recognizes the legacy equivalent for an Agent-owned surface). No case candidate is committed. The failure is recorded with `failure_scope=strategy`, and the next compact turn asks the Engineering Agent to revise only the staged `EngineeringPlan`. Python never chooses the replacement mesh strategy.
+
+A pre-commit strategy revision uses a compact strategy projection, may update `mesh_strategy`, Agent-owned defaults, `required_case_files`, and the implementation mapping inside `confirmed_fact_bindings`, then re-runs ordinary design invariants. File/native hints returned in that pre-commit revision are not action authority and are ignored. After a successful plan delta the workflow returns to `author_case`, which must author the entire updated manifest and pass the normal controller-owned `CaseBuildGraph` before mutation. Imported user assets are excluded from this automatic representation fallback and remain immutable.
+
+This closes the geometry-ownership loop established in v4.3.1: conceptual geometry is Agent-owned not only at design time, but also when the selected representation proves infeasible during bounded authoring.
+
 ## v4.7.2 native executable vs library trust boundary
 
 Native executable authority remains confined to the trusted OpenFOAM installation. Library search authority is separate: validated Foundation installation/ThirdParty roots may supply runtime libraries without becoming executable roots. Controller graph phases inspect selected native tool dependencies before transactional mutation, and dynamic-loader failures are infrastructure observations rather than case semantics.

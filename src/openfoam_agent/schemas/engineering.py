@@ -582,6 +582,10 @@ class EngineeringPlanPatch(_EngineeringModel):
     decisions: list[EngineeringDecision] | None = Field(default=None, max_length=80)
     assumptions: list[str] | None = Field(default=None, max_length=80)
     engineering_defaults: list[EngineeringDefaultAssumption] | None = Field(default=None, max_length=80)
+    # Fact identity remains frozen, but implementation bindings may legitimately
+    # change when a mesh/case strategy changes the files that realize a confirmed
+    # semantic fact. EngineeringPlan validation still requires exact fact-ID closure.
+    confirmed_fact_bindings: list[ConfirmedFactBinding] | None = Field(default=None, max_length=200)
     required_case_files: list[str] | None = Field(default=None, max_length=80)
     postprocess_strategy: list[str] | None = Field(default=None, max_length=40)
 
@@ -592,8 +596,8 @@ class EngineeringPlanPatch(_EngineeringModel):
             "solver", "solver_provider_id", "region_layouts", "interfaces",
             "quantities_of_interest", "conservation_checks", "problem_interpretation",
             "temporal_behavior", "motion_kind", "mesh_motion_requirement", "mesh_strategy",
-            "decisions", "assumptions", "engineering_defaults", "required_case_files",
-            "postprocess_strategy",
+            "decisions", "assumptions", "engineering_defaults", "confirmed_fact_bindings",
+            "required_case_files", "postprocess_strategy",
         }
         for key, value in updates.items():
             if key in non_nullable and value is None:
@@ -1014,6 +1018,7 @@ class BlockAction(_EngineeringModel):
         "physical_objective_unknown",
         "routing_physics_unknown",
         "engineering_choice_missing",
+        "authoring_strategy_infeasible",
         "tool_version_unsupported",
         "environment_unavailable",
         "safety_or_integrity",
