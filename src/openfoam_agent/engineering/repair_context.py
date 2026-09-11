@@ -22,8 +22,8 @@ REPAIR_IMPLICATED_FILE_LIMIT = 8
 
 
 _EXPLICIT_ALTERNATIVES_RE = re.compile(
-    r"(?is)\\b(?:unknown|unsupported|invalid)\\b.{0,500}?"
-    r"\\b(?:supported|valid|available|allowed)\\b[^\\n:]{0,120}[:\\n]"
+    r"(?is)\b(?:unknown|unsupported|invalid)\b.{0,500}?"
+    r"\b(?:supported|valid|available|allowed)\b[^\n:]{0,120}[:\n]"
 )
 
 
@@ -161,7 +161,7 @@ def diagnostic_has_explicit_alternatives(diagnostic: object) -> bool:
         return False
     # Require at least one non-empty line after the supported/valid heading so a
     # bare heading cannot accidentally suppress useful retrieval.
-    match = re.search(r"(?is)\\b(?:supported|valid|available|allowed)\\b[^\\n:]{0,120}[:\\n](.+)", text)
+    match = re.search(r"(?is)\b(?:supported|valid|available|allowed)\b[^\n:]{0,120}[:\n](.+)", text)
     if match is None:
         return False
     candidates = [line.strip(" \\t-*,:;") for line in match.group(1).splitlines()]
