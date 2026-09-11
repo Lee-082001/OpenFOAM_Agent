@@ -135,3 +135,12 @@ Delta repair does not introduce fuzzy edits. `CaseFilePatch` is accepted only wh
 ## Native library trust (v4.7.2)
 
 OpenFOAM executable trust and dynamic-library trust are separate. Executables must still resolve inside trusted OpenFOAM executable roots. The sanitized loader path may additionally retain validated Foundation `WM_PROJECT_INST_DIR` / sibling `WM_THIRD_PARTY_DIR` library locations and library directories beneath those anchors. Arbitrary user-controlled `LD_LIBRARY_PATH` entries remain removed. Selected trusted ELF executables may be inspected with bounded `ldd` under the sanitized environment before case mutation; this inspection cannot authorize a CFD action or broaden executable trust.
+
+
+## v4.8.0 context/input boundaries
+
+- Model context never becomes the source of truth merely because a compact projection is used. Full frozen plans/intakes stay controller-owned and are referenced by deterministic digests.
+- Stateless LLM adapters cannot receive delta contexts that assume unavailable previous-response state.
+- Interactive and non-interactive user text is normalized at the application boundary by removing unpaired UTF-16 surrogate code points and applying NFC; ordinary Korean/Unicode text is preserved.
+- OpenFOAM diagnostic source/template paths are provenance only and cannot be used directly as indexed reference IDs.
+- Multi-turn repair support reads cannot replace the active native failure in the controller-owned RepairEpisode.

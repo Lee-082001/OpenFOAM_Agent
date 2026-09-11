@@ -9,6 +9,7 @@ import re
 import sysconfig
 import tempfile
 import uuid
+import unicodedata
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -504,7 +505,7 @@ _ROLE_MODEL_ENV = {
 def _cleaned(value: str | None) -> str | None:
     if value is None:
         return None
-    value = value.strip()
+    value = _sanitize_user_text(value).strip()
     return value or None
 
 
@@ -1595,6 +1596,18 @@ _ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _INTERACTIVE_COMMAND_IGNORABLES = str.maketrans("", "", "\ufeff\u200b\u200c\u200d\u2060")
 
 
+def _sanitize_user_text(text: str) -> str:
+    """Normalize one application-boundary user string to Unicode scalar values.
+
+    Some Windows terminal/input paths can surface unpaired UTF-16 surrogates. They
+    are not valid UTF-8/JSON and must not reach hashing/checkpoint/model transports.
+    Preserve normal Korean/Unicode text, remove only surrogate code points, and use
+    NFC so every downstream component sees one canonical application string.
+    """
+    cleaned = "".join(ch for ch in str(text) if not 0xD800 <= ord(ch) <= 0xDFFF)
+    return unicodedata.normalize("NFC", cleaned)
+
+
 def _normalize_interactive_command(command: str) -> str:
     """Remove terminal/invisible artifacts around slash commands only.
 
@@ -1602,7 +1615,7 @@ def _normalize_interactive_command(command: str) -> str:
     similar commands resilient to zero-width/BOM or ANSI cursor sequences emitted by
     some terminals without broadening the command grammar.
     """
-    cleaned = _ANSI_CSI_RE.sub("", str(command)).translate(_INTERACTIVE_COMMAND_IGNORABLES)
+    cleaned = _ANSI_CSI_RE.sub("", _sanitize_user_text(command)).translate(_INTERACTIVE_COMMAND_IGNORABLES)
     return cleaned.strip()
 
 
@@ -1729,7 +1742,7 @@ def _interactive(args, llm, backend, model) -> int:
         )
     while True:
         try:
-            prompt = input("OpenFOAM Agent> ").strip()
+            prompt = _sanitize_user_text(input("OpenFOAM Agent> ")).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
@@ -1811,6 +1824,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit_report(report, as_json=args.json)
         return _exit_code(state.current_state)
     assert prompt is not None
+    prompt = _sanitize_user_text(prompt)
     session = ConversationSession(mode=InteractionMode(args.mode),
         geometry_files=list(args.geometry), additional_files=list(args.data),
         existing_case=str(args.import_case) if args.import_case else None)

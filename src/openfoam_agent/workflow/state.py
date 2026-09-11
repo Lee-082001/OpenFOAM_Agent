@@ -11,6 +11,7 @@ from openfoam_agent.schemas.engineering import (
     EngineeringEvidenceRecord,
     EngineeringPlan,
     MeshEvidence,
+    RepairEpisode,
 )
 from openfoam_agent.schemas.intake import CFDIntakeSpec
 from openfoam_agent.schemas.request import UserRequest
@@ -53,6 +54,7 @@ class CFDState(BaseModel):
     engineering_checkpoint: dict = Field(default_factory=dict)
     primary_failure: dict | None = None
     secondary_failures: list[dict] = Field(default_factory=list)
+    repair_episode: RepairEpisode | None = None
     semantic_assurance_warnings: list[str] = Field(default_factory=list)
     engineering_next_step: int = Field(default=1, ge=1)
     pending_action: dict | None = None
@@ -73,6 +75,9 @@ class CFDState(BaseModel):
     active_revision_proposal: RevisionProposal | None = None
     revision_history: list[RevisionRecord] = Field(default_factory=list)
     pending_revision_archive_path: str | None = None
+    revision_decision_complete: bool = False
+    revision_target_case_files: list[str] = Field(default_factory=list)
+    pending_revision_plan: EngineeringPlan | None = None
 
     current_state: State = State.INIT
     history: list[dict[str, str]] = Field(default_factory=list)

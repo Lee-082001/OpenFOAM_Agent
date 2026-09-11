@@ -6,6 +6,7 @@ from openfoam_agent.agents.intake import confirmed_intake_definition
 from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
 from openfoam_agent.engineering.design_context import build_partitioned_design_prompt, project_design_capsule
 from openfoam_agent.llm.context import build_bounded_json_prompt, ContextBudgetError
+from openfoam_agent.llm.context_capsules import project_confirmed_intake
 from openfoam_agent.schemas.engineering import BlockAction, EngineeringEvidenceRecord, ObservedEngineeringEvidence, canonical_engineering_evidence_id
 
 
@@ -84,7 +85,8 @@ def test_v402_agent_prepare_design_auto_partitions_instead_of_raising(tmp_path,g
     assert len(llm.prompts)==1 and len(llm.prompts[0])<=18000
     sent=json.loads(llm.prompts[0][llm.prompts[0].index('{'):])
     assert sent['state_mode']=='partitioned_engineering_design'
-    assert sent['confirmed_intake']==confirmed_intake_definition(state)
+    assert sent['confirmed_intake']==project_confirmed_intake(state.intake)
+    assert sent['intake_sha256']==state.intake_digest
     assert sent['context_partition']['active'] is True
 
 

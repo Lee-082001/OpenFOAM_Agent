@@ -1,3 +1,7 @@
+## v4.8.0 phase-controller architecture hardening
+
+> v4.8.0 consolidates the v4.7.x live-debugging lessons into an architectural release. Human revision is split into decision and authoring phases, native case repair has controller-owned multi-turn `RepairEpisode` continuity, stateless postprocessing never receives fake previous-response deltas, downstream LLM phases consume bounded plan/intake projections rather than full objects, terminal Unicode input is sanitized at the application boundary, and the former monolithic Engineering controller is physically decomposed into phase modules. See `V4_8_0_CHANGES.md`.
+
 ## v4.7.4 failure-local validation repair
 
 > v4.7.4 fixes a live v4.7.3 OpenFOAM 13 run where `blockMesh` and `checkMesh` passed, the real zero-step `foamRun` consumer correctly rejected `system/fvSchemes` because `laplacianSchemes` was missing, but the subsequent case-repair turn rebuilt a broad Engineering context and failed the deterministic 18k prompt budget before any repair could be attempted. Committed-case validation repair is now a dedicated failure-local delta workflow. See `V4_7_4_CHANGES.md`.

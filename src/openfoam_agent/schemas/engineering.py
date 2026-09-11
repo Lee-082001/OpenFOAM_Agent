@@ -391,6 +391,24 @@ class NativeOpenFOAMCommand(_EngineeringModel):
         return self
 
 
+
+
+class RepairEpisode(_EngineeringModel):
+    """Controller-owned continuity record for one multi-turn native/case repair.
+
+    Read/search support turns may add observations, but only a newly observed failing
+    native/deterministic validation may replace current_failure.  This prevents the
+    model from losing the original/current OpenFOAM diagnostic mid-repair.
+    """
+
+    episode_id: str = Field(pattern=r"^repair-[0-9]{4,}$")
+    root_failure: dict[str, Any]
+    current_failure: dict[str, Any]
+    current_implicated_files: list[str] = Field(default_factory=list, max_length=24)
+    previous_repairs: list[dict[str, Any]] = Field(default_factory=list, max_length=24)
+    supporting_observations: list[dict[str, Any]] = Field(default_factory=list, max_length=24)
+    validation_generation: int = Field(default=1, ge=1)
+
 class EngineeringPlan(_EngineeringModel):
     """Agent-owned CFD engineering decisions.
 
@@ -718,6 +736,21 @@ class ReadReferenceAction(_EngineeringModel):
     start_line: int = Field(default=1, ge=1, le=1_000_000)
     line_count: int = Field(default=160, ge=1, le=400)
     rationale: str = Field(default="", max_length=200)
+
+    @model_validator(mode="after")
+    def reject_native_source_path_as_reference(self) -> Self:
+        text = self.reference.strip()
+        if (
+            text.startswith(('/', '\\'))
+            or re.match(r"^[A-Za-z]:[\\/]", text)
+            or '<OPENFOAM_ROOT>' in text
+            or '<LOCAL_PATH:' in text
+        ):
+            raise ValueError(
+                "read_reference requires an indexed reference ID returned by search_references; "
+                "native diagnostic source/template paths are provenance, not reference IDs."
+            )
+        return self
 
 
 class ListCaseFilesAction(_EngineeringModel):
@@ -1737,6 +1770,65 @@ class StrategyRevisionTurn(_EngineeringModel):
             value,
             {"revise_mesh_strategy": StrategyRevisionAction, "block": BlockAction},
         )
+
+class RevisionDecisionAction(_EngineeringModel):
+    """Plan-only decision made before any human-revision case mutation.
+
+    The model decides which Agent-owned engineering fields and case artifacts need
+    revision. Python applies the optional plan patch to the sealed baseline, while
+    the following revision-authoring turn owns the actual file delta.
+    """
+
+    type: Literal["decide_revision"]
+    diagnosis: str = Field(min_length=1, max_length=3000)
+    plan_patch: EngineeringPlanPatch | None = None
+    target_case_files: list[str] = Field(default_factory=list, max_length=40)
+    rationale: str = Field(default="", max_length=1500)
+
+    @model_validator(mode="after")
+    def validate_targets(self) -> Self:
+        normalized: list[str] = []
+        for path in self.target_case_files:
+            text = str(path).strip()
+            if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", text) or ".." in text:
+                raise ValueError(f"Unsafe revision target case path: {text}")
+            if text not in normalized:
+                normalized.append(text)
+        self.target_case_files = normalized
+        return self
+
+
+RevisionDecisionTurnAction = RevisionDecisionAction | BlockAction
+class RevisionDecisionTurn(_EngineeringModel):
+    action: RevisionDecisionTurnAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {"decide_revision": RevisionDecisionAction, "block": BlockAction},
+        )
+
+
+RevisionAuthoringAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
+class RevisionAuthoringTurn(_EngineeringModel):
+    action: RevisionAuthoringAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def route_action(cls, value: Any):
+        return _route_action_payload(
+            value,
+            {
+                "search_references": SearchReferencesAction,
+                "read_reference": ReadReferenceAction,
+                "read_case_file": ReadCaseFileAction,
+                "repair_case_plan": RepairCasePlanAction,
+                "block": BlockAction,
+            },
+        )
+
 
 RevisionAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
 class RevisionTurn(_EngineeringModel):

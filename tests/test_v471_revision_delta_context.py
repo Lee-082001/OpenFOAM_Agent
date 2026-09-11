@@ -14,7 +14,8 @@ from openfoam_agent.schemas.engineering import (
     EngineeringDefaultAssumption,
     EngineeringPlanPatch,
     RepairCasePlanAction,
-    RevisionTurn,
+    RevisionDecisionAction,
+    RevisionDecisionTurn,
     SearchCapabilitiesAction,
 )
 from openfoam_agent.schemas.feedback import HumanFeedback, RevisionProposal
@@ -119,9 +120,9 @@ def test_revision_delta_context_fits_cli_18k_even_with_bloated_baseline(tmp_path
     )
     state, _ = _revision_state(agent, bloated=True)
     turn = agent._generate_turn(state, step=1, phase="human_revision", native_execution=False)
-    assert isinstance(turn, RevisionTurn)
+    assert isinstance(turn, RevisionDecisionTurn)
     assert len(llm.prompts[0]) <= 18_000
-    assert '"state_mode": "human_revision_delta_v1"' in llm.prompts[0]
+    assert '"state_mode": "human_revision_decision_v2"' in llm.prompts[0]
     assert '"baseline_plan_core"' in llm.prompts[0]
     assert '"capability_graph_hint"' not in llm.prompts[0]
     assert '"cumulative_provenance"' not in llm.prompts[0]
@@ -162,16 +163,21 @@ def test_repair_case_plan_accepts_delta_plan_patch_without_full_updated_plan():
 def test_confirmed_revision_uses_plan_patch_and_archives_only_when_delta_commits(tmp_path, graph_path):
     revised_control = control_dict().replace("endTime 10;", "endTime 40;")
     llm = FlexibleScriptedLLM([
-        RepairCasePlanAction(
-            type="repair_case_plan",
-            diagnosis="Apply the confirmed revision as a bounded delta.",
-            replacement_files=[CaseBundleFile(path="system/controlDict", content=revised_control)],
+        RevisionDecisionAction(
+            type="decide_revision",
+            diagnosis="Apply the confirmed revision as a plan decision first.",
             plan_patch=EngineeringPlanPatch(
                 temporal_behavior="steady",
                 mesh_strategy="Immediate bifurcation revision with locally refined junction.",
             ),
+            target_case_files=["system/controlDict"],
+        ),
+        RepairCasePlanAction(
+            type="repair_case_plan",
+            diagnosis="Author only the accepted revision file delta.",
+            replacement_files=[CaseBundleFile(path="system/controlDict", content=revised_control)],
             validate_pre_solve=False,
-        )
+        ),
     ])
     agent = CFDEngineeringAgent(
         llm,

@@ -10,6 +10,9 @@ from openfoam_agent.llm.context import (
 )
 from openfoam_agent.llm.prompts import FEEDBACK_REVIEW_SYSTEM_PROMPT
 from openfoam_agent.llm.protocol import StructuredLLM
+from openfoam_agent.llm.context_capsules import (
+    project_confirmed_intake, project_plan_core, project_feedback_history, project_revision_history,
+)
 from openfoam_agent.progress import NullProgressReporter, ProgressEvent, ProgressReporter
 from openfoam_agent.schemas.feedback import FeedbackAssessment, HumanFeedback, RevisionProposal
 from openfoam_agent.workflow.state import CFDState
@@ -61,12 +64,12 @@ class CFDFeedbackReviewAgent:
         payload = {
             "feedback": feedback.model_dump(mode="json"),
             "feedback_history_count": len(state.human_feedback),
-            "feedback_history": [
-                item.model_dump(mode="json") for item in state.human_feedback[-12:]
-            ],
-            "revision_history": [item.model_dump(mode="json") for item in state.revision_history[-5:]],
-            "confirmed_intake": state.intake.model_dump(mode="json") if state.intake else None,
-            "engineering_plan": state.engineering_plan.model_dump(mode="json"),
+            "feedback_history": project_feedback_history(state.human_feedback, limit=8),
+            "revision_history": project_revision_history(state.revision_history, limit=4),
+            "confirmed_intake": project_confirmed_intake(state.intake),
+            "confirmed_intake_sha256": state.intake_digest,
+            "engineering_plan": project_plan_core(state.engineering_plan, mode="review"),
+            "engineering_plan_sha256": state.engineering_plan.digest(),
             "mesh_evidence": state.mesh_evidence.model_dump(mode="json") if state.mesh_evidence else None,
             "runtime_report": (
                 compact_runtime_report(state.runtime_report) if state.runtime_report else None

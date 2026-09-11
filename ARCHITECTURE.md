@@ -1,3 +1,23 @@
+## v4.8.0 physical phase-controller architecture
+
+`CFDEngineeringAgent` is now a facade over physically separate phase controllers under `engineering/phases/`. Model-facing context is compiled by phase-specific bounded capsules; full authoritative plans/intakes remain in Python state and are bound by digests. Human revision is `decision -> delta authoring`, case validation repair is a persistent `RepairEpisode`, and stateless backends are never given deltas that depend on unavailable previous-response state.
+
+```text
+CFDEngineeringAgent facade
+  ├─ phases/context_controller.py
+  ├─ phases/lifecycle_controller.py
+  ├─ phases/decision_controller.py
+  ├─ phases/authoring_controller.py
+  ├─ phases/repair_controller.py
+  └─ phases/repair_episode.py
+
+Controller-owned execution boundaries remain:
+  CaseBuildGraph -> initial authoring
+  CaseDeltaGraph -> committed repair/revision
+  RuntimeContract -> solve/restart
+  PostProcessGraph -> postprocessing
+```
+
 ## v4.7.4 failure-local validation-repair boundary
 
 A committed candidate that fails deterministic or native validation is not sent back through the broad Engineering context. The controller creates `case_validation_repair_v1`: the immutable intake identity, a compact already-accepted plan projection, the primary validation event, exact current file(s) implicated by the diagnostic, bounded file-contract scan/evidence and bounded successful repair-support reads. Redacted OpenFOAM diagnostics are resolved against current authored basenames so `<LOCAL_PATH:fvSchemes>` can select `system/fvSchemes` without exposing host paths.
