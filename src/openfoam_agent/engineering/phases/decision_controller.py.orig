@@ -17,7 +17,6 @@ from openfoam_agent.engineering.revision_context import (
 from openfoam_agent.engineering.repair_context import (
     build_partitioned_validation_repair_prompt,
     project_validation_repair_plan,
-    repair_episode_requires_direct_attempt,
 )
 from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
 from openfoam_agent.tools.execution_policy import (
@@ -342,30 +341,6 @@ def execute_prepare_decision_impl(
             progress_limit=progress_limit,
             native_execution=native_execution,
         )
-
-    # v4.8.2: a native diagnostic that already enumerates supported alternatives,
-    # together with implicated case files, is sufficient for one direct repair
-    # attempt. The controller blocks reference/capability retrieval for that first
-    # attempt without selecting any alternative itself. A recorded repair at the
-    # current validation generation, or a new native failure generation, reopens
-    # normal retrieval policy.
-    if (
-        isinstance(action, (SearchReferencesAction, ReadReferenceAction, SearchCapabilitiesAction, GatherEvidenceAction))
-        and repair_episode_requires_direct_attempt(state.repair_episode)
-    ):
-        event = self._event(
-            llm_step,
-            action.type,
-            False,
-            "Reference retrieval deferred: the current native diagnostic already enumerates supported alternatives and implicated files are available; attempt one direct repair first.",
-            validation_status="inconclusive",
-            failure_category="case",
-        )
-        state.engineering_events.append(event)
-        self._emit_engineering_event(
-            progress_phase, event, step=progress_step, limit=progress_limit, state=state
-        )
-        return False
 
     if self._tool_action_count(state) >= self.policy.max_tool_actions:
         state.transition(

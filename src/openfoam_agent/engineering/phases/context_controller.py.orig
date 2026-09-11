@@ -16,10 +16,7 @@ from openfoam_agent.engineering.revision_context import (
 )
 from openfoam_agent.engineering.repair_context import (
     build_partitioned_validation_repair_prompt,
-    direct_repair_evidence_is_sufficient,
-    project_repair_episode,
     project_validation_repair_plan,
-    repair_episode_requires_direct_attempt,
 )
 from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
 from openfoam_agent.tools.execution_policy import (
@@ -636,22 +633,14 @@ def generate_turn(
             if trigger is not None else state.repair_episode
         )
         observed_support = [
-            compact_event_for_model(event, excerpt_chars=700, summary_chars=280)
-            for event in self._current_round_events(state)[-12:]
+            compact_event_for_model(event, excerpt_chars=1400, summary_chars=500)
+            for event in self._current_round_events(state)[-20:]
             if event.success and event.action_type in support_types
-        ][-4:]
-        episode_projection = project_repair_episode(episode)
-        direct_repair_first = repair_episode_requires_direct_attempt(episode)
-        repair_retrieval_policy = dict(retrieval_policy)
-        if direct_repair_first:
-            repair_retrieval_policy.update({
-                "available": False,
-                "disabled_reason": "native_diagnostic_explicit_alternatives_direct_repair_first",
-                "mode": "direct_repair_first",
-                "reopen_after_direct_attempt_or_new_failure": True,
-            })
+        ][-6:]
+        episode_support = list(episode.supporting_observations[-6:]) if episode is not None else []
+        supporting_observations = (episode_support + observed_support)[-6:]
         payload = {
-            "state_mode": "case_validation_repair_v2",
+            "state_mode": "case_validation_repair_v1",
             "phase": phase,
             "step": step,
             "confirmed_facts": [
@@ -662,11 +651,11 @@ def generate_turn(
             "intake_sha256": state.intake_digest,
             "baseline_plan_sha256": baseline_plan.digest() if baseline_plan is not None else None,
             "baseline_plan_core": project_validation_repair_plan(baseline_plan),
-            "repair_episode_projection": episode_projection,
-            "validation_failure": (episode_projection or {}).get("current_failure"),
+            "repair_episode": (episode.model_dump(mode="json") if episode is not None else None),
+            "validation_failure": (episode.current_failure if episode is not None else None),
             "relevant_case_files": relevant_files,
             "case_file_contract_scan": self._runtime_case_file_contract_scan(state),
-            "case_inventory": case_files[:24],
+            "case_inventory": case_files[:40],
             "mesh_evidence": {
                 "passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
                 "cell_count": state.mesh_evidence.cell_count if state.mesh_evidence else None,
@@ -678,15 +667,7 @@ def generate_turn(
                 ),
             },
             "supporting_evidence": evidence_records[-4:],
-            "supporting_observations": observed_support,
-            "evidence_retrieval_policy": repair_retrieval_policy,
-            "native_diagnostic_sufficiency": {
-                "explicit_supported_alternatives": direct_repair_evidence_is_sufficient(
-                    (episode_projection or {}).get("current_failure"), relevant_files
-                ),
-                "direct_repair_first": direct_repair_first,
-                "controller_selects_alternative": False,
-            },
+            "supporting_observations": supporting_observations,
             "bindings": bindings,
             "budget": budget,
             "repair_contract": {
@@ -696,12 +677,8 @@ def generate_turn(
                 "preserve_unimplicated_engineering_choices": True,
                 "controller_revalidates_after_delta": True,
                 "read_results_return_on_next_repair_turn": True,
-                "evidence_archive_is_not_prompt_memory": True,
                 "rule": (
                     "Fix the observed case validation failure, not the whole design. "
-                    "When native_diagnostic_sufficiency.direct_repair_first is true, choose a repair "
-                    "from the native-supported alternatives using the implicated file(s) before requesting "
-                    "reference retrieval. Python reports sufficiency but never chooses the CFD value. "
                     "Use plan_patch only if the diagnostic proves plan metadata must change."
                 ),
             },
@@ -714,10 +691,7 @@ def generate_turn(
             "unrelated physics/geometry, do not repeat the complete EngineeringPlan, and do not regenerate unchanged "
             "files. For a missing fvSchemes/fvSolution dictionary section, choose the engineering/numerical content "
             "consistent with the supplied baseline plan and current file; Python will re-run CaseDeltaGraph and the "
-            "actual OpenFOAM pre-solve consumer after the delta. When evidence_retrieval_policy.mode is "
-            "direct_repair_first, do not request reference/capability retrieval on this turn; make one direct "
-            "repair attempt from the supplied native alternatives and implicated file evidence. Retrieval may "
-            "reopen after that attempt or after a new native syntax gap:\n"
+            "actual OpenFOAM pre-solve consumer after the delta:\n"
         )
     elif use_delta:
         payload = {
