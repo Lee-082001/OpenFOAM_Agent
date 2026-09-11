@@ -1,3 +1,7 @@
+## v4.8.1 prepare/runtime repair terminal boundary
+
+The repair schema is shared across prepare and runtime recovery, but terminal execution authority is not. `repair_controller.repair_actions(..., runtime=False)` must end with `FinishPreviewAction` regardless of the model's `retry_solver` hint, so a zero-step/dictionary/native validation repair returns through CaseSeal and explicit solve approval. `runtime=True` must end with `RetrySolverAction`, because only a previously authorized solver failure owns a retry edge. This phase-owned terminator rule prevents model hints from crossing the prepare/runtime authorization boundary.
+
 ## v4.8.0 physical phase-controller architecture
 
 `CFDEngineeringAgent` is now a facade over physically separate phase controllers under `engineering/phases/`. Model-facing context is compiled by phase-specific bounded capsules; full authoritative plans/intakes remain in Python state and are bound by digests. Human revision is `decision -> delta authoring`, case validation repair is a persistent `RepairEpisode`, and stateless backends are never given deltas that depend on unavailable previous-response state.

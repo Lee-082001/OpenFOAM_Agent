@@ -1,3 +1,7 @@
+## v4.8.1 prepare-repair terminal ownership fix
+
+> v4.8.1 fixes a controller phase-order bug exposed by a Foundation OpenFOAM v14 lid-driven cavity run. A zero-step/pre-solve case repair could carry `retry_solver=true` from the shared LLM repair schema and incorrectly append `RetrySolverAction` while still in the prepare phase. Prepare repair now always terminates through `finish_preview` and the normal validation/seal/explicit `/solve` approval path; runtime repair always terminates through `retry_solver`. The LLM hint no longer changes controller phase authority. See `V4_8_1_CHANGES.md`.
+
 ## v4.8.0 phase-controller architecture hardening
 
 > v4.8.0 consolidates the v4.7.x live-debugging lessons into an architectural release. Human revision is split into decision and authoring phases, native case repair has controller-owned multi-turn `RepairEpisode` continuity, stateless postprocessing never receives fake previous-response deltas, downstream LLM phases consume bounded plan/intake projections rather than full objects, terminal Unicode input is sanitized at the application boundary, and the former monolithic Engineering controller is physically decomposed into phase modules. See `V4_8_0_CHANGES.md`.

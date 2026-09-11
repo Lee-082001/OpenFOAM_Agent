@@ -429,7 +429,12 @@ def repair_actions(
             actions.append(RunNativeOpenFOAMAction(type="run_openfoam_command", invocation=invocation))
     if graph.validate_pre_solve:
         actions.append(ValidatePreSolveAction(type="validate_pre_solve", required_case_files=plan.required_case_files, rationale="controller-compiled delta manifest"))
-    if runtime or repair.retry_solver:
+    # The controller phase owns the terminal action. ``repair.retry_solver`` is
+    # an LLM hint carried by the shared repair schema; it must never promote a
+    # prepare/pre-solve repair into runtime solver execution. Prepare repair always
+    # returns through finish_preview so seal/solve-readiness and explicit approval
+    # gates remain authoritative. Runtime repair always terminates with retry_solver.
+    if runtime:
         actions.append(RetrySolverAction(type="retry_solver", plan=plan, rationale=""))
     else:
         actions.append(FinishPreviewAction(type="finish_preview", plan=plan, rationale=""))

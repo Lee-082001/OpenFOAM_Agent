@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import pytest
+
 from conftest import FakeOpenFOAMTools, foam_header, make_plan, make_state
 from openfoam_agent.engineering import CFDEngineeringAgent, EngineeringPolicy
 from openfoam_agent.schemas.engineering import (
     BlockAction,
     CaseBundleFile,
+    FinishPreviewAction,
     RepairCasePlanAction,
     RepairTurn,
+    RetrySolverAction,
     RunMeshCommandAction,
 )
 from openfoam_agent.workflow.states import State
@@ -197,6 +201,45 @@ def test_huge_failed_dictionary_is_bounded_in_repair_context_not_rejected(tmp_pa
     assert '"truncated": true' in prompt
 
 
+@pytest.mark.parametrize(
+    ("runtime", "retry_hint", "terminal_type"),
+    [
+        (False, False, FinishPreviewAction),
+        (False, True, FinishPreviewAction),
+        (True, False, RetrySolverAction),
+        (True, True, RetrySolverAction),
+    ],
+)
+def test_repair_terminal_action_is_owned_by_controller_phase_not_retry_hint(
+    tmp_path, graph_path, runtime, retry_hint, terminal_type
+):
+    agent = _make_repair_agent(tmp_path, graph_path)
+    state = make_state(); state.transition(State.ENGINEERING, "test")
+    plan = make_plan(state.intake)
+    plan.required_case_files = ["system/controlDict", "system/fvSchemes", "system/fvSolution"]
+    agent._pending_execution_plan = plan
+    _seed_core(agent)
+
+    repair = RepairCasePlanAction(
+        type="repair_case_plan",
+        diagnosis="Repair the failed dictionary only.",
+        replacement_files=[
+            CaseBundleFile(path="system/fvSchemes", content=_fv_schemes(with_laplacian=True))
+        ],
+        validate_pre_solve=True,
+        retry_solver=retry_hint,
+    )
+    actions, _, graph = agent._repair_actions(state, repair, runtime=runtime)
+
+    assert graph.valid, graph.failures
+    assert not any(isinstance(action, RunMeshCommandAction) for action in actions)
+    assert isinstance(actions[-1], terminal_type)
+    if runtime:
+        assert not any(isinstance(action, FinishPreviewAction) for action in actions)
+    else:
+        assert not any(isinstance(action, RetrySolverAction) for action in actions)
+
+
 def test_dictionary_only_repair_does_not_rebuild_or_recheck_mesh(tmp_path, graph_path):
     agent = _make_repair_agent(tmp_path, graph_path)
     state = make_state(); state.transition(State.ENGINEERING, "test")
@@ -337,7 +380,8 @@ def _mesh_boundary() -> str:
 """
 
 
-def test_native_presolve_failure_repairs_only_failed_dictionary_and_reaches_solve_ready(tmp_path, graph_path):
+@pytest.mark.parametrize("retry_hint", [False, True])
+def test_native_presolve_failure_repairs_only_failed_dictionary_and_reaches_solve_ready(tmp_path, graph_path, retry_hint):
     state = make_state(); state.transition(State.ENGINEERING, "test")
     plan = make_plan(state.intake)
     plan.required_case_files = [
@@ -356,6 +400,7 @@ def test_native_presolve_failure_repairs_only_failed_dictionary_and_reaches_solv
             CaseBundleFile(path="system/fvSchemes", content=_fv_schemes(with_laplacian=True))
         ],
         validate_pre_solve=True,
+        retry_solver=retry_hint,
     )
     llm = _SingleRepairLLM(repair)
     tools = _OneFailureZeroStepTools()
