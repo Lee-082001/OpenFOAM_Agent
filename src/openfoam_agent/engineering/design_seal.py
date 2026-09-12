@@ -88,6 +88,10 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
     """
     if state.intake is None or not state.intake_digest:
         raise DesignSealError("Confirmed intake is unavailable; staged design cannot be sealed.")
+    if not design.required_case_files:
+        raise DesignSealError(
+            "Agent-owned required case manifest is empty; staged design cannot be sealed."
+        )
 
     versions: set[str] = set()
     seen: set[str] = set()

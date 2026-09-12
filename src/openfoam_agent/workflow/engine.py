@@ -16,7 +16,7 @@ from openfoam_agent.workflow.states import State
 
 
 class CFDWorkflow:
-    """v2 workflow: intake/confirmation -> one engineering agent -> safety gates."""
+    """Workflow: intake/confirmation -> engineering agent -> deterministic safety gates."""
 
     def __init__(
         self,
@@ -116,7 +116,7 @@ class CFDWorkflow:
                     "Internal invariant violation: RUNTIME_REPAIR escaped RuntimeOrchestrator without an explicit repair decision.",
                 )
             case _:
-                state.transition(State.FAILED, f"No v2 handler for {state.current_state.value}.")
+                state.transition(State.FAILED, f"No workflow handler for {state.current_state.value}.")
         self.engineering.checkpoint(state, "workflow-step-finished")
         return state
 

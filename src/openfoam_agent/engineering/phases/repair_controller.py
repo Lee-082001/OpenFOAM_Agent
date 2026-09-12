@@ -1,147 +1,39 @@
 from __future__ import annotations
 
-from openfoam_agent.contracts.evidence import implementation_evidence_pack, evidence_coverage_failures, authoring_prompt_evidence, advisory_authoring_evidence_summary
-from openfoam_agent.contracts.evidence_policy import POLICY_SUMMARY, provider_is_sufficient
-from openfoam_agent.engineering.authoring_tasks import compile_tasks, accept_task
-from openfoam_agent.engineering.case_build_graph import compile_case_build_graph
 from openfoam_agent.engineering.case_delta_graph import compile_case_delta_graph
-from openfoam_agent.llm.context import ContextBudgetError
-from openfoam_agent.llm.context_capsules import project_confirmed_intake, project_plan_core
-from openfoam_agent.engineering.design_context import build_partitioned_design_prompt
-from openfoam_agent.engineering.revision_context import (
-    build_partitioned_revision_prompt,
-    project_revision_plan,
-    project_revision_proposal,
-    project_strategy_plan,
-)
-from openfoam_agent.engineering.repair_context import (
-    build_partitioned_validation_repair_prompt,
-    project_validation_repair_plan,
-)
-from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
-from openfoam_agent.tools.execution_policy import (
-    deny_unapproved_engineering_solve, command_effect, ExecutionPolicyError,
-)
-from openfoam_agent.tools.safe_runner import SafeRunner
+from openfoam_agent.contracts.regions import validate_design
 
-import hashlib
-import json
-import os
 import re
-from dataclasses import dataclass
-from pathlib import Path
 
-from openfoam_agent.agents.intake import confirmed_intake_definition
-from openfoam_agent.llm.context import (
-    build_bounded_json_prompt,
-    compact_event_for_model,
-    compact_runtime_report,
-    compact_text,
-    structured_request_metrics,
-)
-from openfoam_agent.llm.prompts import (
-    ENGINEERING_SYSTEM_PROMPT,
-    PREPARE_SYSTEM_PROMPT,
-    PREPARE_DECISION_ONLY_SYSTEM_PROMPT,
-    PREPARE_DESIGN_SYSTEM_PROMPT,
-    PREPARE_DECISION_DESIGN_SYSTEM_PROMPT,
-    CASE_AUTHORING_SYSTEM_PROMPT,
-    CASE_PLAN_RETRY_SYSTEM_PROMPT,
-    CANDIDATE_BLOCK_MESH_REPAIR_SYSTEM_PROMPT,
-    BLOCK_MESH_REPAIR_SYSTEM_PROMPT,
-    REPAIR_SYSTEM_PROMPT,
-    REVISION_SYSTEM_PROMPT,
-    REVISION_DECISION_SYSTEM_PROMPT,
-    REVISION_AUTHORING_SYSTEM_PROMPT,
-    RUNTIME_REPAIR_SYSTEM_PROMPT,
-    STRATEGY_REVISION_SYSTEM_PROMPT,
-    FINALIZATION_SYSTEM_PROMPT,
-)
-from openfoam_agent.llm.protocol import StructuredLLM
-from openfoam_agent.progress import (
-    NullProgressReporter,
-    ProgressEvent,
-    ProgressReporter,
-    action_importance,
-    describe_action,
-)
-from openfoam_agent.schemas.feedback import RevisionFileChange, RevisionRecord
 from openfoam_agent.schemas.engineering import (
-    BlockAction,
-    CaseBundleFile,
     DeleteCaseFileAction,
-    EngineeringBudgetExtension,
-    EngineeringEvent,
-    ENGINEERING_EVENT_OBSERVED_EVIDENCE_LIMIT,
-    EngineeringEvidenceRecord,
     EngineeringPlan,
-    EngineeringSequenceAction,
     ExecuteCasePlanAction,
-    DesignCaseAction,
-    CaseAuthoringAction,
-    PrepareDesignTurn,
-    PrepareDecisionDesignTurn,
-    CaseAuthoringTurn,
-    FinalizationTurn,
-    PrepareTurn,
-    PrepareDecisionOnlyTurn,
-    CasePlanRetryTurn,
     CandidateCasePlanRepairAction,
     CandidateBlockMeshRepairAction,
-    CandidateBlockMeshRepairTurn,
     BlockMeshRepairAction,
-    BlockMeshRepairTurn,
-    GatherEvidenceAction,
-    EvidenceGapRequest,
     RepairCasePlanAction,
     RuntimeCaseRepairAction,
     RepairTurn,
-    RevisionTurn,
-    RevisionDecisionAction,
-    RevisionDecisionTurn,
-    RevisionAuthoringTurn,
-    RuntimeRepairTurn,
     StrategyRevisionAction,
-    StrategyRevisionTurn,
-    TypedBlockMeshFile,
-    EngineeringTurn,
-    ObservedEngineeringEvidence,
-    canonical_engineering_evidence_id,
     FinishPreviewAction,
-    InspectEnvironmentAction,
-    ListCaseFilesAction,
-    ReadCaseFileAction,
-    ReadReferenceAction,
-    PatchCaseFileAction,
     RetrySolverAction,
     RunMeshCommandAction,
     RunNativeOpenFOAMAction,
-    SearchCapabilitiesAction,
-    SearchReferencesAction,
     SurfaceCheckAction,
     ValidateDictionaryAction,
     ValidatePreSolveAction,
     WriteCaseFileAction,
 )
-from openfoam_agent.tools.capability_catalog import CapabilityCatalog
-from openfoam_agent.tools.diagnostics import diagnose_openfoam_failure, classify_native_validation
-from openfoam_agent.tools.foam_file import validate_foam_file_header
-from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.foam_serializer import (
     FoamSerializationError,
     serialize_block_mesh,
     serialize_foam_dictionary,
 )
-from openfoam_agent.tools.references import OpenFOAMReferenceIndex
-from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
-from openfoam_agent.verification.presolve import PreSolveCompletenessGate
-from openfoam_agent.verification.safety import (
-    DeterministicSafetyGate,
-    parse_check_mesh_evidence,
-)
+from openfoam_agent.tools.workspace import WorkspaceSafetyError
 from openfoam_agent.workflow.state import CFDState
 from openfoam_agent.workflow.states import State
-from openfoam_agent.engineering.phases.repair_episode import ensure_episode, add_support_observation, record_repair
+from openfoam_agent.engineering.phases.repair_episode import record_repair
 from openfoam_agent.schemas.simulation import RuntimeRepairDecision
 from openfoam_agent.engineering.agent import RepairOutcome
 

@@ -97,7 +97,7 @@ _SETTABLE_FACT_PREFIXES = {
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="openfoam-agent",
-        description="OpenFOAM Agent v2: autonomous CFD engineering behind deterministic safety gates.",
+        description="OpenFOAM Agent: autonomous CFD engineering behind deterministic safety gates.",
     )
     parser.add_argument("prompt", nargs="?", help="One-shot CFD prompt.")
     parser.add_argument("--prepare-parallel-restart", metavar="TIME_OR_LATEST", help="With --resume: preserve partial outputs and prepare an MPI restart without running it.")
@@ -940,7 +940,7 @@ def _limitations(state: CFDState) -> list[str]:
             "COMPLETE records explicit human acceptance of the reviewed result; it is not a universal proof of mesh/time-step independence or experimental validation."
         )
     if state.current_state == State.DONE:
-        out.append("DONE is retained only for backward compatibility; v2.4 uses RESULT_REVIEW_REQUIRED and COMPLETE.")
+        out.append("DONE is retained only for backward checkpoint compatibility; current runs use RESULT_REVIEW_REQUIRED and COMPLETE.")
     return out
 
 

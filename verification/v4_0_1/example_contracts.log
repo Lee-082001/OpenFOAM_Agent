@@ -1,3 +1,0 @@
-isolation.policy.example.json: schema valid (not runtime validated)
-native_temperature.quantity.json: schema valid (not runtime validated)
-mass_conservation.check.json: schema valid (not runtime validated)

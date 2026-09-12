@@ -82,6 +82,10 @@ def compile_case_build_graph(
     failures: list[str] = []
     warnings: list[str] = []
 
+    if not required:
+        failures.append(
+            "EngineeringPlan.required_case_files is empty; the Agent must declare at least one solve-input path before authoring."
+        )
     if missing:
         failures.append(
             "Required case manifest is not fully authored: " + ", ".join(missing)
