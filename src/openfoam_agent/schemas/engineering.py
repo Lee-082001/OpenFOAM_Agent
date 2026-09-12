@@ -154,6 +154,30 @@ class EngineeringDefaultAssumption(_EngineeringModel):
         return self
 
 
+class EngineeringDesignDefault(_EngineeringModel):
+    """Agent-owned ordinary design choice without controller/evidence metadata.
+
+    Canonical evidence IDs are controller/audit state, not CFD design content. The
+    staged design contract therefore carries only the value selected by the Agent;
+    the sealed EngineeringPlan receives provenance metadata deterministically later.
+    """
+
+    parameter: str = Field(min_length=1, max_length=160)
+    value: str = Field(min_length=1, max_length=300)
+    unit: str = Field(default="", max_length=80)
+    basis: Literal[
+        "representative",
+        "common_practice",
+        "simplified_geometry",
+        "dimensionless_normalization",
+        "material_reference",
+        "conservative",
+        "other",
+    ] = "representative"
+    rationale: str = Field(min_length=1, max_length=600)
+    source: Literal["engineering_default"] = "engineering_default"
+
+
 _BINDABLE_PLAN_FIELDS = Literal[
     "problem_interpretation",
     "temporal_behavior",
@@ -1075,17 +1099,87 @@ EngineeringSequenceMemberAction = (
 )
 
 
-class DesignCaseAction(_EngineeringModel):
-    """Stage-1 engineering decision without case-file authoring payload.
+class EngineeringDesign(_EngineeringModel):
+    """LLM-facing CFD design, deliberately excluding controller-owned audit state.
 
-    The Agent chooses the CFD design and evidence bindings here.  Python freezes this
-    draft for the next authoring turn, so the model does not need to emit the large
-    OpenFOAM file DSL and the EngineeringPlan in the same structured response.
+    The Agent owns physical/numerical/geometry/execution choices. Python owns only
+    immutable identity and provenance mechanics: intake digest/fact closure, audit
+    bindings, canonical evidence IDs, Foundation-version sealing, and redundant solver
+    mirrors. Keeping those concerns out of the LLM response removes copy/retry failure
+    modes without moving CFD engineering decisions into Python.
     """
 
+    case_name: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$", max_length=80)
+    # Compatibility fallback for legacy/direct plans. New staged designs should
+    # prefer execution; when execution is present the controller derives these mirrors.
+    solver: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_.+-]*$", max_length=160)
+    solver_provider_id: str | None = Field(default=None, min_length=1, max_length=240)
+    execution: OpenFOAMExecutionSpec | None = None
+    region_layouts: list[RegionCaseLayout] = Field(default_factory=list)
+    interfaces: list[RegionInterface] = Field(default_factory=list)
+    completion: CompletionContract | None = None
+    quantities_of_interest: list[QuantityOfInterest] = Field(default_factory=list)
+    conservation_checks: list[ConservationCheck] = Field(default_factory=list)
+    problem_interpretation: str = Field(min_length=1, max_length=4000)
+    temporal_behavior: Literal["steady", "transient", "custom"]
+    motion_kind: Literal[
+        "static", "rigid_body", "prescribed_deformation", "free_body", "two_way_fsi", "custom"
+    ]
+    mesh_motion_requirement: Literal[
+        "static", "moving", "deforming", "topology_change", "custom"
+    ]
+    mesh_strategy: str = Field(min_length=1, max_length=1000)
+    decisions: list[EngineeringDecision] = Field(default_factory=list, max_length=80)
+    assumptions: list[str] = Field(default_factory=list, max_length=80)
+    engineering_defaults: list[EngineeringDesignDefault] = Field(default_factory=list, max_length=80)
+    required_case_files: list[str] = Field(default_factory=list, max_length=80)
+    postprocess_strategy: list[str] = Field(default_factory=list, max_length=40)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_design_lists(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        raw = data.get("required_case_files") or []
+        data["required_case_files"] = list(
+            dict.fromkeys(str(item) for item in raw if str(item).strip())
+        )
+        return data
+
+    @model_validator(mode="after")
+    def validate_design_contract(self) -> Self:
+        if self.execution is None and (not self.solver or not self.solver_provider_id):
+            raise ValueError(
+                "EngineeringDesign requires execution or the legacy solver/solver_provider_id pair."
+            )
+        for path in self.required_case_files:
+            if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
+                raise ValueError(f"Unsafe required case file path: {path}")
+        return self
+
+
+class DesignCaseAction(_EngineeringModel):
+    """Stage-1 Agent-owned CFD design without controller/audit or file-authoring payload."""
+
     type: Literal["design_case"]
-    plan: EngineeringPlan
+    plan: EngineeringDesign
     authoring_brief: str = Field(default="", max_length=1200)
+
+    @model_validator(mode="before")
+    @classmethod
+    def strip_controller_owned_plan_fields(cls, value: Any):
+        """Project persisted/full plans into the smaller staged-design wire view."""
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        raw = data.get("plan")
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump(mode="python")
+        if isinstance(raw, dict):
+            allowed = set(EngineeringDesign.model_fields)
+            data["plan"] = {key: item for key, item in raw.items() if key in allowed}
+        return data
 
 
 class CaseAuthoringAction(_EngineeringModel):

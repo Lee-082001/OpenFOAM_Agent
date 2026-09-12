@@ -3455,7 +3455,7 @@ class CFDEngineeringAgent:
                     for line in event.output_excerpt.splitlines()
                     if line.strip()
                 )[:12]
-            elif event.native_command_executed:
+            else:
                 details = tuple(
                     self._redact_local_paths(line.rstrip())[:800]
                     for line in event.output_excerpt.splitlines()

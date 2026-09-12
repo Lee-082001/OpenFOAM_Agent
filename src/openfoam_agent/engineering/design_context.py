@@ -57,12 +57,10 @@ def project_design_capsule(payload: dict[str, object], *, evidence_limit: int) -
         "phase": payload.get("phase"),
         "step": payload.get("step"),
         "confirmed_intake": deepcopy(payload.get("confirmed_intake")),
-        "intake_sha256": payload.get("intake_sha256"),
         "engineering_assumption_policy": deepcopy(payload.get("engineering_assumption_policy")),
         "evidence_policy": deepcopy(payload.get("evidence_policy")),
         "verified_execution_candidates": deepcopy(payload.get("verified_execution_candidates", [])),
         "evidence_retrieval_policy": deepcopy(payload.get("evidence_retrieval_policy")),
-        "bindings": deepcopy(payload.get("bindings")),
         "budget": deepcopy(payload.get("budget")),
         # Optional observations are explicitly projected, not silently truncated.
         "available_evidence": _summary_only_evidence(evidence, keep_detail=min(3, len(evidence))),

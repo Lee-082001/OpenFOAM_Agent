@@ -5,6 +5,7 @@ from openfoam_agent.contracts.evidence_policy import POLICY_SUMMARY, provider_is
 from openfoam_agent.engineering.authoring_tasks import compile_tasks, accept_task
 from openfoam_agent.engineering.case_build_graph import compile_case_build_graph
 from openfoam_agent.engineering.case_delta_graph import compile_case_delta_graph
+from openfoam_agent.engineering.design_seal import DesignSealError, materialize_engineering_plan
 from openfoam_agent.llm.context import ContextBudgetError
 from openfoam_agent.llm.context_capsules import project_confirmed_intake, project_plan_core
 from openfoam_agent.engineering.design_context import build_partitioned_design_prompt
@@ -225,39 +226,45 @@ def execute_prepare_decision_impl(
         )
 
     if isinstance(action, DesignCaseAction):
-        # Stage-1 validation must not depend on case files that have not been authored
-        # yet. Validate only immutable intake binding, deterministic capability
-        # provenance and delegated-default policy here; full workspace/native safety
-        # validation still runs after author_case writes the case.
+        # Stage-1 LLM output contains only Agent-owned CFD decisions. Immutable
+        # identity/provenance fields are materialized from controller state so a
+        # model cannot fail merely by copying a hash, fact ID, audit binding, target
+        # version, or evidence ID incorrectly.
         failures: list[str] = []
-        if action.plan.confirmed_intake_sha256 != state.intake_digest:
-            failures.append("Engineering design confirmed_intake_sha256 does not match the frozen intake.")
-        failures.extend(validate_design(action.plan, state.intake))
+        plan = None
+        try:
+            plan = materialize_engineering_plan(action.plan, state, self.catalog)
+        except (DesignSealError, ValueError) as exc:
+            failures.append(f"Engineering design could not be sealed: {exc}")
+        if plan is not None:
+            failures.extend(validate_design(plan, state.intake))
         # v4.1: implementation syntax evidence is DEFERRED to authoring.
         # Design acceptance must not require an explicit source excerpt for every
         # future case file. Raw free-form authoring remains evidence-gated later;
         # typed/structured authoring may instead establish confidence through
         # deterministic serialization and native validation.
-        failures.extend(self._validate_observed_provenance(action.plan, state))
-        failures.extend(self._validate_engineering_defaults(action.plan, state))
+        if plan is not None:
+            failures.extend(self._validate_observed_provenance(plan, state))
+            failures.extend(self._validate_engineering_defaults(plan, state))
         valid = not failures
         if valid:
+            assert plan is not None
             self._authoring_task_queue = None
-            self._draft_design_plan = action.plan
+            self._draft_design_plan = plan
             self._draft_authoring_brief = action.authoring_brief
             self._mark_evidence_gaps_satisfied("prepare")
             event = self._event(
                 llm_step,
                 action.type,
                 True,
-                "Engineering design accepted; case authoring will run in a separate compact turn.",
+                "Engineering design accepted; controller sealed immutable metadata and case authoring will run in a separate compact turn.",
             )
         else:
             event = self._event(
                 llm_step,
                 action.type,
                 False,
-                "Engineering design rejected by deterministic plan/evidence validation.",
+                "Engineering design rejected by deterministic provider/semantic validation.",
                 "\n".join(failures),
             )
         state.engineering_events.append(event)

@@ -384,7 +384,6 @@ def generate_turn(
             "phase": phase,
             "step": step,
             "confirmed_intake": project_confirmed_intake(state.intake),
-            "intake_sha256": state.intake_digest,
             "engineering_assumption_policy": assumption_policy,
             "geometry_authoring_policy": self._geometry_authoring_policy(state),
             "evidence_policy": evidence_policy,
@@ -400,21 +399,24 @@ def generate_turn(
             },
             "evidence_gap_status": self._compact_evidence_gap_status(phase),
             "recent_observations": self._recent_observations_for_model(state)[-4:],
-            "bindings": bindings,
             "budget": budget,
         }
         if contract_phase == "prepare_design":
             instruction = (
                 "Choose the next compact engineering-design action. Use gather_evidence only "
                 "for a genuinely missing OpenFOAM tool/version fact. Otherwise return design_case "
-                "with the complete EngineeringPlan but no case files. Delegated ordinary values "
-                "belong in engineering_defaults:\n"
+                "with only Agent-owned CFD design choices and no case files. Do not copy or emit "
+                "intake hashes, confirmed fact IDs/bindings, canonical evidence IDs, OpenFOAM target "
+                "version, or redundant solver mirrors; the controller seals those from frozen state "
+                "and the capability providers you selected. Delegated ordinary values belong in "
+                "engineering_defaults:\n"
             )
         else:
             instruction = (
                 "Retrieval is closed. Use this bounded evidence capsule to return design_case "
-                "with the complete EngineeringPlan, or block only for a genuine unsupported "
-                "tool/version requirement. Do not author case files yet:\n"
+                "with only Agent-owned CFD design choices, or block only for a genuine unsupported "
+                "tool/version requirement. Controller-owned identity/provenance metadata is sealed "
+                "afterward; do not reproduce it. Do not author case files yet:\n"
             )
     elif contract_phase == "revision_decide":
         proposal = state.active_revision_proposal
