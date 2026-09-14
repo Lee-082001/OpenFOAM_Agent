@@ -83,14 +83,22 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
     """Seal Agent decisions with controller-owned identity/provenance metadata.
 
     This function never chooses a solver, mesh, BC, material value, or numerical
-    setting. It only validates provider identities the Agent already chose and attaches
-    deterministic state that Python already owns.
+    setting. It validates provider identities the Agent already chose, enforces actual
+    user authorization for delegated defaults, and attaches deterministic state that
+    Python already owns.
     """
     if state.intake is None or not state.intake_digest:
         raise DesignSealError("Confirmed intake is unavailable; staged design cannot be sealed.")
     if not design.required_case_files:
         raise DesignSealError(
             "Agent-owned required case manifest is empty; staged design cannot be sealed."
+        )
+
+    delegated = bool(getattr(state.user_request, "exploratory_completion_authorized", False))
+    if design.engineering_defaults and not delegated:
+        raise DesignSealError(
+            "Engineering defaults were proposed without user delegation. The controller will not promote "
+            "an engineering choice into authorized provenance; request/obtain delegation or use confirmed facts."
         )
 
     versions: set[str] = set()
@@ -129,12 +137,13 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
 
     solver, solver_provider_id = _sealed_solver_mirror(design)
     fact_ids = [fact.id for fact in state.intake.facts if fact.category != "context"]
-    # Identity/coverage anchors only. Authoring/native gates establish implementation truth.
+    # Compatibility identity anchors. These do not claim artifact implementation;
+    # explicit case assertions/numeric relations and native consumers establish that.
     bindings = [
         ConfirmedFactBinding(
             fact_id=fact_id,
             plan_fields=["problem_interpretation"],
-            explanation="Controller-owned frozen-intake coverage anchor; not artifact implementation evidence.",
+            explanation="Frozen-intake identity closure only; not artifact implementation evidence.",
         )
         for fact_id in fact_ids
     ]
