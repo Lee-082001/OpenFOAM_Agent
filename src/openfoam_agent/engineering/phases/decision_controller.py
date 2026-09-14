@@ -39,6 +39,17 @@ from openfoam_agent.workflow.states import State
 # v4.8 action/decision phase controller.
 
 
+def _repair_support_request_key(state: CFDState, action: object) -> tuple[object, ...] | None:
+    episode=state.repair_episode
+    if episode is None: return None
+    if isinstance(action, SearchReferencesAction):
+        detail: object=("search",action.scope,action.query.strip().casefold())
+    elif isinstance(action, ReadReferenceAction):
+        detail=("read",action.reference,action.start_line,action.line_count,tuple(action.target_case_files))
+    else: return None
+    return (str(state.run_id),str(episode.episode_id),int(episode.validation_generation),action.type,detail)
+
+
 def execute_prepare_decision(self, state, action, **kwargs):
     self._active_transaction = {"type": action.type, "step": kwargs.get("llm_step")}
     self.checkpoint(state, "transaction-start")
@@ -96,6 +107,10 @@ def execute_prepare_decision_impl(
             progress_limit=progress_limit,
             native_execution=native_execution,
         )
+
+    from openfoam_agent.schemas.engineering import CompactRepairCasePlanAction
+    if isinstance(action, CompactRepairCasePlanAction):
+        action = RepairCasePlanAction.model_validate(action.model_dump(mode="python"))
 
     if isinstance(action, RepairCasePlanAction):
         return self._execute_prepare_repair_plan(
@@ -263,6 +278,21 @@ def execute_prepare_decision_impl(
             progress_phase, event, step=progress_step, limit=progress_limit, state=state
         )
         return False
+
+    support_key=_repair_support_request_key(state,action)
+    if support_key is not None:
+        seen=getattr(self,"_repair_support_requests",None)
+        if seen is None:
+            seen=set(); self._repair_support_requests=seen
+        if support_key in seen:
+            event=self._event(
+                llm_step,action.type,True,
+                "Duplicate repair support retrieval suppressed; reuse the evidence already observed for this failure generation.",
+            )
+            state.engineering_events.append(event)
+            self._emit_engineering_event(progress_phase,event,step=progress_step,limit=progress_limit,state=state)
+            return False
+        seen.add(support_key)
 
     if self._tool_action_count(state) >= self.policy.max_tool_actions:
         state.transition(

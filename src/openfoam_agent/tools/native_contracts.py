@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import PurePosixPath
+import re
 from typing import Literal
 
 Phase = Literal["authoring", "repair", "runtime_repair", "strategy_revision", "postprocess", "runtime", "restart"]
@@ -60,6 +62,31 @@ def native_tool_contract(command: str) -> NativeToolContract:
     return NativeToolContract(command, "unknown", permitted_phases=())
 
 
+_REGION_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
+
+
+def native_command_region(arguments: list[str] | tuple[str, ...]) -> str | None:
+    """Return one validated ``-region`` target from a native invocation.
+
+    Region scope is deterministic execution metadata, not a CFD design choice.
+    """
+    args = list(arguments)
+    positions = [i for i, value in enumerate(args) if value == "-region"]
+    if "-allRegions" in args and positions:
+        raise ValueError("Native command cannot combine -region with -allRegions.")
+    if len(positions) > 1:
+        raise ValueError("Native command may declare -region at most once.")
+    if not positions:
+        return None
+    index = positions[0]
+    if index + 1 >= len(args):
+        raise ValueError("Native command -region is missing its region name.")
+    region = args[index + 1]
+    if not _REGION_NAME.fullmatch(region):
+        raise ValueError(f"Unsafe native region name: {region!r}")
+    return region
+
+
 def required_dictionary(command: str, arguments: list[str] | tuple[str, ...]) -> str | None:
     args = list(arguments)
     for flag in ("-dict", "-dictFile"):
@@ -67,7 +94,13 @@ def required_dictionary(command: str, arguments: list[str] | tuple[str, ...]) ->
             index = args.index(flag)
             if index + 1 < len(args):
                 return args[index + 1]
-    return native_tool_contract(command).required_dictionary
+    required = native_tool_contract(command).required_dictionary
+    region = native_command_region(args)
+    if required and region:
+        parts = PurePosixPath(required).parts
+        if len(parts) == 2 and parts[0] == "system":
+            return f"system/{region}/{parts[1]}"
+    return required
 
 
 def command_permitted(command: str, phase: Phase) -> bool:

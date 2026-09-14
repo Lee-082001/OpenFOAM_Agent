@@ -15,6 +15,11 @@ _REPAIR_HISTORY_ARCHIVE_LIMIT = 24
 _REFERENCE_SUPPORT_ACTIONS = {"read_reference", "search_references", "search_capabilities", "gather_evidence"}
 
 
+def _failure_identity(record: dict[str, object]) -> str:
+    payload={key:record.get(key) for key in ("action_type","success","summary","output_excerpt")}
+    return json.dumps(payload,ensure_ascii=True,sort_keys=True,default=str)
+
+
 def ensure_episode(state: CFDState, failure: EngineeringEvent, implicated_files: list[str]) -> RepairEpisode:
     record = compact_event_for_model(failure, excerpt_chars=4200, summary_chars=1200)
     episode = state.repair_episode
@@ -31,7 +36,7 @@ def ensure_episode(state: CFDState, failure: EngineeringEvent, implicated_files:
     # Only a new failing validation/native event advances current_failure. Support
     # reads/searches can never overwrite the active diagnostic.
     previous = episode.current_failure
-    if previous != record:
+    if _failure_identity(previous) != _failure_identity(record):
         # The prior diagnostic remains root/history; actual repair deltas are
         # recorded separately by record_repair().
         episode.previous_repairs = episode.previous_repairs[-_REPAIR_HISTORY_ARCHIVE_LIMIT:]

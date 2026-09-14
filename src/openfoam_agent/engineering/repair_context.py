@@ -27,6 +27,45 @@ _EXPLICIT_ALTERNATIVES_RE = re.compile(
 )
 
 
+def _diagnostic_text(diagnostic: object) -> str:
+    if isinstance(diagnostic, dict):
+        return "\n".join(str(diagnostic.get(k) or "") for k in ("summary", "output_excerpt"))
+    return str(diagnostic or "")
+
+
+def native_supported_alternatives(diagnostic: object) -> list[str]:
+    """Return literal alternatives printed by OpenFOAM; Python does not choose one."""
+    text = _diagnostic_text(diagnostic)
+    if not _EXPLICIT_ALTERNATIVES_RE.search(text):
+        return []
+    match = re.search(r"(?is)\b(?:supported|valid|available|allowed)\b[^\n:]{0,120}[:\n](.+)", text)
+    if match is None:
+        return []
+    tail = re.split(r"(?im)^\s*(?:file:|from function|in file|foam exiting|-->\s*foam)", match.group(1), maxsplit=1)[0]
+    ignored={"supported","valid","available","allowed","types","type","models","model","options","option","entries","entry"}
+    out=[]
+    for token in re.findall(r"\b[A-Za-z][A-Za-z0-9_.:+-]{2,}\b", tail):
+        if token.casefold() in ignored or token in out: continue
+        out.append(token)
+        if len(out)>=16: break
+    return out
+
+
+def diagnostic_literal_candidates(diagnostic: object) -> list[str]:
+    """Return the invalid literal named by a native selection/keyword error."""
+    text=_diagnostic_text(diagnostic); out=[]
+    for pattern in (
+        r"(?im)\b(?:unknown|unsupported)\b[^\n]{0,160}?\b([A-Za-z][A-Za-z0-9_.:+-]{2,})\s*$",
+        r"(?im)\b(?:keyword|entry|model|type)\s+['\"]([^'\"\n]{2,120})['\"]",
+    ):
+        for m in re.finditer(pattern,text):
+            token=m.group(1).strip()
+            if token.casefold() in {"unknown","unsupported","invalid","type","model","entry","keyword"} or token in out: continue
+            out.append(token)
+            if len(out)>=8: return out
+    return out
+
+
 def _json_chars(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str))
 
@@ -147,25 +186,8 @@ def project_repair_episode(episode: object | None) -> dict[str, object] | None:
 
 
 def diagnostic_has_explicit_alternatives(diagnostic: object) -> bool:
-    """Detect native diagnostics that already enumerate acceptable alternatives.
-
-    This is a sufficiency signal only. It never chooses one of the alternatives.
-    """
-    if isinstance(diagnostic, dict):
-        text = "\n".join(
-            str(diagnostic.get(key) or "") for key in ("summary", "output_excerpt")
-        )
-    else:
-        text = str(diagnostic or "")
-    if not _EXPLICIT_ALTERNATIVES_RE.search(text):
-        return False
-    # Require at least one non-empty line after the supported/valid heading so a
-    # bare heading cannot accidentally suppress useful retrieval.
-    match = re.search(r"(?is)\b(?:supported|valid|available|allowed)\b[^\n:]{0,120}[:\n](.+)", text)
-    if match is None:
-        return False
-    candidates = [line.strip(" \\t-*,:;") for line in match.group(1).splitlines()]
-    return any(candidate and len(candidate) <= 160 for candidate in candidates[:12])
+    """True only when the native diagnostic literally enumerates usable alternatives."""
+    return bool(native_supported_alternatives(diagnostic))
 
 
 def direct_repair_evidence_is_sufficient(diagnostic: object, relevant_files: list[dict[str, object]]) -> bool:
@@ -276,6 +298,50 @@ def _bounded_files(
     return result
 
 
+def _build_direct_native_repair_prompt(
+    instruction: str,
+    payload: dict[str, object],
+    *,
+    max_chars: int,
+) -> tuple[PromptBuildResult, dict[str, object], dict[str, int]]:
+    projected = project_repair_episode(payload.get("repair_episode"))
+    if projected is None and isinstance(payload.get("repair_episode_projection"), dict):
+        projected = deepcopy(payload["repair_episode_projection"])
+    failure = (projected or {}).get("current_failure") or payload.get("validation_failure")
+    source_files = list(payload.get("relevant_case_files") or [])
+    baseline = payload.get("baseline_plan_core") if isinstance(payload.get("baseline_plan_core"), dict) else {}
+    compact_baseline = {k: deepcopy(baseline.get(k)) for k in ("execution","region_layouts","problem_interpretation","engineering_defaults") if baseline.get(k) not in (None,[],"")}
+    last_error: ContextBudgetError | None = None
+    for index,(file_limit,content_chars) in enumerate(((4,6000),(2,4000),(1,2400)),start=1):
+        capsule={
+            "state_mode":"native_supported_alternatives_direct_repair_v1",
+            "confirmed_facts":list(payload.get("confirmed_facts") or [])[:16],
+            "baseline_context":compact_baseline,
+            "validation_failure":failure,
+            "native_supported_alternatives":native_supported_alternatives(failure),
+            "diagnostic_literals":diagnostic_literal_candidates(failure),
+            "relevant_case_files":_bounded_files(source_files,max_files=file_limit,total_content_chars=content_chars),
+            "case_inventory":list(payload.get("case_inventory") or [])[:24],
+            "repair_contract":{
+                "mode":"file_delta_only",
+                "controller_selects_alternative":False,
+                "reference_retrieval_available":False,
+                "controller_revalidates_after_delta":True,
+            },
+        }
+        try:
+            built=build_bounded_json_prompt(instruction,capsule,max_chars=max_chars)
+            return built,capsule,{
+                "repairDirect":1,"repairPartitioned":1,"repairPartitionAttempts":index,
+                "repairFocusedFiles":len(capsule["relevant_case_files"]),
+                "repairFileContentChars":sum(len(str(x.get("content") or "")) for x in capsule["relevant_case_files"] if isinstance(x,dict)),
+                "repairSupportVisible":0,"repairHistoryVisible":0,"repairSupportChars":0,
+            }
+        except ContextBudgetError as exc:
+            last_error=exc
+    raise ContextBudgetError("Direct native-evidence repair could not fit the bounded model context; no case mutation was authorized.") from last_error
+
+
 def build_partitioned_validation_repair_prompt(
     instruction: str,
     payload: dict[str, object],
@@ -284,9 +350,16 @@ def build_partitioned_validation_repair_prompt(
 ) -> tuple[PromptBuildResult, dict[str, object], dict[str, int]]:
     """Build a budget-first committed-case repair capsule.
 
-    v4.8.2 bounds support/history before whole-prompt fitting. Reducing focused files
-    is now a last-mile partition, not the only mechanism preventing context growth.
+    Native diagnostics that already enumerate supported alternatives take the smallest
+    file-local path first; Python projects evidence but never selects the replacement.
     """
+    projected_probe = project_repair_episode(payload.get("repair_episode"))
+    if projected_probe is None and isinstance(payload.get("repair_episode_projection"), dict):
+        projected_probe = deepcopy(payload["repair_episode_projection"])
+    failure_probe = (projected_probe or {}).get("current_failure") or payload.get("validation_failure")
+    if diagnostic_has_explicit_alternatives(failure_probe):
+        return _build_direct_native_repair_prompt(instruction, payload, max_chars=max_chars)
+
     attempts = [
         (4, REPAIR_FILE_CONTENT_CHARS, 4),
         (3, 5500, 3),

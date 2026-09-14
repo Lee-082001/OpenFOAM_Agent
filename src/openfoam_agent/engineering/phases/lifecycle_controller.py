@@ -59,14 +59,28 @@ def prepare(self, state: CFDState, *, native_execution: bool = True) -> CFDState
         while step <= current_limit:
             state.engineering_next_step = step + 1
             self.checkpoint(state, "before-model-turn")
-            turn = self._generate_turn(
-                state,
-                step=step,
-                local_step=step,
-                current_step_limit=current_limit,
-                phase="prepare",
-                native_execution=native_execution,
-            )
+            from openfoam_agent.llm.context import ContextBudgetError
+            try:
+                turn = self._generate_turn(
+                    state,
+                    step=step,
+                    local_step=step,
+                    current_step_limit=current_limit,
+                    phase="prepare",
+                    native_execution=native_execution,
+                )
+            except ContextBudgetError as exc:
+                event = self._event(
+                    step,"model_context",False,
+                    "Engineering model context exceeded the bounded contract; no case mutation was authorized.",
+                    str(exc),validation_status="inconclusive",failure_category="infra",
+                )
+                state.engineering_events.append(event)
+                self._record_unresolved_failure(state,event)
+                self._emit_engineering_event("engineering",event,step=step,limit=current_limit,state=state)
+                state.transition(State.ENGINEERING_BLOCKED,"Engineering context budget was exhausted while preserving the current native failure and authored case.")
+                self.checkpoint(state,"model-context-blocked")
+                return state
             terminal = self._execute_prepare_decision(
                 state,
                 turn.action,

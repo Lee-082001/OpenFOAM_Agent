@@ -1771,6 +1771,23 @@ class CFDEngineeringAgent:
             ):
                 candidates.append(path)
 
+        # Native selection-table failures can name an invalid value without printing
+        # the authored case path. Bind the literal back to existing text files only;
+        # this identifies implementation location and never chooses the replacement.
+        from openfoam_agent.engineering.repair_context import diagnostic_literal_candidates
+        literals = diagnostic_literal_candidates(text)
+        if literals:
+            binary_suffixes = {".stl", ".obj", ".off", ".vtk", ".vtp", ".emesh", ".gz"}
+            for path, seal in seals.items():
+                if Path(path).suffix.casefold() in binary_suffixes or seal.size_bytes > 512_000:
+                    continue
+                try:
+                    content = self.workspace.read_text(path)
+                except (OSError, WorkspaceSafetyError, UnicodeDecodeError):
+                    continue
+                if any(re.search(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", content) for token in literals):
+                    candidates.append(path)
+
         # If the diagnostic names a confirmed implementation binding, include that
         # artifact even when the native text did not print a path.
         if plan is not None:

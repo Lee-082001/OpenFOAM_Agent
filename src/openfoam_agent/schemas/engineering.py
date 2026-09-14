@@ -1528,6 +1528,34 @@ class RepairCasePlanAction(_EngineeringModel):
         return self
 
 
+class CompactRepairCasePlanAction(_EngineeringModel):
+    """Small delta wire contract used by prepare-time failure repair.
+
+    Python retains the complete EngineeringPlan. The Agent may still read/search when
+    native evidence is insufficient, but successful repair responses carry only file deltas.
+    """
+
+    type: Literal["repair_case_plan"]
+    diagnosis: str = Field(min_length=1, max_length=800)
+    patches: list[CaseFilePatch] = Field(default_factory=list, max_length=16)
+    replacement_files: list[CaseBundleFile] = Field(default_factory=list, max_length=8)
+    typed_dictionaries: list[TypedFoamDictionaryFile] = Field(default_factory=list, max_length=8)
+    validate_pre_solve: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_compact_delta(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        return _normalize_delta_authoring_payload(value)
+
+    @model_validator(mode="after")
+    def validate_compact_delta(self) -> Self:
+        if any(item.path == "system/blockMeshDict" for item in self.typed_dictionaries):
+            raise ValueError("Compact repair cannot replace structured blockMesh.")
+        return self
+
+
 class RuntimeCaseRepairAction(_EngineeringModel):
     """Runtime-only delta repair with multiple ordered edits per file.
 
@@ -1835,7 +1863,7 @@ class BlockMeshRepairTurn(_EngineeringModel):
             {"repair_block_mesh": BlockMeshRepairAction, "block": BlockAction},
         )
 
-RepairAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | RepairCasePlanAction | BlockAction
+RepairAction = SearchReferencesAction | ReadReferenceAction | ReadCaseFileAction | CompactRepairCasePlanAction | BlockAction
 class RepairTurn(_EngineeringModel):
     action: RepairAction
 
@@ -1848,7 +1876,7 @@ class RepairTurn(_EngineeringModel):
                 "search_references": SearchReferencesAction,
                 "read_reference": ReadReferenceAction,
                 "read_case_file": ReadCaseFileAction,
-                "repair_case_plan": RepairCasePlanAction,
+                "repair_case_plan": CompactRepairCasePlanAction,
                 "block": BlockAction,
             },
         )
