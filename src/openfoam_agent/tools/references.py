@@ -172,12 +172,13 @@ def _safe_files(root):
 
 
 def normalize_query(query):
+    """Unicode-normalize literal query tokens without injecting CFD semantics.
+
+    Translation/domain expansion belongs to the Engineering Agent. The reference
+    index is a deterministic search primitive and must not turn Korean/English terms
+    into solver/tool choices behind the model.
+    """
     normalized = unicodedata.normalize("NFKC", query).casefold()
-    aliases = {"\uaca9\uc790": "mesh blockMesh snappyHexMesh", "\uc5f4\uc804\ub2ec": "heat transfer thermo",
-        "\uc628\ub3c4": "temperature", "\uc555\ub825": "pressure", "\uacbd\uacc4\uc870\uac74": "boundary conditions",
-        "\ud6c4\ucc98\ub9ac": "functionObject postprocessing", "\uc720\ub7c9": "flowRate", "\ub2e4\uc911\uc601\uc5ed": "multi region",
-        "\uc5f4\uc6d0": "heatSource", "\uc810\uc131": "viscosity", "\ub09c\ub958": "turbulence"}
-    for source, target in aliases.items():
-        if source in normalized:
-            normalized += " " + target.casefold()
-    return list(dict.fromkeys(token for token in re.findall(r"[\w.+-]+",normalized,re.UNICODE) if token))
+    return list(dict.fromkeys(
+        token for token in re.findall(r"[\w.+-]+", normalized, re.UNICODE) if token
+    ))

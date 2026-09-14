@@ -84,6 +84,15 @@ def canonical_engineering_evidence_id(kind: str, reference: str) -> str:
     return f"ev_{prefix}_{digest}"
 
 
+def canonical_engineering_observation_sha256(kind: str, reference: str, summary: str) -> str:
+    """Bind a compact evidence descriptor to the exact observation Python issued."""
+    payload = json.dumps(
+        {"kind": kind, "reference": reference, "summary": summary},
+        ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class EngineeringEvidence(_EngineeringModel):
     """An LLM-selected pointer to evidence that Python already observed.
 
@@ -97,12 +106,27 @@ class EngineeringEvidence(_EngineeringModel):
 
 
 class ObservedEngineeringEvidence(_EngineeringModel):
-    """Deterministically issued compact evidence descriptor."""
+    """Deterministically issued compact evidence descriptor.
+
+    ``evidence_id`` is the stable source identity. ``observation_sha256`` additionally
+    binds the exact bounded descriptor observed in this run, preventing source identity
+    from being mistaken for immutable observation content.
+    """
 
     evidence_id: str = Field(pattern=r"^ev_(?:cap|ref)_[0-9a-f]{20}$")
     kind: Literal["capability", "openfoam_reference"]
     reference: str = Field(min_length=1, max_length=1000)
     summary: str = Field(min_length=1, max_length=1200)
+    observation_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def bind_observation(self) -> Self:
+        expected = canonical_engineering_observation_sha256(self.kind, self.reference, self.summary)
+        if self.observation_sha256 is None:
+            self.observation_sha256 = expected
+        elif self.observation_sha256 != expected:
+            raise ValueError("Observed engineering evidence hash does not match its descriptor.")
+        return self
 
 
 class EngineeringEvidenceRecord(_EngineeringModel):
@@ -272,7 +296,11 @@ class NumericRelationAssertion(_EngineeringModel):
 
 
 class ConfirmedFactBinding(_EngineeringModel):
-    """Audit mapping from a confirmed fact to its claimed implementation.
+    """Optional truthful implementation assertion for one confirmed fact.
+
+    Fact identity closure lives in ``EngineeringPlan.confirmed_fact_ids``. This object
+    exists only when there is a real plan/artifact mapping to assert; Python must not
+    fabricate one merely to satisfy completeness.
 
     The wire format deliberately separates case-file paths from plan fields so the
     model does not need to memorize a string-prefix mini-protocol such as
@@ -353,47 +381,106 @@ class ConfirmedFactBinding(_EngineeringModel):
 
 
 class RegionSolverAssignment(_EngineeringModel):
+    """Legacy persisted region solver assignment; new Agent output uses ExecutionScope."""
+
     region: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$", max_length=120)
     solver_module: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_]*$", max_length=120)
     provider_id: str = Field(min_length=1, max_length=240)
 
 
-class OpenFOAMExecutionSpec(_EngineeringModel):
-    """Agent-selected native execution topology for Foundation v13/v14.
+class ExecutionScope(_EngineeringModel):
+    """One Agent-declared case/execution scope.
 
-    Python does not choose the driver or modules. It verifies that the selected
-    executable is present in the sourced trusted installation and that the case
-    declares the matching solver/regionSolvers semantics.
+    ``name=None`` is the root case namespace. A non-empty name denotes an OpenFOAM
+    named region. Controller logic treats both identically through a scope key and
+    never classifies the case as single-region or multi-region.
+    """
+
+    name: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$", max_length=120)
+    solver_module: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]*$", max_length=120)
+    solver_provider_id: str | None = Field(default=None, max_length=240)
+
+    @model_validator(mode="after")
+    def validate_solver_pair(self) -> Self:
+        if bool(self.solver_module) != bool(self.solver_provider_id):
+            raise ValueError("Execution scope solver_module and solver_provider_id must be supplied together.")
+        return self
+
+
+class OpenFOAMExecutionSpec(_EngineeringModel):
+    """Agent-selected execution driver plus normalized execution scopes.
+
+    The model chooses the driver and scope topology. Python validates that selection
+    against a versioned execution-provider contract; it does not infer a driver from
+    the number or names of scopes.
     """
 
     driver: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.+-]*$", max_length=160)
     driver_provider_id: str = Field(min_length=1, max_length=240)
-    solver_module: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]*$", max_length=120)
-    solver_provider_id: str | None = Field(default=None, max_length=240)
-    regions: list[RegionSolverAssignment] = Field(default_factory=list, max_length=64)
+    scopes: list[ExecutionScope] = Field(default_factory=list, min_length=1, max_length=64)
+
+    # Persisted pre-scope wire format. Hidden from new structured-output schemas and
+    # deterministically mirrored from scopes after validation.
+    solver_module: SkipJsonSchema[str | None] = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]*$", max_length=120)
+    solver_provider_id: SkipJsonSchema[str | None] = Field(default=None, max_length=240)
+    regions: SkipJsonSchema[list[RegionSolverAssignment]] = Field(default_factory=list, max_length=64)
+
     arguments: list[str] = Field(default_factory=list, max_length=24)
     parallel: ParallelExecution = Field(default_factory=ParallelExecution)
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_topology(cls, value: Any):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if data.get("scopes"):
+            return data
+        regions = list(data.get("regions") or [])
+        if regions:
+            data["scopes"] = [
+                {
+                    "name": (item.region if isinstance(item, RegionSolverAssignment) else item.get("region")),
+                    "solver_module": (item.solver_module if isinstance(item, RegionSolverAssignment) else item.get("solver_module")),
+                    "solver_provider_id": (item.provider_id if isinstance(item, RegionSolverAssignment) else item.get("provider_id")),
+                }
+                for item in regions
+            ]
+            return data
+        solver = data.get("solver_module")
+        provider = data.get("solver_provider_id")
+        data["scopes"] = [{"name": None, "solver_module": solver, "solver_provider_id": provider}]
+        return data
+
     @model_validator(mode="after")
     def validate_execution_topology(self) -> Self:
-        if self.driver == "foamRun":
-            if not self.solver_module or not self.solver_provider_id:
-                raise ValueError("foamRun execution requires solver_module and solver_provider_id.")
-            if self.regions:
-                raise ValueError("foamRun execution cannot declare region solver assignments.")
-        elif self.driver == "foamMultiRun":
-            if self.solver_module is not None or self.solver_provider_id is not None:
-                raise ValueError("foamMultiRun uses region solver assignments, not one solver_module.")
-            if not self.regions:
-                raise ValueError("foamMultiRun execution requires at least one region solver assignment.")
-        elif self.regions or self.solver_module is not None or self.solver_provider_id is not None:
-            raise ValueError("Direct solver applications cannot declare modular solver fields.")
-        region_names = [item.region for item in self.regions]
-        if len(region_names) != len(set(region_names)):
-            raise ValueError("Execution spec contains duplicate region names.")
+        keys = ["root" if item.name is None else f"region:{item.name}" for item in self.scopes]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Execution spec contains duplicate scope identities.")
         for arg in self.arguments:
             if not arg or len(arg) > 1000 or "\x00" in arg or "\n" in arg or "\r" in arg:
                 raise ValueError("Execution arguments must be bounded single-line strings.")
+
+        # Compatibility mirrors only; scopes remain the sole authority.
+        if len(self.scopes) == 1 and self.scopes[0].name is None:
+            self.solver_module = self.scopes[0].solver_module
+            self.solver_provider_id = self.scopes[0].solver_provider_id
+            self.regions = []
+        elif all(item.name is not None and item.solver_module and item.solver_provider_id for item in self.scopes):
+            self.solver_module = None
+            self.solver_provider_id = None
+            self.regions = [
+                RegionSolverAssignment(
+                    region=str(item.name),
+                    solver_module=str(item.solver_module),
+                    provider_id=str(item.solver_provider_id),
+                )
+                for item in self.scopes
+            ]
+        else:
+            self.solver_module = None
+            self.solver_provider_id = None
+            self.regions = []
         return self
 
 
@@ -495,24 +582,6 @@ class EngineeringPlan(_EngineeringModel):
         for key in ("confirmed_fact_ids", "required_case_files"):
             raw = data.get(key) or []
             data[key] = list(dict.fromkeys(str(x) for x in raw if str(x).strip()))
-        # Binding file references are redundant plan metadata. Promote safe references
-        # into required_case_files rather than rejecting the plan for an omission.
-        required = list(data.get("required_case_files") or [])
-        for binding in data.get("confirmed_fact_bindings") or []:
-            if not isinstance(binding, dict):
-                continue
-            refs = list(binding.get("case_files") or [])
-            refs += [a.get("path") for a in (binding.get("case_assertions") or []) if isinstance(a, dict)]
-            rel = binding.get("numeric_relation") or {}
-            if isinstance(rel, dict):
-                for side in ("numerator", "denominator"):
-                    refs += [t.get("path") for t in (rel.get(side) or []) if isinstance(t, dict)]
-            for ref in refs:
-                text = str(ref or "")
-                if re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", text) and ".." not in text and text not in required:
-                    required.append(text)
-        data["required_case_files"] = required
-
         conflicts = [str(x) for x in (data.get("plan_conflicts") or []) if str(x).strip()]
         for key, ident in (("confirmed_fact_bindings", "fact_id"), ("evidence", "evidence_id"), ("engineering_defaults", "parameter")):
             raw = data.get(key) or []
@@ -555,11 +624,24 @@ class EngineeringPlan(_EngineeringModel):
     @model_validator(mode="after")
     def validate_unique_audit_fields(self) -> Self:
         binding_ids = [item.fact_id for item in self.confirmed_fact_bindings]
-        if set(binding_ids) != set(self.confirmed_fact_ids):
-            raise ValueError("Engineering plan confirmed fact bindings must exactly cover confirmed_fact_ids.")
+        if len(binding_ids) != len(set(binding_ids)):
+            raise ValueError("Engineering plan contains duplicate confirmed fact implementation assertions.")
+        unknown = sorted(set(binding_ids) - set(self.confirmed_fact_ids))
+        if unknown:
+            raise ValueError(f"Engineering plan implementation assertions reference unknown confirmed facts: {unknown}")
+        required = set(self.required_case_files)
         for path in self.required_case_files:
             if not re.fullmatch(r"(?:0|constant|system)/[A-Za-z0-9_.\/-]+", path) or ".." in path:
                 raise ValueError(f"Unsafe required case file path: {path}")
+        for binding in self.confirmed_fact_bindings:
+            refs = set(binding.case_files) | {item.path for item in binding.case_assertions}
+            if binding.numeric_relation is not None:
+                refs.update(item.path for item in [*binding.numeric_relation.numerator, *binding.numeric_relation.denominator])
+            undeclared = sorted(refs - required)
+            if undeclared:
+                raise ValueError(
+                    f"Confirmed fact implementation assertion {binding.fact_id} references files outside required_case_files: {undeclared}"
+                )
         return self
 
     def digest(self) -> str:

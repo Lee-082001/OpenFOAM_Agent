@@ -142,8 +142,12 @@ def classify_native_validation(
             f"{command} returned non-zero without proving the case invalid."
         )
 
+    # A non-zero exit code alone is not semantic evidence that the authored CFD
+    # case is invalid. Preserve it as an inconclusive tool observation so callers
+    # stop/review non-validation consumers without launching a blind CFD repair.
     return NativeValidationAssessment(
-        "fail", "case", diagnostic, f"{command} consumer returned non-zero without an infrastructure termination."
+        "inconclusive", "tool", diagnostic,
+        f"{command} returned non-zero without an explicit OpenFOAM case-level fatal diagnostic; validation is inconclusive."
     )
 
 def diagnose_openfoam_failure(

@@ -9,6 +9,24 @@ from openfoam_agent.contracts.models import PhysicalQuantity
 
 
 FactSource = Literal["user", "derived"]
+class UserEvidenceLocator(BaseModel):
+    """Controller-issued immutable locator for one exact user-evidence span."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_kind: Literal["conversation_turn", "geometry_file_name", "additional_file_name"]
+    source_index: int = Field(ge=0)
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_span(self) -> Self:
+        if self.end_char <= self.start_char:
+            raise ValueError("User evidence locator requires a non-empty forward span.")
+        return self
+
+
 FactCategory = Literal[
     "context",
     "classification",
@@ -41,6 +59,7 @@ class IntakeFact(BaseModel):
     quantity: PhysicalQuantity | None = None
     source: FactSource
     evidence: str | None = None
+    evidence_locator: UserEvidenceLocator | None = None
     reason: str | None = None
     depends_on: list[str] = Field(default_factory=list)
 
@@ -48,6 +67,8 @@ class IntakeFact(BaseModel):
     def validate_provenance(self) -> Self:
         if self.source == "user" and not self.evidence:
             raise ValueError("user fact requires evidence.")
+        if self.source == "derived" and self.evidence_locator is not None:
+            raise ValueError("Derived facts cannot retain a user evidence locator.")
         if self.source == "derived" and not self.reason:
             raise ValueError("Derived fact requires a reason.")
         if self.source == "user" and self.depends_on:
@@ -139,6 +160,8 @@ class CFDIntakeSpec(BaseModel):
         for fact in data.get("facts", []):
             if fact.get("quantity") is None:
                 fact.pop("quantity", None)
+            if fact.get("evidence_locator") is None:
+                fact.pop("evidence_locator", None)
         # v2.15 adds an explicit semantic-contract version.  Preserve the exact
         # pre-v2.15 digest for legacy/default v1 intakes so existing confirmed
         # states remain rehydratable after upgrade.

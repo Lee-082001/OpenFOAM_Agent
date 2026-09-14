@@ -159,7 +159,26 @@ class CFDWorkflow:
                     )
                 else:
                     note = f"{type(exc).__name__} during {failed_stage.value}: {str(exc) or repr(exc)}"
-                state.transition(State.FAILED, note)
+                # A malformed/incomplete Codex JSONL stream is model-transport
+                # infrastructure, not evidence that the CFD case is invalid. The
+                # Codex adapter already performed its bounded fresh-process retry.
+                # Preserve the current case/checkpoint and primary CFD failure.
+                from openfoam_agent.llm.openai_client import StructuredOutputError
+                from openfoam_agent.llm.codex_transport import CodexTransportParseError
+                transport_parse_failure = (
+                    isinstance(exc, StructuredOutputError)
+                    and isinstance(exc.__cause__, CodexTransportParseError)
+                )
+                if transport_parse_failure and failed_stage in {
+                    State.ENGINEERING, State.SIMULATION, State.RUNTIME_REPAIR
+                }:
+                    state.transition(
+                        State.ENGINEERING_BLOCKED,
+                        "LLM structured transport failed after bounded retry; "
+                        "case/checkpoint state was preserved. " + note,
+                    )
+                else:
+                    state.transition(State.FAILED, note)
                 return state
         state.transition(State.FAILED, "Workflow max_steps exceeded.")
         return state

@@ -57,19 +57,15 @@ def implementation_evidence_pack(state, plan, *, max_chars: int | None = 16000):
     coverage = []
     for path in plan.required_case_files:
         ids = bindings.get(path, [])
-        if not ids:
-            # Conservative inferred projection; a name match is explicitly not a
-            # certified syntax/compatibility claim.
-            basename = PurePosixPath(path).name
-            ids = [eid for eid, item in available.items()
-                   if basename in item["source"] or basename in item["content"]]
+        # Evidence is explicit-only. Filename/content-name similarity is search
+        # relevance, not implementation provenance.
         missing = [eid for eid in ids if eid not in available]
         if missing:
             raise ValueError(f"Implementation evidence for {path} was not actually observed: {missing}")
         for eid in ids:
             selected[eid] = available[eid]
         coverage.append({"path": path, "evidence_ids": ids,
-                         "status": "explicit" if bindings.get(path) else "inferred" if ids else "missing"})
+                         "status": "explicit" if bindings.get(path) else "missing"})
     # Keep explicitly referenced implementation evidence even for auxiliary files.
     for path, ids in bindings.items():
         if path not in plan.required_case_files:
@@ -89,11 +85,10 @@ def evidence_coverage_failures(plan, state):
 
 
 def require_authoring_evidence(state, plan, paths, *, evidence_ids=()):
-    """The one mutation gate for legacy, staged, repair and primitive actions.
+    """Optional documentary-provenance audit, not a production mutation gate.
 
-    Importing user-owned binary assets is a separate operator-authorized path.
-    There is deliberately no policy switch which permits an LLM write without
-    an observed syntax excerpt. Explicit references are not native validation.
+    Runtime authoring authorization is owned by workspace safety, deterministic
+    serializers/parsers and native consumers.
     """
     if state is None:
         raise ValueError("Authoring requires durable observed syntax evidence, not a stateless write.")

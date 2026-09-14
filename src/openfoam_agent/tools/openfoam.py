@@ -12,6 +12,8 @@ from typing import Callable
 from openfoam_agent.schemas.engineering import OpenFOAMExecutionSpec
 from openfoam_agent.schemas.common import ToolResult
 from openfoam_agent.tools.execution_policy import ValidationExecutionContext
+from openfoam_agent.tools.native_contracts import native_command_region
+from openfoam_agent.tools.execution_contracts import runtime_arguments
 
 from .safe_runner import SafeRunner
 
@@ -101,26 +103,29 @@ class OpenFOAMTools:
         ]
 
     @staticmethod
-    def mesh_command_precondition(command: str, case_dir: str | Path) -> tuple[bool, str]:
-        """Check narrow executable prerequisites before consuming a native command.
-
-        This does not select a meshing strategy. It only enforces a tool contract that
-        the executable itself requires.
-        """
+    def mesh_command_precondition(
+        command: str,
+        case_dir: str | Path,
+        arguments: list[str] | None = None,
+    ) -> tuple[bool, str]:
+        """Check narrow executable prerequisites in the invocation's exact region scope."""
         if command != "snappyHexMesh":
             return True, ""
+        region = native_command_region(arguments or [])
         case = Path(case_dir).resolve()
-        boundary = case / "constant" / "polyMesh" / "boundary"
+        mesh_dir = case / "constant" / region / "polyMesh" if region else case / "constant" / "polyMesh"
+        boundary = mesh_dir / "boundary"
+        relative = boundary.relative_to(case).as_posix()
         if not boundary.exists():
-            return False, "snappyHexMesh requires an existing base polyMesh before snapping."
+            return False, f"snappyHexMesh requires an existing base polyMesh before snapping: {relative}"
         try:
             text = boundary.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            return False, f"Could not inspect snappyHexMesh base-mesh boundary file: {exc}"
+            return False, f"Could not inspect snappyHexMesh base-mesh boundary file {relative}: {exc}"
         if re.search(r"\btype\s+empty\s*;", text):
             return False, (
                 "snappyHexMesh requires a fully 3D base mesh during snapping/mesh relaxation, "
-                "but constant/polyMesh/boundary contains an empty patch."
+                f"but {relative} contains an empty patch."
             )
         return True, ""
 
@@ -143,6 +148,9 @@ class OpenFOAMTools:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+-]*", command):
             raise ValueError(f"Unsafe OpenFOAM command identifier: {command!r}")
         args = list(arguments or [])
+        # Validate deterministic scope metadata even for tools whose contract has no
+        # required dictionary; this rejects malformed/ambiguous region arguments.
+        native_command_region(args)
         reserved = {"-case", "-root", "-hostRoots", "-roots"}
         if any(arg in reserved for arg in args):
             raise ValueError("Agent native commands cannot override Python-owned case/root paths.")
@@ -163,10 +171,7 @@ class OpenFOAMTools:
         timeout: int = 3600,
         output_callback: Callable[[str], None] | None = None,
     ):
-        args = list(execution.arguments)
-        if execution.driver == "foamRun":
-            assert execution.solver_module is not None
-            args = ["-solver", execution.solver_module, *args]
+        args = runtime_arguments(execution)
         # MPI is a Python-owned launch contract, never an arbitrary LLM command.
         if execution.parallel.mode == "local_mpi":
             return self.runner.run_mpi(
@@ -374,11 +379,10 @@ class OpenFOAMTools:
                     shutil.copytree(source, shadow / top)
             (shadow / "system" / "controlDict").write_text(text, encoding="utf-8")
 
-            args = list(execution.arguments)
-            if execution.driver == "foamRun":
-                if not execution.solver_module:
-                    return None, "foamRun zero-step validation requires a selected solver module."
-                args = ["-solver", execution.solver_module, *args]
+            try:
+                args = runtime_arguments(execution)
+            except ValueError as exc:
+                return None, f"Zero-step execution contract is invalid: {exc}"
             command = [execution.driver, *args]
             context = ValidationExecutionContext(
                 expected_command=command,

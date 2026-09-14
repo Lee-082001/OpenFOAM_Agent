@@ -60,4 +60,9 @@ def provider_is_sufficient(provider, *, executable: bool) -> bool:
     if provider is None or not bool(getattr(provider, "verified", False)):
         return False
     level = str(getattr(provider, "verification_level", "unverified"))
-    return level in (_EXECUTABLE_LEVELS if executable else _COMPONENT_LEVELS)
+    if level not in (_EXECUTABLE_LEVELS if executable else _COMPONENT_LEVELS):
+        return False
+    metadata = dict(getattr(provider, "metadata", {}) or {})
+    # Presence/registration is availability evidence only. Design-stage semantic
+    # suitability requires documented/source authority carried by the provider.
+    return bool(metadata.get("semantic_authority_documented_graph"))

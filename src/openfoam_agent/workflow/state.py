@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from openfoam_agent.contracts.execution import ExecutionApproval
 from openfoam_agent.contracts.models import ResourceLimits, RuntimeContract
 
@@ -40,6 +40,11 @@ class CFDState(BaseModel):
     engineering_round_start_index: int = Field(default=0, ge=0)
     case_seal: CaseSeal | None = None
     case_dir: str | None = None
+    # v5 canonical mesh-evidence authority: one map keyed by execution scope.
+    mesh_evidence_by_scope: dict[str, MeshEvidence] = Field(default_factory=dict)
+    mesh_manifest_by_scope: dict[str, str] = Field(default_factory=dict)
+
+    # Legacy checkpoint mirrors. Controller logic must not use these as authority.
     mesh_evidence: MeshEvidence | None = None
 
     solve_approved: bool = False
@@ -54,6 +59,7 @@ class CFDState(BaseModel):
     engineering_checkpoint: dict = Field(default_factory=dict)
     primary_failure: dict | None = None
     secondary_failures: list[dict] = Field(default_factory=list)
+    resolved_failures: list[dict] = Field(default_factory=list)
     repair_episode: RepairEpisode | None = None
     semantic_assurance_warnings: list[str] = Field(default_factory=list)
     engineering_next_step: int = Field(default=1, ge=1)
@@ -81,6 +87,25 @@ class CFDState(BaseModel):
 
     current_state: State = State.INIT
     history: list[dict[str, str]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize_legacy_mesh_evidence(self):
+        # Legacy persisted states may contain root or per-region mirrors. Import them
+        # once into the scope-keyed authority, preferring explicit per-region evidence.
+        if not self.mesh_evidence_by_scope:
+            if self.region_mesh_evidence:
+                self.mesh_evidence_by_scope = {
+                    ("root" if not name else f"region:{name}"): value
+                    for name, value in self.region_mesh_evidence.items()
+                }
+            elif self.mesh_evidence is not None:
+                self.mesh_evidence_by_scope = {"root": self.mesh_evidence}
+        if not self.mesh_manifest_by_scope and self.region_mesh_manifests:
+            self.mesh_manifest_by_scope = {
+                ("root" if not name else f"region:{name}"): value
+                for name, value in self.region_mesh_manifests.items()
+            }
+        return self
 
     def transition(self, new_state: State, note: str = "") -> None:
         self.history.append(

@@ -20,7 +20,7 @@ from .openai_client import (
     validate_structured_output_schema,
 )
 from .structured_schema import compile_transport_schema
-from .codex_transport import authentication_kind, inspect_events
+from .codex_transport import CodexTransportParseError, authentication_kind, inspect_events
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -28,6 +28,7 @@ DEFAULT_CODEX_MODEL = "codex-default"
 DEFAULT_CODEX_TIMEOUT_SECONDS = 900
 DEFAULT_CODEX_WAIT_HEARTBEAT_SECONDS = 15.0
 DEFAULT_CODEX_STRUCTURED_REPAIRS = 1
+DEFAULT_CODEX_TRANSPORT_RETRIES = 1
 
 # `--backend codex` is specifically the ChatGPT/Codex-login path. Strip API-key
 # routing variables so an exported API credential cannot silently turn this backend
@@ -184,6 +185,7 @@ class CodexLLM:
         binary: str = "codex",
         timeout_seconds: int = DEFAULT_CODEX_TIMEOUT_SECONDS,
         structured_repair_attempts: int = DEFAULT_CODEX_STRUCTURED_REPAIRS,
+        transport_retries: int = DEFAULT_CODEX_TRANSPORT_RETRIES,
         status: CodexCLIStatus | None = None,
         wait_callback: Callable[[float, float], None] | None = None,
         wait_heartbeat_seconds: float = DEFAULT_CODEX_WAIT_HEARTBEAT_SECONDS,
@@ -193,6 +195,8 @@ class CodexLLM:
             raise LLMConfigurationError("Codex timeout_seconds must be positive.")
         if structured_repair_attempts < 0:
             raise LLMConfigurationError("Codex structured_repair_attempts must be non-negative.")
+        if not 0 <= transport_retries <= 3:
+            raise LLMConfigurationError("Codex transport_retries must be between 0 and 3.")
         if wait_heartbeat_seconds <= 0:
             raise LLMConfigurationError("Codex wait_heartbeat_seconds must be positive.")
         self.cli_model = normalized or None
@@ -201,6 +205,7 @@ class CodexLLM:
         self.max_output_tokens = None
         self.timeout_seconds = timeout_seconds
         self.structured_repair_attempts = structured_repair_attempts
+        self.transport_retries = transport_retries
         self.status = status or check_codex_cli(binary=binary)
         if authentication_kind(self.status.login_status) != "chatgpt" or not self.status.supports_ignore_user_config:
             raise LLMConfigurationError("Codex requires ChatGPT authentication and --ignore-user-config support.")
@@ -237,6 +242,7 @@ class CodexLLM:
         self.last_usage = None
         self.usage_attempts = []
         self.last_transport = None
+        self.last_transport_retry_count = 0
 
         for attempt in range(attempts):
             current_prompt = base_prompt
@@ -250,10 +256,20 @@ class CodexLLM:
                     + "\nPREVIOUS FINAL OUTPUT:\n"
                     + previous[:12000]
                 )
-            try:
-                text = self._run_once(schema, current_prompt)
-            except StructuredOutputError:
-                raise
+            text = None
+            for transport_attempt in range(self.transport_retries + 1):
+                try:
+                    text = self._run_once(schema, current_prompt)
+                    break
+                except StructuredOutputError as exc:
+                    retryable_transport = isinstance(exc.__cause__, CodexTransportParseError)
+                    if retryable_transport and transport_attempt < self.transport_retries:
+                        # Fresh codex exec is ephemeral, so retrying the identical prompt
+                        # cannot inherit a corrupted JSONL stream or hidden model state.
+                        self.last_transport_retry_count += 1
+                        continue
+                    raise
+            assert text is not None
             previous = text
             try:
                 return schema.model_validate_json(text)

@@ -6,15 +6,15 @@ from typing import Iterable
 
 from openfoam_agent.tools.native_contracts import native_tool_contract, required_dictionary, command_permitted
 from openfoam_agent.schemas.engineering import NativeOpenFOAMCommand
+from openfoam_agent.contracts.execution_scopes import (
+    affected_mesh_scope_keys,
+    auto_consumers_for_delta,
+    final_mesh_validation_commands,
+)
 from openfoam_agent.tools.foam_file import validate_foam_file_header
 
 _NON_DICTIONARY_EXTENSIONS = {".stl", ".obj", ".off", ".vtk", ".vtp", ".csv", ".dat", ".emesh", ".gz"}
 _SURFACE_EXTENSIONS = {".stl", ".obj", ".off", ".vtk", ".vtp"}
-_MESH_AFFECTING_EXACT = {
-    "system/blockMeshDict", "system/snappyHexMeshDict", "system/surfaceFeatureExtractDict",
-    "system/createPatchDict", "system/topoSetDict", "system/setFieldsDict", "system/decomposeParDict",
-}
-_MESH_AFFECTING_PREFIXES = ("constant/triSurface/", "constant/polyMesh/")
 
 
 @dataclass(frozen=True)
@@ -54,9 +54,6 @@ def _dedupe_native(items: Iterable[NativeOpenFOAMCommand]) -> list[NativeOpenFOA
         out.append(item)
     return out
 
-
-def _mesh_affecting(path: str) -> bool:
-    return path in _MESH_AFFECTING_EXACT or path.startswith(_MESH_AFFECTING_PREFIXES)
 
 
 def compile_case_delta_graph(
@@ -202,19 +199,30 @@ def compile_case_delta_graph(
             continue
         strategy.append(item)
 
-    commands = [item.command for item in strategy]
-    if "system/blockMeshDict" in changed_paths and "blockMesh" not in commands:
-        strategy.insert(0, NativeOpenFOAMCommand(command="blockMesh", role="mesh"))
-        commands.insert(0, "blockMesh")
-    if "system/snappyHexMeshDict" in changed_paths and "snappyHexMesh" not in commands:
-        index = commands.index("blockMesh") + 1 if "blockMesh" in commands else len(strategy)
-        strategy.insert(index, NativeOpenFOAMCommand(command="snappyHexMesh", arguments=["-overwrite"], role="mesh"))
+    changed_mesh_inputs = set(changed_paths) | set(drops)
+    try:
+        inferred = auto_consumers_for_delta(plan, effective_set, changed_mesh_inputs)
+    except ValueError as exc:
+        failures.append(f"Could not compile scope-bound delta consumers: {exc}")
+        inferred = []
+    strategy = _dedupe_native([*inferred, *strategy])
 
-    mesh_changed = any(_mesh_affecting(path) for path in changed_paths | set(drops))
-    mesh_changed = mesh_changed or any(native_tool_contract(item.command).effect in {"mesh", "decomposition", "initialization"} for item in strategy)
-    if mesh_changed:
-        strategy = [item for item in strategy if item.command != "checkMesh"]
-        strategy.append(NativeOpenFOAMCommand(command="checkMesh", role="mesh_validation"))
+    try:
+        affected_scopes = affected_mesh_scope_keys(
+            workspace, plan, changed_mesh_inputs, strategy
+        )
+    except ValueError as exc:
+        failures.append(f"Could not bind mesh delta to execution scopes: {exc}")
+        affected_scopes = set()
+
+    if affected_scopes:
+        strategy = [
+            item for item in strategy
+            if not native_tool_contract(item.command).controller_finalizer
+        ]
+        strategy.extend(
+            final_mesh_validation_commands(plan, only_scope_keys=affected_scopes)
+        )
 
     for hinted in list(validate_dictionaries) + list(surface_checks):
         if hinted not in effective_set:

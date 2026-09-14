@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from openfoam_agent.contracts.evidence_policy import provider_is_sufficient
 from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
+from openfoam_agent.contracts.execution_scopes import (
+    current_mesh_evidence_failures,
+    execution_scopes,
+    scope_for_native_arguments,
+    scope_key,
+    scope_mesh_digest,
+    sync_legacy_mesh_state,
+)
 from openfoam_agent.tools.execution_policy import (
     deny_unapproved_engineering_solve, command_effect, ExecutionPolicyError,
 )
@@ -352,6 +360,29 @@ class CFDEngineeringAgent:
         state.secondary_failures = []
         state.repair_episode = None
 
+    @staticmethod
+    def _resolve_failure_action(state: CFDState, action_type: str, resolution: str) -> None:
+        resolved = []
+        if state.primary_failure is not None and state.primary_failure.get("action_type") == action_type:
+            item = dict(state.primary_failure)
+            item["resolution"] = resolution
+            resolved.append(item)
+            state.primary_failure = None
+        remaining = []
+        for item in state.secondary_failures:
+            if item.get("action_type") == action_type:
+                done = dict(item)
+                done["resolution"] = resolution
+                resolved.append(done)
+            else:
+                remaining.append(item)
+        state.secondary_failures = remaining
+        if state.primary_failure is None and state.secondary_failures:
+            state.primary_failure = state.secondary_failures.pop(0)
+        state.resolved_failures.extend(resolved[: max(0, 32 - len(state.resolved_failures))])
+        if state.repair_episode is not None and state.repair_episode.current_failure.get("action_type") == action_type:
+            state.repair_episode = None
+
     def _execute_case_plan(self, *args, **kwargs):
         from openfoam_agent.engineering.phases.authoring_controller import execute_case_plan
         return execute_case_plan(self, *args, **kwargs)
@@ -545,48 +576,48 @@ class CFDEngineeringAgent:
         self.bind_checkpoint(state)
         return state
 
+    def _active_execution_plan(self, state):
+        return self._pending_execution_plan or (state.engineering_plan if state is not None else None)
+
     def _invalidate_mesh_dependencies(self, state):
         if state is None:
             return
-        from openfoam_agent.contracts.regions import region_mesh_digest
-        stale = [name for name, old in state.region_mesh_manifests.items()
-                 if region_mesh_digest(self.workspace, name) != old]
+        plan = self._active_execution_plan(state)
+        if plan is None:
+            return
+        scopes = {scope_key(scope): scope for scope in execution_scopes(plan)}
+        stale = []
+        for key, old in list(state.mesh_manifest_by_scope.items()):
+            scope = scopes.get(key)
+            if scope is None or scope_mesh_digest(self.workspace, scope) != old:
+                stale.append(key)
         if stale:
-            for name in stale:
-                state.region_mesh_evidence.pop(name, None)
-                state.region_mesh_manifests.pop(name, None)
-            state.mesh_evidence = None
+            for key in stale:
+                state.mesh_evidence_by_scope.pop(key, None)
+                state.mesh_manifest_by_scope.pop(key, None)
+            sync_legacy_mesh_state(state)
             state.case_seal = None
             state.solve_approved = False
             state.execution_approval = None
-            self._checkmesh_mesh_manifest = None
             self._presolve_case_manifest = None
 
-    def _record_region_mesh(self, state, evidence, arguments):
-        region = ""
-        if "-region" in arguments:
-            pos = arguments.index("-region")
-            if pos + 1 >= len(arguments):
-                raise ValueError("Missing region argument.")
-            region = arguments[pos + 1]
-        state.region_mesh_evidence[region] = evidence
+    def _record_scope_mesh(self, state, evidence, arguments):
+        plan = self._active_execution_plan(state)
+        if plan is None:
+            raise ValueError("checkMesh evidence cannot be bound without an execution plan.")
+        scope = scope_for_native_arguments(plan, arguments)
+        key = scope_key(scope)
+        state.mesh_evidence_by_scope[key] = evidence
         if evidence.passed:
-            state.region_mesh_manifests[region] = region_mesh_digest(self.workspace, region)
+            state.mesh_manifest_by_scope[key] = scope_mesh_digest(self.workspace, scope)
         else:
-            state.region_mesh_manifests.pop(region, None)
-        state.mesh_evidence = evidence
+            state.mesh_manifest_by_scope.pop(key, None)
+        sync_legacy_mesh_state(state)
 
-    def _region_mesh_failures(self, state, plan):
-        failures = []
-        for layout in region_layouts(plan):
-            if not layout.region:
-                continue
-            evidence = state.region_mesh_evidence.get(layout.region)
-            if evidence is None or not evidence.passed:
-                failures.append(f"Passing checkMesh evidence is missing for region {layout.region}.")
-            elif state.region_mesh_manifests.get(layout.region) != region_mesh_digest(self.workspace, layout.region):
-                failures.append(f"Mesh evidence is stale for region {layout.region}.")
-        return failures
+    def _mesh_evidence_failures(self, state, plan):
+        return current_mesh_evidence_failures(
+            state, plan, self.workspace, max_mesh_cells=self.policy.max_mesh_cells
+        )
 
     def _native_command_count(self, state: CFDState) -> int:
         runner = getattr(self.tools, "runner", None)
@@ -640,14 +671,10 @@ class CFDEngineeringAgent:
             return False
         if not native_execution:
             return bool(self.workspace.file_seals())
-        evidence = state.mesh_evidence
-        return bool(
-            evidence is not None
-            and evidence.passed
-            and (evidence.cell_count is None or evidence.cell_count <= self.policy.max_mesh_cells)
-            and self._checkmesh_mesh_manifest is not None
-            and self._checkmesh_mesh_manifest == self.workspace.mesh_manifest_digest()
-        )
+        plan = self._active_execution_plan(state)
+        if plan is None:
+            return False
+        return not self._mesh_evidence_failures(state, plan)
 
     def _run_finalization_window(
         self,
@@ -2080,9 +2107,7 @@ class CFDEngineeringAgent:
                 self._presolve_case_manifest = None
                 self._presolve_required_case_files = None
                 if mesh_affecting:
-                    self._checkmesh_mesh_manifest = None
-                    if state is not None:
-                        state.mesh_evidence = None
+                    self._invalidate_mesh_dependencies(state)
                 if phase == "runtime_repair" and state is not None:
                     # Any runtime repair mutation invalidates the user-approved case seal
                     # until retry_solver revalidates and reseals the current case.
@@ -2114,9 +2139,7 @@ class CFDEngineeringAgent:
                 self._presolve_case_manifest = None
                 self._presolve_required_case_files = None
                 if mesh_affecting:
-                    self._checkmesh_mesh_manifest = None
-                    if state is not None:
-                        state.mesh_evidence = None
+                    self._invalidate_mesh_dependencies(state)
                 if phase == "runtime_repair" and state is not None:
                     state.case_seal = None
                 return self._event(
@@ -2148,9 +2171,7 @@ class CFDEngineeringAgent:
                 self._presolve_case_manifest = None
                 self._presolve_required_case_files = None
                 if mesh_affecting:
-                    self._checkmesh_mesh_manifest = None
-                    if state is not None:
-                        state.mesh_evidence = None
+                    self._invalidate_mesh_dependencies(state)
                 if phase == "runtime_repair" and state is not None:
                     state.case_seal = None
                 return self._event(step, action.type, True, f"Deleted {action.path}.")
@@ -2232,7 +2253,7 @@ class CFDEngineeringAgent:
                         "\n".join(preflight.failures), validation_status="fail", failure_category="case",
                     )
                 if invocation.command == "snappyHexMesh":
-                    precondition_ok, precondition_reason = self._mesh_command_precondition(invocation.command)
+                    precondition_ok, precondition_reason = self._mesh_command_precondition(invocation.command, invocation.arguments)
                     if not precondition_ok:
                         return self._event(
                             step, "mesh_tool_precondition", False,
@@ -2260,9 +2281,8 @@ class CFDEngineeringAgent:
                         self._pending_execution_plan or (state.engineering_plan if state else None),
                     )
                     self._invalidate_mesh_dependencies(state)
-                    self._checkmesh_mesh_manifest = None
+                    self._invalidate_mesh_dependencies(state)
                     if state is not None:
-                        state.mesh_evidence = None
                         state.case_seal = None
                         state.solve_approved = False
                         state.execution_approval = None
@@ -2289,13 +2309,11 @@ class CFDEngineeringAgent:
                 if invocation.command == "checkMesh" and state is not None:
                     if assessment.status == "pass":
                         evidence = parse_check_mesh_evidence(result)
-                        self._record_region_mesh(state, evidence, invocation.arguments)
+                        self._record_scope_mesh(state, evidence, invocation.arguments)
                         event_success = evidence.passed
                         validation_status = "pass" if evidence.passed else "fail"
                         failure_category = None if evidence.passed else "case"
                         summary = f"checkMesh returned status {result.return_code}; evidence {'passed' if evidence.passed else 'failed'}."
-                        if evidence.passed:
-                            self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
                     else:
                         event_success = False
                         summary = ("checkMesh validation was inconclusive; mesh validity was not invented."
@@ -2353,6 +2371,8 @@ class CFDEngineeringAgent:
                             failure_category = assessment.category or "tool"
                 self._presolve_case_manifest = self.workspace.manifest_digest()
                 self._presolve_required_case_files = tuple(action.required_case_files)
+                if state is not None:
+                    self._resolve_failure_action(state, action.type, "pre-solve validation passed")
                 return self._event(
                     step, action.type, True,
                     ("Pre-solve readiness passed; zero-step consumer validation was inconclusive but did not prove the case invalid."
@@ -2394,9 +2414,8 @@ class CFDEngineeringAgent:
                     self._presolve_case_manifest = None
                     self._presolve_required_case_files = None
                 if action.command in _MESH_TOPOLOGY_MUTATING_COMMANDS:
-                    self._checkmesh_mesh_manifest = None
+                    self._invalidate_mesh_dependencies(state)
                     if state is not None:
-                        state.mesh_evidence = None
                         state.case_seal = None
                         state.solve_approved = False
                         state.execution_approval = None
@@ -2417,13 +2436,11 @@ class CFDEngineeringAgent:
                 summary = assessment.reason
                 if action.command == "checkMesh" and state is not None and assessment.status == "pass":
                     evidence = parse_check_mesh_evidence(result)
-                    self._record_region_mesh(state, evidence, [])
+                    self._record_scope_mesh(state, evidence, [])
                     event_success = evidence.passed
                     validation_status = "pass" if evidence.passed else "fail"
                     failure_category = None if evidence.passed else "case"
                     summary = f"checkMesh returned status {result.return_code}; evidence {'passed' if evidence.passed else 'failed'}."
-                    if evidence.passed:
-                        self._checkmesh_mesh_manifest = self.workspace.mesh_manifest_digest()
                 elif assessment.status == "inconclusive":
                     event_success = False
                     summary = f"{action.command} was inconclusive; native mesh state was not guessed."
@@ -2579,10 +2596,17 @@ class CFDEngineeringAgent:
             return list(value) if isinstance(value, list) else []
         return []
 
-    def _mesh_command_precondition(self, command: str) -> tuple[bool, str]:
+    def _mesh_command_precondition(
+        self, command: str, arguments: list[str] | None = None
+    ) -> tuple[bool, str]:
         checker = getattr(self.tools, "mesh_command_precondition", None)
         if callable(checker):
-            return checker(command, self.workspace.case_dir)
+            try:
+                return checker(command, self.workspace.case_dir, arguments or [])
+            except TypeError:
+                # Compatibility for injected test adapters implementing the pre-v5
+                # two-argument hook; production OpenFOAMTools is region-aware.
+                return checker(command, self.workspace.case_dir)
         return True, ""
 
     def _native_toolchain_preflight(
@@ -2727,7 +2751,9 @@ class CFDEngineeringAgent:
             "user_assets": assets[:16],
             "confirmed_geometry_facts": geometry_facts[:24],
             "agent_generated_geometry_authorized": True,
-            "representative_geometry_defaults_authorized": True,
+            "representative_geometry_defaults_authorized": bool(
+                state.user_request.exploratory_completion_authorized
+            ),
             "preferred_self_contained_methods": [
                 "typed blockMesh for simple channels/pipes/obstacles",
                 "agent-authored ASCII STL/OBJ plus native meshing when a surface method is genuinely useful",
@@ -2887,7 +2913,7 @@ class CFDEngineeringAgent:
         else:
             requirements.append((
                 execution.driver_provider_id, execution.driver,
-                {"execution_driver", "solver_application", "utility"}, "execution driver"
+                {"execution_driver", "solver_application"}, "execution driver"
             ))
             if execution.driver == "foamRun":
                 assert execution.solver_module is not None and execution.solver_provider_id is not None
@@ -2927,13 +2953,16 @@ class CFDEngineeringAgent:
                     f"Capability provider '{provider_id}' targets OpenFOAM "
                     f"{provider.openfoam_version}, not {plan.openfoam_version}."
                 )
-            if provider_id not in capability_ids:
-                executable = provider.provider_type in {"execution_driver", "solver_application", "utility"}
-                if not provider_is_sufficient(provider, executable=executable):
-                    failures.append(
-                        f"Capability provider '{provider_id}' lacks sufficient deterministic installed "
-                        "evidence for this design stage."
-                    )
+            executable = provider.provider_type in {"execution_driver", "solver_application"}
+            if not provider_is_sufficient(provider, executable=executable):
+                failures.append(
+                    f"Capability provider '{provider_id}' lacks sufficient availability/semantic evidence for this design stage."
+                )
+            elif provider_id not in capability_ids:
+                # Deterministically merged catalog evidence may be sufficient without an
+                # extra retrieval turn; observation identity is still recorded when the
+                # provider is surfaced/retrieved explicitly.
+                pass
 
         # Opaque evidence IDs are integrity pointers: if the Agent explicitly claims one,
         # it must have been issued by the deterministic registry. The Agent may simply

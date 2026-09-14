@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 
 class Contract(BaseModel):
@@ -56,7 +57,10 @@ class ParallelExecution(Contract):
 
 class RegionCaseLayout(Contract):
     region: str = Field(default="", pattern=r"^(?:[A-Za-z][A-Za-z0-9_.-]*)?$")
-    solver_module: str | None = None
+    # Compatibility/audit mirror only. For modular execution the authoritative
+    # solver assignment lives in OpenFOAMExecutionSpec. Hiding this duplicate
+    # field from LLM JSON schemas prevents two independent sources of truth.
+    solver_module: SkipJsonSchema[str | None] = None
     required_fields: list[str] = Field(default_factory=list)
 
     @property

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+import json
 import re
 from typing import Literal
 
@@ -15,42 +16,41 @@ class NativeToolContract:
     required_dictionary: str | None = None
     permitted_phases: tuple[Phase, ...] = ("authoring", "repair", "runtime_repair", "strategy_revision")
     controller_finalizer: bool = False
+    scope_arguments: tuple[str, ...] = ()
+    mesh_dependency_inputs: tuple[str, ...] = ()
+    mesh_dependency_outputs: tuple[str, ...] = ()
+    controller_auto_consumer: bool = False
+    execution_order: int = 500
+    default_arguments: tuple[str, ...] = ()
 
 
-# Controller-owned native metadata.  This is the single place where an engineering
-# utility's strong dictionary prerequisite and phase ownership are declared.
-_REGISTRY: dict[str, NativeToolContract] = {
-    "blockMesh": NativeToolContract("blockMesh", "mesh", "system/blockMeshDict"),
-    "snappyHexMesh": NativeToolContract("snappyHexMesh", "mesh", "system/snappyHexMeshDict"),
-    "surfaceFeatureExtract": NativeToolContract("surfaceFeatureExtract", "mesh", "system/surfaceFeatureExtractDict"),
-    "createBaffles": NativeToolContract("createBaffles", "mesh"),
-    "splitMeshRegions": NativeToolContract("splitMeshRegions", "mesh"),
-    "setsToZones": NativeToolContract("setsToZones", "mesh"),
-    "surfaceTransformPoints": NativeToolContract("surfaceTransformPoints", "mesh"),
-    "topoSet": NativeToolContract("topoSet", "mesh", "system/topoSetDict"),
-    "setFields": NativeToolContract("setFields", "initialization", "system/setFieldsDict"),
-    "createPatch": NativeToolContract("createPatch", "mesh", "system/createPatchDict"),
-    "decomposePar": NativeToolContract("decomposePar", "decomposition", "system/decomposeParDict"),
-    "extrudeMesh": NativeToolContract("extrudeMesh", "mesh", "system/extrudeMeshDict"),
-    "checkMesh": NativeToolContract("checkMesh", "validation", controller_finalizer=True),
-    "surfaceCheck": NativeToolContract("surfaceCheck", "validation"),
-    "foamDictionary": NativeToolContract("foamDictionary", "validation"),
-    "potentialFoam": NativeToolContract("potentialFoam", "initialization"),
-    "renumberMesh": NativeToolContract("renumberMesh", "mesh"),
-    "transformPoints": NativeToolContract("transformPoints", "mesh"),
-    "gmshToFoam": NativeToolContract("gmshToFoam", "mesh"),
-    "fluentMeshToFoam": NativeToolContract("fluentMeshToFoam", "mesh"),
-    "foamToC": NativeToolContract("foamToC", "query"),
-    "foamListTimes": NativeToolContract("foamListTimes", "query"),
-    "mapFields": NativeToolContract("mapFields", "initialization"),
-    "foamCleanCase": NativeToolContract("foamCleanCase", "destructive", permitted_phases=()),
-    "foamCleanPolyMesh": NativeToolContract("foamCleanPolyMesh", "destructive", permitted_phases=()),
-    "foamPostProcess": NativeToolContract("foamPostProcess", "postprocess", permitted_phases=("postprocess",)),
-    "foamRun": NativeToolContract("foamRun", "solve", permitted_phases=("runtime",)),
-    "foamMultiRun": NativeToolContract("foamMultiRun", "solve", permitted_phases=("runtime",)),
-    "reconstructPar": NativeToolContract("reconstructPar", "reconstruction", permitted_phases=("runtime", "restart")),
-    "reconstructParMesh": NativeToolContract("reconstructParMesh", "reconstruction", permitted_phases=("runtime", "restart")),
-}
+# Controller-owned executable contracts are auditable package data, not hidden CFD
+# strategy code. They describe effects/prerequisites only; they never select a tool.
+def _load_registry() -> dict[str, NativeToolContract]:
+    path = Path(__file__).resolve().parents[1] / "data" / "native_tool_contracts.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    registry: dict[str, NativeToolContract] = {}
+    for item in raw.get("commands", []):
+        command = str(item["command"])
+        if command in registry:
+            raise ValueError(f"Duplicate native tool contract: {command}")
+        registry[command] = NativeToolContract(
+            command=command,
+            effect=str(item["effect"]),
+            required_dictionary=item.get("required_dictionary"),
+            permitted_phases=tuple(item.get("permitted_phases", [])),
+            controller_finalizer=bool(item.get("controller_finalizer", False)),
+            scope_arguments=tuple(item.get("scope_arguments", [])),
+            mesh_dependency_inputs=tuple(item.get("mesh_dependency_inputs", [])),
+            mesh_dependency_outputs=tuple(item.get("mesh_dependency_outputs", [])),
+            controller_auto_consumer=bool(item.get("controller_auto_consumer", False)),
+            execution_order=int(item.get("execution_order", 500)),
+            default_arguments=tuple(item.get("default_arguments", [])),
+        )
+    return registry
+
+
+_REGISTRY = _load_registry()
 
 
 def native_tool_contract(command: str) -> NativeToolContract:
@@ -109,3 +109,8 @@ def command_permitted(command: str, phase: Phase) -> bool:
 
 def registered_effects() -> dict[str, str]:
     return {name: contract.effect for name, contract in _REGISTRY.items()}
+
+
+def registered_contracts() -> tuple[NativeToolContract, ...]:
+    """Return immutable controller execution contracts for generic graph compilers."""
+    return tuple(_REGISTRY[name] for name in sorted(_REGISTRY))

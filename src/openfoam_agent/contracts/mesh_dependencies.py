@@ -12,6 +12,13 @@ import json
 import os
 import re
 from pathlib import PurePosixPath
+from openfoam_agent.contracts.execution_scopes import (
+    execution_scopes,
+    render_scope_template,
+    scope_for_native_arguments,
+    scope_paths,
+)
+from openfoam_agent.tools.native_contracts import native_command_region, native_tool_contract
 
 
 def _sha(value):
@@ -63,45 +70,52 @@ class MeshDependencyGraph:
         os.replace(temporary,self.path)
 
     def record_native(self,command,arguments,plan=None):
-        from openfoam_agent.contracts.regions import region_layouts
-        names=[layout.region for layout in region_layouts(plan)]
-        if "-region" in arguments:
-            index=arguments.index("-region")
-            if index+1>=len(arguments) or arguments[index+1] not in names:
-                raise ValueError("Native mesh operation targets an undeclared region.")
-            names=[arguments[index+1]]
-        outputs=[f"constant/{name}/polyMesh" if name else "constant/polyMesh" for name in names]
-        # No read-set tracing exists for arbitrary OpenFOAM utilities. Conservative
-        # roots track even newly created/deleted inputs and include/asset changes.
-        inputs = ["0","system","constant"]
-        conservative = True
-        if command == "blockMesh" and "-dict" not in arguments:
-            # This built-in tool's source grammar reads blockMeshDict; literal
-            # include closure is added below. Unknown tools/options keep roots.
-            allowed_flags = {"-region", "-case", "-merge-points", "-no-clean"}
-            flags = {a for a in arguments if a.startswith("-")}
-            if flags.issubset(allowed_flags):
-                inputs = [f"system/{name}/blockMeshDict" if name else "system/blockMeshDict" for name in names]
-                inputs += ["constant/triSurface", "constant/geometry"]
-                conservative = False
-        self.register(inputs=inputs,outputs=outputs,regions=names,
-            command={"name":command,"arguments":list(arguments)},conservative=conservative)
+        scopes = execution_scopes(plan) if plan is not None else []
+        region = native_command_region(arguments)
+        if region is not None:
+            targets = [scope for scope in scopes if scope.name == region]
+            if len(targets) != 1:
+                raise ValueError("Native mesh operation targets an undeclared execution scope.")
+        elif len(scopes) == 1:
+            targets = scopes
+        elif scopes:
+            # An unscoped mesh writer may affect every declared scope. This is an
+            # execution-side conservative effect, not topology inference.
+            targets = scopes
+        else:
+            from openfoam_agent.schemas.engineering import ExecutionScope
+            targets = [ExecutionScope(name=None)]
+
+        contract = native_tool_contract(command)
+        inputs: list[str] = []
+        outputs: list[str] = []
+        for scope in targets:
+            for template in contract.mesh_dependency_inputs:
+                rendered = render_scope_template(template, scope)
+                if rendered not in inputs:
+                    inputs.append(rendered)
+            for template in contract.mesh_dependency_outputs:
+                rendered = render_scope_template(template, scope)
+                if rendered not in outputs:
+                    outputs.append(rendered)
+        conservative = not bool(contract.mesh_dependency_inputs)
+        if conservative:
+            inputs = ["0", "system", "constant"]
+        if not outputs:
+            outputs = [scope_paths(scope).constant_dir + "/polyMesh" for scope in targets]
+        self.register(
+            inputs=inputs,
+            outputs=outputs,
+            regions=[scope.name or "" for scope in targets],
+            command={"name":command,"arguments":list(arguments)},
+            conservative=conservative,
+        )
 
     def _bootstrap(self,region):
-        files=self.workspace.execution_file_seals()
-        sources=[]
-        for item in files:
-            path=item.path;parts=PurePosixPath(path).parts
-            if len(parts)<2: continue
-            # Initial solution fields and the standard numerical controls are not
-            # bootstrap meshing inputs. If a native writer reads them, its node
-            # above records them conservatively.
-            if parts[0]=="0" or parts[-1] in {"fvSchemes","fvSolution","controlDict"}: continue
-            if len(parts)>2 and parts[0] in {"constant","system"} and parts[1] not in {"polyMesh","triSurface","geometry"}:
-                known={p.path.split("/")[1] for p in files if "/polyMesh/" in p.path and len(p.path.split("/"))>3}
-                if parts[1] in known and parts[1]!=region: continue
-            sources.append(path)
-        return sources
+        # The native operation DAG owns mesh dependencies. For imported/pre-existing
+        # meshes, the sink polyMesh itself is sufficient freshness evidence. Do not
+        # make material/thermo/numerical files accidental mesh dependencies.
+        return []
 
     def dependencies(self,region):
         sink=f"constant/{region}/polyMesh" if region else "constant/polyMesh"

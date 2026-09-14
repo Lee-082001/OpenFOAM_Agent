@@ -21,6 +21,8 @@ from openfoam_agent.engineering.repair_context import (
     repair_episode_requires_direct_attempt,
 )
 from openfoam_agent.contracts.regions import region_layouts
+from openfoam_agent.contracts.execution_scopes import current_mesh_evidence_failures
+from openfoam_agent.tools.execution_contracts import contract_summary
 
 import hashlib
 import json
@@ -192,18 +194,36 @@ def generate_turn(
             else self.policy.max_prepare_retrieval_cycles
         ),
     }
+    active_plan = self._pending_execution_plan or state.engineering_plan
+    mesh_failures = (
+        current_mesh_evidence_failures(
+            state, active_plan, self.workspace, max_mesh_cells=self.policy.max_mesh_cells
+        )
+        if active_plan is not None and state.mesh_evidence_by_scope
+        else ["mesh evidence unavailable"]
+    )
     bindings = {
         "intake_sha256": state.intake_digest,
         "plan_sha256": plan_digest,
         "manifest_sha256": manifest_digest,
-        "check_mesh_passed": bool(state.mesh_evidence and state.mesh_evidence.passed),
-        "check_mesh_log_sha256": (
-            state.mesh_evidence.raw_log_sha256 if state.mesh_evidence else None
-        ),
+        "check_mesh_passed": not mesh_failures,
+        "mesh_scope_evidence": {
+            key: {
+                "passed": bool(item.passed),
+                "cell_count": item.cell_count,
+                "raw_log_sha256": item.raw_log_sha256,
+            }
+            for key, item in state.mesh_evidence_by_scope.items()
+        },
     }
+    delegated_defaults = bool(state.user_request.exploratory_completion_authorized)
     assumption_policy = {
-        "authorized": True,
-        "explicit_user_authorization": bool(state.user_request.exploratory_completion_authorized),
+        # Backward-compatible `authorized` is scoped only to omitted concrete physical/model values.
+        "authorized": delegated_defaults,
+        "explicit_user_authorization": delegated_defaults,
+        "user_delegated_physical_defaults": delegated_defaults,
+        "autonomous_engineering_choices_authorized": True,
+        "authorization_source": "user_request.exploratory_completion_authorized",
         "policy": "progress_first_ordinary_defaults",
         "interaction_mode": state.user_request.interaction_mode,
         "provenance_for_selected_missing_values": "engineering_default",
@@ -236,14 +256,17 @@ def generate_turn(
         executable = provider.provider_type in {"execution_driver", "solver_application"}
         if not provider_is_sufficient(provider, executable=executable):
             continue
-        verified_execution_candidates.append({
+        candidate = {
             "provider_id": provider.id,
             "name": provider.name,
             "provider_type": provider.provider_type,
             "verification_level": provider.verification_level,
             "openfoam_version": provider.openfoam_version,
             "capabilities": list(provider.capabilities)[:8],
-        })
+        }
+        if provider.provider_type in {"execution_driver", "solver_application"}:
+            candidate["execution_contract"] = contract_summary(provider.name, provider.id)
+        verified_execution_candidates.append(candidate)
     verified_execution_candidates = verified_execution_candidates[:32]
 
     retrieval_policy = {
@@ -331,8 +354,8 @@ def generate_turn(
                 "Choose the next compact engineering-design action. Use gather_evidence only "
                 "for a genuinely missing OpenFOAM tool/version fact. Otherwise return design_case "
                 "with only Agent-owned CFD design choices and no case files. Do not copy or emit "
-                "intake hashes, confirmed fact IDs/bindings, canonical evidence IDs, OpenFOAM target "
-                "version, or redundant solver mirrors; the controller seals those from frozen state "
+                "intake hashes, confirmed fact identity closure, canonical evidence IDs, OpenFOAM target "
+                "version, or redundant solver mirrors; optional implementation assertions are never fabricated by the controller; frozen identity metadata is sealed from state "
                 "and the capability providers you selected. Delegated ordinary values belong in "
                 "engineering_defaults:\n"
             )

@@ -34,9 +34,41 @@ class CapabilityCatalog:
         }
 
     def all_providers(self) -> list[CapabilityProvider]:
-        merged: dict[str, CapabilityProvider] = {item.id: item for item in self.graph.spec.providers}
-        for item in self._installed:
-            merged.setdefault(item.id, item)
+        """Merge documented semantics with independently observed installation presence."""
+        installed = list(self._installed)
+        used: set[int] = set()
+        merged: dict[str, CapabilityProvider] = {}
+        for provider in self.graph.spec.providers:
+            match_index = next((
+                index for index, observed in enumerate(installed)
+                if index not in used
+                and observed.name == provider.name
+                and _provider_family(observed.provider_type) == _provider_family(provider.provider_type)
+            ), None)
+            if match_index is None:
+                metadata = dict(provider.metadata)
+                metadata.setdefault("semantic_authority_documented_graph", True)
+                merged[provider.id] = provider.model_copy(update={"metadata": metadata})
+                continue
+            observed = installed[match_index]
+            used.add(match_index)
+            evidence = list(provider.evidence)
+            for item in observed.evidence:
+                if item not in evidence:
+                    evidence.append(item)
+            metadata = dict(provider.metadata)
+            metadata.update(observed.metadata)
+            metadata["semantic_authority_documented_graph"] = True
+            metadata["installed_observed"] = True
+            merged[provider.id] = provider.model_copy(update={
+                "verified": True,
+                "verification_level": observed.verification_level,
+                "evidence": evidence,
+                "metadata": metadata,
+            })
+        for index, provider in enumerate(installed):
+            if index not in used:
+                merged[provider.id] = provider
         return [merged[key] for key in sorted(merged)]
 
     def provider(self, provider_id: str):
@@ -86,95 +118,57 @@ class CapabilityCatalog:
     def _installed_providers(installation: InstalledOpenFOAMIR) -> list[CapabilityProvider]:
         if installation.version is None:
             return []
-        evidence = [
-            CapabilityEvidence(
-                kind="installation_discovery",
-                reference=f"installed:foundation:{installation.version}",
-                note="Discovered from the sourced trusted OpenFOAM installation.",
-            )
-        ]
+        evidence = [CapabilityEvidence(
+            kind="installation_discovery",
+            reference=f"installed:foundation:{installation.version}",
+            note="Observed from the sourced trusted OpenFOAM installation; proves identity/presence only.",
+        )]
         providers: list[CapabilityProvider] = []
         for item in installation.executables:
             if item.category == "execution_driver":
                 provider_type = "execution_driver"
                 capabilities = [f"execution.driver.{item.name}"]
-                if item.name == "foamMultiRun":
-                    capabilities += ["execution.multiregion", "heat_transfer.conjugate"]
-                elif item.name == "foamRun":
-                    capabilities += ["execution.single_region", "execution.solver_module"]
             elif item.category == "solver_application":
                 provider_type = "solver_application"
                 capabilities = [f"solver.application.{item.name}"]
             else:
                 provider_type = "utility"
-                capabilities = [f"utility.{item.name}", f"application.{item.name}"]
-            providers.append(
-                CapabilityProvider(
-                    id=f"installed.application.{item.name}",
-                    name=item.name,
-                    provider_type=provider_type,
-                    capabilities=capabilities,
-                    openfoam_version=installation.version,
-                    verified=True,
-                    verification_level="binary_present",
-                    metadata={"runtime_load_verified": False, "native_test_verified": False},
-                    evidence=evidence,
-                )
-            )
+                capabilities = [f"application.{item.name}"]
+            providers.append(CapabilityProvider(
+                id=f"installed.application.{item.name}", name=item.name,
+                provider_type=provider_type, capabilities=capabilities,
+                openfoam_version=installation.version, verified=True,
+                verification_level="binary_present", evidence=evidence,
+                metadata={
+                    "runtime_load_verified": False, "native_test_verified": False,
+                    "semantic_authority_documented_graph": False,
+                    "semantic_capabilities_inferred": False,
+                },
+            ))
         for item in installation.components:
             if item.category == "solver_module":
-                ptype = "solver_module"
-                capabilities = [f"solver.module.{item.name}"]
-                if item.name == "solid":
-                    capabilities += ["heat_transfer.solid", "equation.energy.solid", "heat_transfer.conjugate"]
-                elif item.name == "fluid":
-                    capabilities += ["heat_transfer.fluid", "equation.energy.temperature", "heat_transfer.conjugate"]
-                elif item.name == "incompressibleFluid":
-                    capabilities += ["flow.incompressible"]
-                provider_id = f"installed.solver_module.{item.name}"
+                provider_type, provider_id, capabilities = "solver_module", f"installed.solver_module.{item.name}", [f"solver.module.{item.name}"]
             elif item.category == "fv_model":
-                ptype = "fv_model"
-                capabilities = [f"fvModel.{item.name}"]
-                if item.name == "heatSource":
-                    capabilities += ["source.heat.volumetric", "heat_generation.volumetric"]
-                elif item.name in {"solidificationMelting", "VoFSolidificationMelting"}:
-                    capabilities += [
-                        "phase_change.solid_liquid",
-                        "melting",
-                        "solidification",
-                        "energy.latent_heat",
-                    ]
-                    if item.name == "VoFSolidificationMelting":
-                        capabilities.append("multiphase.vof")
-                    else:
-                        capabilities.append("phase_change.enthalpy_porosity")
-                elif item.name in {"heatTransferLimitedPhaseChange", "coefficientPhaseChange"}:
-                    capabilities += [
-                        "phase_change.fluid_fluid",
-                        "phase_change.mass_transfer",
-                    ]
-                provider_id = f"installed.fv_model.{item.name}"
+                provider_type, provider_id, capabilities = "fv_model", f"installed.fv_model.{item.name}", [f"fvModel.{item.name}"]
             elif item.category == "function_object":
-                ptype = "function_object"
-                capabilities = [f"functionObject.{item.name}", "postprocessing"]
-                provider_id = f"installed.function_object.{item.name}"
+                provider_type, provider_id, capabilities = "function_object", f"installed.function_object.{item.name}", [f"functionObject.{item.name}"]
             elif item.category == "source_component":
-                ptype = "source_component"
-                capabilities = [f"source.component.{item.name}"]
-                provider_id = f"installed.source_component.{item.name}"
+                provider_type, provider_id, capabilities = "source_component", f"installed.source_component.{item.name}", [f"source.component.{item.name}"]
             else:
                 continue
-            providers.append(
-                CapabilityProvider(
-                    id=provider_id,
-                    name=item.name,
-                    provider_type=ptype,
-                    capabilities=capabilities,
-                    openfoam_version=installation.version,
-                    verified=True,
-                    verification_level="source_discovered",
-                    metadata={"runtime_load_verified": False, "native_test_verified": False},
-                    evidence=evidence,
-                )
-            )
+            providers.append(CapabilityProvider(
+                id=provider_id, name=item.name, provider_type=provider_type, capabilities=capabilities,
+                openfoam_version=installation.version, verified=True, verification_level="source_discovered",
+                evidence=evidence, metadata={
+                    "runtime_load_verified": False, "native_test_verified": False,
+                    "semantic_authority_documented_graph": False,
+                    "semantic_capabilities_inferred": False,
+                },
+            ))
         return providers
+
+
+def _provider_family(provider_type: str) -> str:
+    if provider_type in {"solver", "solver_module", "generated_solver"}:
+        return "solver"
+    return provider_type

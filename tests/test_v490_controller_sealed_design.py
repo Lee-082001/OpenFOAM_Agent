@@ -67,7 +67,7 @@ def test_controller_seals_frozen_identity_and_provider_version():
     fact_ids = [fact.id for fact in state.intake.facts if fact.category != "context"]
     assert plan.confirmed_intake_sha256 == state.intake_digest
     assert plan.confirmed_fact_ids == fact_ids
-    assert [item.fact_id for item in plan.confirmed_fact_bindings] == fact_ids
+    assert plan.confirmed_fact_bindings == []  # v5: identity closure is not fabricated implementation evidence
     assert plan.openfoam_version == "14"
     assert plan.solver == "incompressibleFluid"
     assert plan.solver_provider_id == "solver.incompressibleFluid"

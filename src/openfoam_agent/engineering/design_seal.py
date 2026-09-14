@@ -3,10 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from openfoam_agent.schemas.engineering import (
-    ConfirmedFactBinding,
     EngineeringDefaultAssumption,
     EngineeringDesign,
     EngineeringPlan,
+)
+from openfoam_agent.tools.execution_contracts import (
+    provider_requirements as execution_provider_requirements,
+    sealed_solver_mirror as execution_solver_mirror,
+    validate_execution_contract,
 )
 
 
@@ -35,34 +39,14 @@ def _provider_requirements(design: EngineeringDesign) -> list[_ProviderRequireme
             )
         ]
 
-    result = [
-        _ProviderRequirement(
-            execution.driver_provider_id,
-            execution.driver,
-            frozenset({"execution_driver", "solver_application", "utility"}),
-            "execution driver",
+    result: list[_ProviderRequirement] = []
+    for provider_id, expected_name, label in execution_provider_requirements(execution):
+        allowed = (
+            frozenset({"execution_driver", "solver_application"})
+            if label == "execution driver"
+            else frozenset({"solver", "solver_module", "generated_solver"})
         )
-    ]
-    if execution.driver == "foamRun":
-        assert execution.solver_module is not None and execution.solver_provider_id is not None
-        result.append(
-            _ProviderRequirement(
-                execution.solver_provider_id,
-                execution.solver_module,
-                frozenset({"solver", "solver_module", "generated_solver"}),
-                "solver module",
-            )
-        )
-    elif execution.driver == "foamMultiRun":
-        result.extend(
-            _ProviderRequirement(
-                item.provider_id,
-                item.solver_module,
-                frozenset({"solver", "solver_module", "generated_solver"}),
-                f"region solver {item.region}",
-            )
-            for item in execution.regions
-        )
+        result.append(_ProviderRequirement(provider_id, expected_name, allowed, label))
     return result
 
 
@@ -71,12 +55,7 @@ def _sealed_solver_mirror(design: EngineeringDesign) -> tuple[str, str]:
     if execution is None:
         assert design.solver is not None and design.solver_provider_id is not None
         return design.solver, design.solver_provider_id
-    if execution.driver == "foamRun":
-        assert execution.solver_module is not None and execution.solver_provider_id is not None
-        return execution.solver_module, execution.solver_provider_id
-    if execution.driver == "foamMultiRun":
-        return "foamMultiRun", execution.driver_provider_id
-    return execution.driver, execution.driver_provider_id
+    return execution_solver_mirror(execution)
 
 
 def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> EngineeringPlan:
@@ -92,6 +71,11 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
         raise DesignSealError(
             "Agent-owned required case manifest is empty; staged design cannot be sealed."
         )
+
+    if design.execution is not None:
+        execution_failures = validate_execution_contract(design.execution)
+        if execution_failures:
+            raise DesignSealError("Execution topology violates the selected provider contract: " + " | ".join(execution_failures))
 
     versions: set[str] = set()
     seen: set[str] = set()
@@ -129,15 +113,9 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
 
     solver, solver_provider_id = _sealed_solver_mirror(design)
     fact_ids = [fact.id for fact in state.intake.facts if fact.category != "context"]
-    # Identity/coverage anchors only. Authoring/native gates establish implementation truth.
-    bindings = [
-        ConfirmedFactBinding(
-            fact_id=fact_id,
-            plan_fields=["problem_interpretation"],
-            explanation="Controller-owned frozen-intake coverage anchor; not artifact implementation evidence.",
-        )
-        for fact_id in fact_ids
-    ]
+    # Frozen intake digest + confirmed_fact_ids are the identity closure.  Do not
+    # manufacture implementation evidence merely to make every fact appear artifact-backed.
+    bindings = []
     defaults = [
         EngineeringDefaultAssumption(
             parameter=item.parameter,
@@ -152,6 +130,9 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
     ]
 
     data = design.model_dump(mode="python")
+    data["region_layouts"] = [
+        item.model_dump(mode="python") for item in _canonical_region_layouts(design)
+    ]
     data.update(
         schema_version="2.0",
         solver=solver,

@@ -13,6 +13,10 @@ from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.foam_file import validate_foam_file_header
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
 from openfoam_agent.verification.foam_semantics.parser import parse_named_dictionary_assignments
+from openfoam_agent.tools.execution_contracts import (
+    control_dict_binding,
+    validate_execution_contract,
+)
 from openfoam_agent.verification.semantic_assurance import expectation_for_fact
 
 
@@ -71,12 +75,13 @@ class DeterministicSafetyGate:
                 f"Engineering plan fact provenance mismatch; missing={missing}, extra={extra}."
             )
 
+        # Fact identity closure is confirmed_fact_ids. Implementation bindings are
+        # optional claims and therefore may cover any subset, but never unknown facts.
         binding_ids = {item.fact_id for item in plan.confirmed_fact_bindings}
-        if binding_ids != expected_fact_ids:
-            missing = sorted(expected_fact_ids - binding_ids)
-            extra = sorted(binding_ids - expected_fact_ids)
+        extra = sorted(binding_ids - expected_fact_ids)
+        if extra:
             failures.append(
-                f"Engineering plan fact implementation binding mismatch; missing={missing}, extra={extra}."
+                f"Engineering plan implementation assertions reference unknown confirmed facts: {extra}."
             )
         for binding in plan.confirmed_fact_bindings:
             fact = intake.fact(binding.fact_id)
@@ -144,10 +149,11 @@ class DeterministicSafetyGate:
                         self._validate_numeric_relation(binding.fact_id, fact.value, binding.numeric_relation)
                     )
 
-        # v4.4 semantic assurance policy: absence of an optional machine assertion is
-        # not proof that the CFD case is invalid.  The immutable intake digest, exact
-        # fact-ID closure and ConfirmedFactBinding provide preservation/provenance.
-        # When the Agent *does* claim a case assertion or numeric relation, the code
+        # v5.0 semantic assurance policy: absence of an optional machine assertion is
+        # not proof that the CFD case is invalid. The immutable intake digest and exact
+        # fact-ID closure provide preservation/provenance. ConfirmedFactBinding exists
+        # only for explicit implementation claims. When the Agent *does* claim a case
+        # assertion or numeric relation, the code
         # above verifies it strictly and any contradiction remains a hard failure.
         # Missing higher-assurance pointers are reported as warnings only when such a
         # representation is reasonably expected for that fact class.
@@ -157,10 +163,11 @@ class DeterministicSafetyGate:
                 if fact.category == "context":
                     continue
                 binding = binding_by_id.get(fact.id)
-                if binding is None:
-                    continue
                 expectation = expectation_for_fact(fact)
-                has_machine_assertion = bool(binding.case_assertions or binding.numeric_relation is not None)
+                has_machine_assertion = bool(
+                    binding is not None
+                    and (binding.case_assertions or binding.numeric_relation is not None)
+                )
                 if not expectation.machine_assertion_recommended or has_machine_assertion:
                     continue
                 if expectation.mode == "numeric_relation_recommended":
@@ -183,7 +190,7 @@ class DeterministicSafetyGate:
 
         control_path = self.workspace.resolve_case_path("system/controlDict")
         execution = plan.execution
-        driver = execution.driver if execution is not None else "foamRun"
+        driver = execution.driver if execution is not None else plan.solver
         runner = getattr(self.tools, "runner", None)
         if detected and runner is not None:
             driver_status = runner.executable_status(driver)
@@ -194,32 +201,33 @@ class DeterministicSafetyGate:
 
         if not control_path.is_file():
             failures.append(f"system/controlDict is required for bounded {driver} execution.")
-        else:
+        elif execution is not None:
+            failures.extend(validate_execution_contract(execution))
             control = control_path.read_text(encoding="utf-8", errors="replace")
-            if execution is None or driver == "foamRun":
-                expected_solver = plan.solver if execution is None else execution.solver_module
-                match = _SOLVER_ENTRY.search(control)
-                if match is None:
-                    failures.append(
-                        "system/controlDict must declare a solver entry so the approved "
-                        "single-region execution can be checked against the runtime case."
+            try:
+                mode, entry, expected = control_dict_binding(execution)
+            except ValueError as exc:
+                failures.append(f"Execution controlDict contract could not be materialized: {exc}")
+            else:
+                if mode == "scalar":
+                    pattern = re.compile(
+                        rf"(?m)^\s*{re.escape(str(entry))}\s+(?P<value>[A-Za-z][A-Za-z0-9_]*)\s*;"
                     )
-                elif expected_solver is not None and match.group("solver") != expected_solver:
-                    failures.append("system/controlDict solver disagrees with the EngineeringPlan execution spec.")
-            elif driver == "foamMultiRun":
-                actual, complete = parse_named_dictionary_assignments(control, "regionSolvers")
-                expected = {item.region: item.solver_module for item in execution.regions}
-                if not actual:
-                    failures.append("system/controlDict must declare regionSolvers for foamMultiRun execution.")
-                elif not complete:
-                    failures.append(
-                        "system/controlDict regionSolvers contains dynamic/indeterminate entries; "
-                        "deterministic multi-region execution semantics could not be proven."
-                    )
-                elif actual != expected:
-                    failures.append(
-                        "system/controlDict regionSolvers disagrees with the EngineeringPlan execution spec."
-                    )
+                    match = pattern.search(control)
+                    if match is None:
+                        failures.append(f"system/controlDict must declare {entry} for the selected execution provider.")
+                    elif match.group("value") != expected:
+                        failures.append(f"system/controlDict {entry} disagrees with the EngineeringPlan execution scope.")
+                elif mode == "named_map":
+                    actual, complete = parse_named_dictionary_assignments(control, str(entry))
+                    if not actual:
+                        failures.append(f"system/controlDict must declare {entry} for the selected execution provider.")
+                    elif not complete:
+                        failures.append(
+                            f"system/controlDict {entry} contains dynamic/indeterminate entries; deterministic execution semantics could not be proven."
+                        )
+                    elif actual != expected:
+                        failures.append(f"system/controlDict {entry} disagrees with the EngineeringPlan execution scopes.")
 
         return SafetyCheckResult(valid=not failures, failures=failures, warnings=warnings)
 

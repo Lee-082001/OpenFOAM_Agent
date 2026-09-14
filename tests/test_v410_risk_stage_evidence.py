@@ -25,11 +25,17 @@ def test_v410_decisions_carry_risk_policy_and_stage_without_breaking_old_payload
 def test_v410_provider_strength_is_stage_aware():
     documented = SimpleNamespace(verified=True, verification_level="documented")
     binary = SimpleNamespace(verified=True, verification_level="binary_present")
-    source = SimpleNamespace(verified=True, verification_level="source_discovered")
+    source = SimpleNamespace(verified=True, verification_level="source_discovered", metadata={}, evidence=[])
+    binary.metadata = {"semantic_authority_documented_graph": True}
+    semantic_source = SimpleNamespace(
+        verified=True, verification_level="source_discovered",
+        metadata={"semantic_authority_documented_graph": True}, evidence=[]
+    )
     assert not provider_is_sufficient(documented, executable=True)
     assert provider_is_sufficient(binary, executable=True)
     assert not provider_is_sufficient(source, executable=True)
-    assert provider_is_sufficient(source, executable=False)
+    assert not provider_is_sufficient(source, executable=False)  # existence is not physics meaning
+    assert provider_is_sufficient(semantic_source, executable=False)
 
 
 def test_v410_design_acceptance_no_longer_requires_file_syntax_evidence(tmp_path, graph_path):

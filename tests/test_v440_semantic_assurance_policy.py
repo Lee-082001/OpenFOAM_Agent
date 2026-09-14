@@ -127,14 +127,14 @@ def test_v440_claimed_semantic_assertion_still_fails_on_contradiction(tmp_path):
     assert any("THIS_TOKEN_DOES_NOT_EXIST" in failure for failure in result.failures)
 
 
-def test_v440_missing_confirmed_binding_remains_hard_failure(tmp_path):
+def test_v500_missing_optional_implementation_binding_is_not_identity_failure(tmp_path):
     intake = _classification_only_intake()
     plan = make_plan(intake).model_copy(update={"confirmed_fact_bindings": []})
     ws = CaseWorkspace(tmp_path)
     _write_minimum_case(ws)
     result = DeterministicSafetyGate(FakeOpenFOAMTools(), ws).validate_plan(plan, intake)
-    assert not result.valid
-    assert any("implementation binding mismatch" in failure for failure in result.failures)
+    assert result.valid, result.failures
+    assert not any("implementation binding mismatch" in failure for failure in result.failures)
 
 
 def test_v440_finish_preview_seals_case_with_advisory_gap_instead_of_repair(tmp_path, graph_path):

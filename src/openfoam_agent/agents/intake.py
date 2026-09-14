@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
 
 from openfoam_agent.llm.prompts import INTAKE_SYSTEM_PROMPT
 from openfoam_agent.llm.protocol import StructuredLLM
-from openfoam_agent.schemas.intake import CFDIntakeSpec, RequirementHistory
+from openfoam_agent.schemas.intake import CFDIntakeSpec, RequirementHistory, UserEvidenceLocator
 from openfoam_agent.contracts.requirements import active_requirement_texts
 from openfoam_agent.contracts.quantities import si_value, UNITS
 from openfoam_agent.schemas.request import UserRequest
@@ -41,28 +42,59 @@ def _file_name(path: str) -> str:
     return path.replace("\\", "/").rsplit("/", maxsplit=1)[-1]
 
 
-def _user_evidence(request: UserRequest) -> list[str]:
-    return [
-        request.prompt,
-        *request.conversation_turns,
-        *(_file_name(path) for path in request.geometry_files),
-        *(_file_name(path) for path in request.additional_files),
-    ]
+def _user_evidence_sources(request: UserRequest) -> list[tuple[str, int, str]]:
+    sources: list[tuple[str, int, str]] = []
+    for index, value in enumerate([request.prompt, *request.conversation_turns]):
+        sources.append(("conversation_turn", index, value))
+    for index, value in enumerate(request.geometry_files):
+        sources.append(("geometry_file_name", index, _file_name(value)))
+    for index, value in enumerate(request.additional_files):
+        sources.append(("additional_file_name", index, _file_name(value)))
+    return sources
+
+
+def _issue_user_evidence_locator(
+    evidence: str, sources: list[tuple[str, int, str]]
+) -> UserEvidenceLocator:
+    candidates: list[UserEvidenceLocator] = []
+    for source_kind, source_index, source_text in sources:
+        start = 0
+        while True:
+            position = source_text.find(evidence, start)
+            if position < 0:
+                break
+            candidates.append(
+                UserEvidenceLocator(
+                    source_kind=source_kind,
+                    source_index=source_index,
+                    source_sha256=hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                    start_char=position,
+                    end_char=position + len(evidence),
+                )
+            )
+            start = position + 1
+    if not candidates:
+        raise ValueError("source=user evidence is not an exact contiguous user-provided span.")
+    if len(candidates) != 1:
+        raise ValueError(
+            "source=user evidence is ambiguous across user inputs; use a longer exact span so provenance resolves uniquely."
+        )
+    return candidates[0]
 
 
 def validate_intake_provenance(spec: CFDIntakeSpec, request: UserRequest) -> None:
     _normalize_review_critical_source_attribution(spec)
-    user_evidence = _user_evidence(request)
+    user_sources = _user_evidence_sources(request)
+    user_texts = [item[2] for item in user_sources]
     for fact in spec.facts:
         if fact.source == "user":
             assert fact.evidence is not None
-            if not any(
-                fact.evidence.casefold() in evidence.casefold()
-                for evidence in user_evidence
-            ):
+            locator = _issue_user_evidence_locator(fact.evidence, user_sources)
+            if fact.evidence_locator is not None and fact.evidence_locator != locator:
                 raise ValueError(
-                    f"User fact '{fact.id}' has evidence not found in user-provided input."
+                    f"User fact '{fact.id}' supplied an evidence locator that does not match the immutable user input."
                 )
+            fact.evidence_locator = locator
     active_texts, history, assignments = active_requirement_texts([request.prompt, *request.conversation_turns])
     spec.requirement_history = [RequirementHistory.model_validate(row) for row in history]
     for record in history:
@@ -87,7 +119,7 @@ def validate_intake_provenance(spec: CFDIntakeSpec, request: UserRequest) -> Non
         if fact.quantity is not None:
             si_value(fact.quantity)
     for ambiguity in spec.ambiguities:
-        if ambiguity.selected is not None and not any(ambiguity.user_evidence in text for text in user_evidence):
+        if ambiguity.selected is not None and not any(ambiguity.user_evidence in text for text in user_texts):
             raise ValueError("Ambiguity selection evidence was not supplied by the user.")
     # Asset names are identifiers, never physical numeric constraints.
     supplied_numbers = _finite_numbers("\n".join(active_texts))
@@ -236,21 +268,15 @@ def _normalize_review_critical_source_attribution(spec: CFDIntakeSpec) -> None:
         if not supported:
             to_demote.append(fact)
 
-    remaining_direct_ids = [
-        fact.id
-        for fact in spec.facts
-        if fact.source == "user"
-        and fact.category != "context"
-        and fact not in to_demote
-    ]
     for fact in to_demote:
         fact.source = "derived"
         fact.evidence = None
+        fact.evidence_locator = None
         fact.reason = (
             "The value is a routing/physics interpretation inferred from the request; "
             "the user did not explicitly state this normalized classification."
         )
-        fact.depends_on = [item for item in remaining_direct_ids if item != fact.id][:20]
+        fact.depends_on = ["request.summary"] if spec.fact("request.summary") is not None and fact.id != "request.summary" else []
 
 
 def _finite_numbers(text: str) -> list[tuple[str, float]]:
@@ -274,7 +300,7 @@ def confirmed_intake_definition(state: CFDState) -> dict[str, object]:
     for fact in state.intake.facts:
         if fact.category == "context":
             continue
-        facts.append(fact.model_dump(mode="json", exclude={"evidence"}))
+        facts.append(fact.model_dump(mode="json", exclude={"evidence", "evidence_locator"}))
     # The semantic projection omits conversational context, but derived facts
     # must not acquire dangling provenance dependencies. Carry only referenced
     # frozen context facts separately; raw conversation turns stay excluded.
@@ -294,7 +320,7 @@ def confirmed_intake_definition(state: CFDState) -> dict[str, object]:
         "semantic_contract_version": state.intake.semantic_contract_version,
         "title": state.intake.title,
         "facts": facts,
-        "provenance_dependencies": [fact.model_dump(mode="json", exclude={"evidence"})
+        "provenance_dependencies": [fact.model_dump(mode="json", exclude={"evidence", "evidence_locator"})
             for fact in state.intake.facts if fact.id in dependencies],
         "status": state.intake.status,
     }

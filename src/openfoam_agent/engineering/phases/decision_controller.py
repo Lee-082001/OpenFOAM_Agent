@@ -4,6 +4,7 @@ from openfoam_agent.engineering.authoring_tasks import accept_task
 from openfoam_agent.engineering.design_seal import DesignSealError, materialize_engineering_plan
 from openfoam_agent.engineering.repair_context import repair_episode_requires_direct_attempt
 from openfoam_agent.contracts.regions import validate_design
+from openfoam_agent.contracts.execution_scopes import current_mesh_evidence_failures
 
 import re
 
@@ -463,18 +464,14 @@ def dispatch_prepare(
         validation.failures.extend(self._validate_engineering_defaults(action.plan, state))
         validation.valid = not validation.failures
         if native_execution and validation.valid:
-            if state.mesh_evidence is None or not state.mesh_evidence.passed:
-                validation.failures.append(
-                    "A successful current checkMesh result with cell-count evidence is required before solve approval."
+            validation.failures.extend(
+                current_mesh_evidence_failures(
+                    state,
+                    action.plan,
+                    self.workspace,
+                    max_mesh_cells=self.policy.max_mesh_cells,
                 )
-            elif state.mesh_evidence.cell_count is not None and state.mesh_evidence.cell_count > self.policy.max_mesh_cells:
-                validation.failures.append(
-                    f"Mesh cell count {state.mesh_evidence.cell_count} exceeds bounded policy limit {self.policy.max_mesh_cells}."
-                )
-            elif self._checkmesh_mesh_manifest != self.workspace.mesh_manifest_digest():
-                validation.failures.append(
-                    "Mesh-affecting inputs changed after the last successful checkMesh; re-run checkMesh."
-                )
+            )
             validation.valid = not validation.failures
         proposal = state.active_revision_proposal
         if validation.valid and proposal is not None and proposal.requires_case_revision:

@@ -106,17 +106,23 @@ class PreSolveCompletenessGate:
         failures: list[str] = []
         warnings: list[str] = []
         boundary_resolutions: dict[str, dict[str, str]] = {}
-        core = ["system/controlDict", f"{layout.system_dir}/fvSchemes", f"{layout.system_dir}/fvSolution"]
-        # Validate shared root controls plus this region, never demand root dummy fv*.
-        selected = [p for p in required_case_files
-                    if (len(PurePosixPath(p).parts) == 2
-                        or str(PurePosixPath(p).parent) in {layout.field_dir, layout.system_dir, layout.constant_dir})]
-        required = list(dict.fromkeys([*core, *selected,
-                        *(f"{layout.field_dir}/{name}" for name in layout.required_fields)]))
+        # Agent-owned required_case_files is the solve-input authority. Python adds
+        # no hidden solver-specific fvSchemes/fvSolution/field requirements.
+        selected = [
+            path for path in required_case_files
+            if (
+                len(PurePosixPath(path).parts) == 2
+                or str(PurePosixPath(path).parent)
+                in {layout.field_dir, layout.system_dir, layout.constant_dir}
+            )
+        ]
+        required = list(dict.fromkeys(selected))
+        if "system/controlDict" not in required:
+            failures.append("EngineeringPlan.required_case_files must declare system/controlDict for bounded execution.")
         field_files = [item for item in required if str(PurePosixPath(item).parent) == layout.field_dir]
         if not field_files:
             failures.append(
-                "EngineeringPlan.required_case_files must declare the solver-required initial field files under 0/."
+                "EngineeringPlan.required_case_files must declare the Agent-selected initial field files under 0/."
             )
 
         file_header_classes: dict[str, str] = {}

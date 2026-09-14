@@ -1,37 +1,33 @@
 from __future__ import annotations
 from pathlib import PurePosixPath
 from .models import RegionCaseLayout
+from openfoam_agent.contracts.execution_scopes import execution_scopes
+
+
+def _required_fields(required: list[str], region: str) -> list[str]:
+    parent = f"0/{region}" if region else "0"
+    return [
+        PurePosixPath(path).name
+        for path in required
+        if str(PurePosixPath(path).parent) == parent
+    ]
 
 
 def region_layouts(plan=None, required_files: list[str] | None = None) -> list[RegionCaseLayout]:
+    """Legacy RegionCaseLayout projection from the canonical execution scopes.
+
+    New controller logic must consume execution_scopes directly. This wrapper exists
+    for old validators/extensions and cannot create a second topology authority.
+    """
     required = list(required_files if required_files is not None else (plan.required_case_files if plan else []))
-    inferred = set()
-    for text in required:
-        parts = PurePosixPath(text).parts
-        if len(parts) >= 3 and parts[0] == "0":
-            inferred.add(parts[1])
-        if len(parts) == 3 and parts[0] == "system" and parts[2] in {"fvSchemes", "fvSolution"}:
-            inferred.add(parts[1])
-    assignments = {x.region: x.solver_module for x in (plan.execution.regions if plan and plan.execution else [])}
-    if plan and plan.region_layouts:
-        layouts = plan.region_layouts
-        names = {x.region for x in layouts}
-        if len(names) != len(layouts):
-            raise ValueError("Duplicate region layouts.")
-        if assignments and names != set(assignments):
-            raise ValueError("Region layout and execution assignments do not exactly match.")
-        if inferred - names:
-            raise ValueError("Required files reference undeclared regions.")
-        for layout in layouts:
-            if assignments and layout.solver_module != assignments.get(layout.region):
-                raise ValueError("Region layout solver disagrees with execution assignment.")
-        return layouts
-    names = sorted(set(assignments) | inferred) or [""]
-    if inferred and any(len(PurePosixPath(p).parts) == 2 and p.startswith("0/") for p in required):
-        raise ValueError("Mixed root and named-region initial fields require explicit region layouts.")
-    return [RegionCaseLayout(region=name, solver_module=assignments.get(name),
-            required_fields=[PurePosixPath(p).name for p in required
-                             if str(PurePosixPath(p).parent) == (f"0/{name}" if name else "0")]) for name in names]
+    return [
+        RegionCaseLayout(
+            region=scope.name or "",
+            solver_module=scope.solver_module,
+            required_fields=_required_fields(required, scope.name or ""),
+        )
+        for scope in execution_scopes(plan)
+    ]
 
 
 def region_mesh_digest(workspace, region: str) -> str:
@@ -40,23 +36,21 @@ def region_mesh_digest(workspace, region: str) -> str:
 
 
 def validate_design(plan, intake) -> list[str]:
-    """Design-stage hard checks only.
-
-    v4.2 deliberately defers region/file completeness to authoring and pre-solve
-    validation. The design stage only blocks if confirmed user requirements are
-    dropped or if a binding points outside the declared safe case-file namespace.
-    """
+    """Design hard checks: identity closure plus truthful optional implementation claims."""
     failures = []
-    ids = {x.id for x in intake.facts if x.category != "context"}
+    ids = {item.id for item in intake.facts if item.category != "context"}
     if set(plan.confirmed_fact_ids) != ids:
         failures.append("Design does not exactly preserve active confirmed fact IDs.")
-    if {x.fact_id for x in plan.confirmed_fact_bindings} != ids:
-        failures.append("Design bindings do not exactly cover confirmed facts.")
+    binding_ids = {item.fact_id for item in plan.confirmed_fact_bindings}
+    if binding_ids - ids:
+        failures.append("Design contains implementation bindings for unknown confirmed facts.")
     required = set(plan.required_case_files)
     for binding in plan.confirmed_fact_bindings:
-        refs = set(binding.case_files) | {x.path for x in binding.case_assertions}
+        refs = set(binding.case_files) | {item.path for item in binding.case_assertions}
         if binding.numeric_relation is not None:
-            refs |= {x.path for x in [*binding.numeric_relation.numerator, *binding.numeric_relation.denominator]}
+            refs |= {item.path for item in [*binding.numeric_relation.numerator, *binding.numeric_relation.denominator]}
         if refs - required:
-            failures.append(f"Design binding {binding.fact_id} references undeclared files: {sorted(refs - required)}")
+            failures.append(
+                f"Design binding {binding.fact_id} references undeclared files: {sorted(refs - required)}"
+            )
     return failures

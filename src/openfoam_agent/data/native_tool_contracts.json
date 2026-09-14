@@ -1,0 +1,459 @@
+{
+  "schema_version": "1.0",
+  "commands": [
+    {
+      "command": "blockMesh",
+      "effect": "mesh",
+      "required_dictionary": "system/blockMeshDict",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "scope_arguments": [
+        "-region",
+        "{scope_name}"
+      ],
+      "mesh_dependency_inputs": [
+        "{system_dir}/blockMeshDict"
+      ],
+      "mesh_dependency_outputs": [
+        "{constant_dir}/polyMesh"
+      ],
+      "controller_auto_consumer": true,
+      "execution_order": 100,
+      "default_arguments": []
+    },
+    {
+      "command": "snappyHexMesh",
+      "effect": "mesh",
+      "required_dictionary": "system/snappyHexMeshDict",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "scope_arguments": [
+        "-region",
+        "{scope_name}"
+      ],
+      "mesh_dependency_inputs": [
+        "{system_dir}/snappyHexMeshDict",
+        "{constant_dir}/polyMesh",
+        "constant/triSurface",
+        "constant/geometry"
+      ],
+      "mesh_dependency_outputs": [
+        "{constant_dir}/polyMesh"
+      ],
+      "controller_auto_consumer": true,
+      "execution_order": 200,
+      "default_arguments": [
+        "-overwrite"
+      ]
+    },
+    {
+      "command": "surfaceFeatureExtract",
+      "effect": "mesh",
+      "required_dictionary": "system/surfaceFeatureExtractDict",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "scope_arguments": [
+        "-region",
+        "{scope_name}"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "createBaffles",
+      "effect": "mesh",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "splitMeshRegions",
+      "effect": "mesh",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "setsToZones",
+      "effect": "mesh",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "surfaceTransformPoints",
+      "effect": "mesh",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "topoSet",
+      "effect": "mesh",
+      "required_dictionary": "system/topoSetDict",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "scope_arguments": [
+        "-region",
+        "{scope_name}"
+      ],
+      "mesh_dependency_inputs": [
+        "{system_dir}/topoSetDict",
+        "{constant_dir}/polyMesh"
+      ],
+      "mesh_dependency_outputs": [
+        "{constant_dir}/polyMesh"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "setFields",
+      "effect": "initialization",
+      "required_dictionary": "system/setFieldsDict",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "scope_arguments": [
+        "-region",
+        "{scope_name}"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "createPatch",
+      "effect": "mesh",
+      "required_dictionary": "system/createPatchDict",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "scope_arguments": [
+        "-region",
+        "{scope_name}"
+      ],
+      "mesh_dependency_inputs": [
+        "{system_dir}/createPatchDict",
+        "{constant_dir}/polyMesh"
+      ],
+      "mesh_dependency_outputs": [
+        "{constant_dir}/polyMesh"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "decomposePar",
+      "effect": "decomposition",
+      "required_dictionary": "system/decomposeParDict",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "scope_arguments": [
+        "-region",
+        "{scope_name}"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "extrudeMesh",
+      "effect": "mesh",
+      "required_dictionary": "system/extrudeMeshDict",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "scope_arguments": [
+        "-region",
+        "{scope_name}"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "checkMesh",
+      "effect": "validation",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_finalizer": true,
+      "scope_arguments": [
+        "-region",
+        "{scope_name}"
+      ],
+      "execution_order": 10000,
+      "default_arguments": []
+    },
+    {
+      "command": "surfaceCheck",
+      "effect": "validation",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "foamDictionary",
+      "effect": "validation",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "potentialFoam",
+      "effect": "initialization",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "renumberMesh",
+      "effect": "mesh",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "mesh_dependency_inputs": [
+        "{constant_dir}/polyMesh"
+      ],
+      "mesh_dependency_outputs": [
+        "{constant_dir}/polyMesh"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "transformPoints",
+      "effect": "mesh",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "mesh_dependency_inputs": [
+        "{constant_dir}/polyMesh"
+      ],
+      "mesh_dependency_outputs": [
+        "{constant_dir}/polyMesh"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "gmshToFoam",
+      "effect": "mesh",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "fluentMeshToFoam",
+      "effect": "mesh",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "foamToC",
+      "effect": "query",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "foamListTimes",
+      "effect": "query",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "mapFields",
+      "effect": "initialization",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "foamCleanCase",
+      "effect": "destructive",
+      "permitted_phases": [],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "foamCleanPolyMesh",
+      "effect": "destructive",
+      "permitted_phases": [],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "foamPostProcess",
+      "effect": "postprocess",
+      "permitted_phases": [
+        "postprocess"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "foamRun",
+      "effect": "solve",
+      "permitted_phases": [
+        "runtime"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "foamMultiRun",
+      "effect": "solve",
+      "permitted_phases": [
+        "runtime"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "reconstructPar",
+      "effect": "reconstruction",
+      "permitted_phases": [
+        "runtime",
+        "restart"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    },
+    {
+      "command": "reconstructParMesh",
+      "effect": "reconstruction",
+      "permitted_phases": [
+        "runtime",
+        "restart"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": []
+    }
+  ]
+}

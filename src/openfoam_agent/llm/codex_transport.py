@@ -19,6 +19,15 @@ _MODEL_ONLY_ALLOWED_ITEMS = frozenset({"agent_message", "reasoning", "plan", "to
 _DIAGNOSTIC_ITEM_TYPES = frozenset({"error"})
 
 
+class CodexTransportParseError(ValueError):
+    """Malformed or incomplete Codex JSONL transport.
+
+    This is intentionally distinct from CodexTransportViolation: malformed transport
+    may be retried in a fresh ephemeral process, while observed tool/policy violations
+    remain immediate fail-closed errors.
+    """
+
+
 class CodexTransportViolation(ValueError):
     """Raised when a Codex event violates the model-only transport contract."""
 
@@ -116,9 +125,9 @@ def inspect_events(output: str):
         try:
             event = json.loads(line)
         except (ValueError, TypeError):
-            raise ValueError("Codex --json returned a non-JSON event; transport contract is unverified.") from None
+            raise CodexTransportParseError("Codex --json returned a non-JSON event; transport contract is unverified.") from None
         if not isinstance(event, dict):
-            raise ValueError("Invalid Codex event envelope.")
+            raise CodexTransportParseError("Invalid Codex event envelope.")
         count += 1
         kind = str(event.get("type") or "")
         if kind in {"error", "turn.failed"}:
@@ -143,7 +152,7 @@ def inspect_events(output: str):
             raw = event.get("usage")
             if raw is not None:
                 if not isinstance(raw, dict):
-                    raise ValueError("Invalid Codex usage object.")
+                    raise CodexTransportParseError("Invalid Codex usage object.")
                 keys = {
                     "input_tokens": "inputTokens",
                     "output_tokens": "outputTokens",
@@ -151,20 +160,20 @@ def inspect_events(output: str):
                     "reasoning_output_tokens": "reasoningOutputTokens",
                 }
                 if not {"input_tokens", "output_tokens"} <= raw.keys():
-                    raise ValueError("Codex usage is incomplete; not substituting zero.")
+                    raise CodexTransportParseError("Codex usage is incomplete; not substituting zero.")
                 usage = {}
                 for source, target in keys.items():
                     if source in raw:
                         value = raw[source]
                         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                            raise ValueError("Invalid Codex token count.")
+                            raise CodexTransportParseError("Invalid Codex token count.")
                         usage[target] = value
                 usage["totalTokens"] = usage["inputTokens"] + usage["outputTokens"]
         elif kind not in {"thread.started", "turn.started"}:
             raise CodexTransportViolation(event_type=kind or "<missing>", detail="unknown event envelope")
     if not completed:
         detail = f" Last diagnostic: {diagnostics[-1]}" if diagnostics else ""
-        raise ValueError("Codex event stream has no completed turn." + detail)
+        raise CodexTransportParseError("Codex event stream has no completed turn." + detail)
     return {
         "event_count": count,
         "turn_completed": True,

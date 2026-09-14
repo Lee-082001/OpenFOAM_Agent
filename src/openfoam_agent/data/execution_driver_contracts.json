@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "default_direct_application": {
+    "scope_cardinality": {"min": 1, "max": 1},
+    "scope_namespace": "root_only",
+    "scope_solver_binding": "forbidden",
+    "control_dict_binding": {"mode": "none"},
+    "runtime_arguments": [],
+    "plan_solver_mirror": "driver"
+  },
+  "drivers": [
+    {
+      "driver": "foamRun",
+      "provider_ids": ["execution.foamRun", "driver.foamRun"],
+      "scope_cardinality": {"min": 1, "max": 1},
+      "scope_namespace": "root_only",
+      "scope_solver_binding": "required",
+      "control_dict_binding": {"mode": "scalar", "entry": "solver"},
+      "runtime_arguments": ["-solver", "{scope_solver}"],
+      "plan_solver_mirror": "scope_solver"
+    },
+    {
+      "driver": "foamMultiRun",
+      "provider_ids": ["execution.foamMultiRun", "driver.foamMultiRun"],
+      "scope_cardinality": {"min": 1, "max": null},
+      "scope_namespace": "named_only",
+      "scope_solver_binding": "required",
+      "control_dict_binding": {"mode": "named_map", "entry": "regionSolvers"},
+      "runtime_arguments": [],
+      "plan_solver_mirror": "driver"
+    }
+  ]
+}
