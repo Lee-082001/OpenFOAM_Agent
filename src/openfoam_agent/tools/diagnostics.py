@@ -54,7 +54,6 @@ class NativeFailureDiagnostic:
         return "\n".join(lines)
 
 
-
 ValidationStatus = Literal["pass", "fail", "inconclusive"]
 FailureCategory = Literal["case", "tool", "infra", "security", "user_contract"]
 
@@ -84,7 +83,14 @@ def classify_native_validation(
     command_name: str | None = None,
     probe: bool = False,
 ) -> NativeValidationAssessment:
-    """Separate case invalidity from validator/runner uncertainty."""
+    """Separate observed case invalidity from validator/runner uncertainty.
+
+    v5.0 is deliberately fail-closed about *claims*, not about repair guesses: a
+    non-zero exit code or process crash is not, by itself, evidence that authored
+    CFD content is wrong. Only an explicit OpenFOAM fatal diagnostic is promoted to
+    a case failure that may enter the CFD repair loop. Everything else remains an
+    inconclusive tool/infra observation until stronger evidence is available.
+    """
 
     command = command_name or _logical_command_name(result)
     if result.success:
@@ -92,10 +98,7 @@ def classify_native_validation(
 
     diagnostic = diagnose_openfoam_failure(result, command_name=command)
 
-    # v4.7.2: dynamic-loader / executable-launch failures are host-toolchain
-    # failures. SafeRunner already resolves a trusted executable before spawn, so
-    # exit 126/127 cannot be treated as evidence that authored CFD content is bad.
-    # Most importantly, never feed these failures to an LLM case-repair loop.
+    # Dynamic-loader / executable-launch failures are host-toolchain failures.
     if diagnostic.kind in {"shared_library_missing", "symbol_lookup_error", "exec_format_error"} or result.return_code in {126, 127}:
         return NativeValidationAssessment(
             "inconclusive",
@@ -104,9 +107,11 @@ def classify_native_validation(
             f"{command} could not start reliably because the native executable/toolchain environment is unavailable or incomplete.",
         )
 
+    # Explicit OpenFOAM fatal diagnostics are the only generic native observations
+    # that prove case-level rejection without additional interpretation.
     if diagnostic.kind in {"foam_fatal_io_error", "foam_fatal_error", "fatal_error"}:
         return NativeValidationAssessment(
-            "fail", "case", diagnostic, f"{command} reported an explicit OpenFOAM fatal diagnostic."
+            "fail", "case", diagnostic, f"{command} reported an explicit fatal diagnostic."
         )
 
     termination = (result.termination_reason or "").strip().lower()
@@ -126,25 +131,22 @@ def classify_native_validation(
         )
 
     if diagnostic.kind in {"terminate", "abort", "segmentation_fault", "floating_point_exception"}:
-        if probe:
-            return NativeValidationAssessment(
-                "inconclusive", "tool", diagnostic,
-                f"{command} advisory validator terminated abnormally without proving the case invalid.",
-            )
         return NativeValidationAssessment(
-            "fail", "case", diagnostic,
-            f"{command} consumer terminated abnormally while using the authored case.",
+            "inconclusive",
+            "tool",
+            diagnostic,
+            f"{command} terminated abnormally without an explicit OpenFOAM case-rejection diagnostic; CFD repair was not authorized from this observation alone.",
         )
 
-    if probe:
-        return NativeValidationAssessment(
-            "inconclusive", "tool", diagnostic,
-            f"{command} returned non-zero without proving the case invalid."
-        )
-
+    # v5.0: an unexplained non-zero consumer exit is observation, not case evidence.
+    # This intentionally applies to both advisory probes and selected consumers.
     return NativeValidationAssessment(
-        "fail", "case", diagnostic, f"{command} consumer returned non-zero without an infrastructure termination."
+        "inconclusive",
+        "tool",
+        diagnostic,
+        f"{command} returned non-zero without explicit evidence that the CFD case is invalid.",
     )
+
 
 def diagnose_openfoam_failure(
     result: ToolResult,
