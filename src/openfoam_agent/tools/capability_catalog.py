@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from openfoam_agent.capabilities.graph import CapabilityGraph
@@ -12,9 +11,11 @@ from .references import normalize_query
 class CapabilityCatalog:
     """Read-only documented + installed capability evidence for CFDEngineeringAgent.
 
-    Static v13/v14 graphs supply documented semantics. The sourced installation is
-    authoritative for executable availability and augments the graph with every trusted
-    application plus runtime-selectable components actually discovered from the installed source tree.
+    The capability graph owns documented CFD semantics. Installation discovery owns only
+    existence/readiness observations.  Python never infers physics capability from an
+    executable/component name.  When a documented provider and an installed identity
+    observation describe the same provider, the catalog joins those independent facts
+    without manufacturing additional semantics.
     """
 
     def __init__(self, graph_path: str | Path, *, installation: InstalledOpenFOAMIR | None = None):
@@ -33,8 +34,46 @@ class CapabilityCatalog:
             "installed_ir_fingerprint": self.installation.fingerprint if self.installation is not None else None,
         }
 
+    @staticmethod
+    def _types_compatible(documented: str, installed: str) -> bool:
+        if documented == installed:
+            return True
+        # Historical graphs use both ``solver`` and ``solver_module`` for modular
+        # Foundation solvers.  Treat that naming difference as identity compatibility,
+        # not as a semantic capability inference.
+        return {documented, installed} <= {"solver", "solver_module"}
+
+    def _installed_match(self, provider: CapabilityProvider) -> CapabilityProvider | None:
+        for observed in self._installed:
+            if observed.name != provider.name:
+                continue
+            if self._types_compatible(provider.provider_type, observed.provider_type):
+                return observed
+        return None
+
     def all_providers(self) -> list[CapabilityProvider]:
-        merged: dict[str, CapabilityProvider] = {item.id: item for item in self.graph.spec.providers}
+        merged: dict[str, CapabilityProvider] = {}
+        for provider in self.graph.spec.providers:
+            observed = self._installed_match(provider)
+            if observed is None:
+                merged[provider.id] = provider
+                continue
+            metadata = dict(provider.metadata)
+            metadata.update(
+                installed_observed=True,
+                installed_provider_id=observed.id,
+                installed_verification_level=observed.verification_level,
+                semantic_capabilities_inferred=False,
+            )
+            evidence = list(provider.evidence)
+            for item in observed.evidence:
+                if item not in evidence:
+                    evidence.append(item)
+            # Keep the graph's documented verification level: documentation proves the
+            # semantics while the joined installation observation proves local presence.
+            merged[provider.id] = provider.model_copy(
+                update={"metadata": metadata, "evidence": evidence, "verified": True}
+            )
         for item in self._installed:
             merged.setdefault(item.id, item)
         return [merged[key] for key in sorted(merged)]
@@ -90,24 +129,28 @@ class CapabilityCatalog:
             CapabilityEvidence(
                 kind="installation_discovery",
                 reference=f"installed:foundation:{installation.version}",
-                note="Discovered from the sourced trusted OpenFOAM installation.",
+                note=(
+                    "Observed in the sourced trusted OpenFOAM installation. This evidence "
+                    "proves local identity/presence only; no CFD semantics are inferred from the name."
+                ),
             )
         ]
+        common_metadata = {
+            "runtime_load_verified": False,
+            "native_test_verified": False,
+            "semantic_capabilities_inferred": False,
+        }
         providers: list[CapabilityProvider] = []
         for item in installation.executables:
             if item.category == "execution_driver":
                 provider_type = "execution_driver"
                 capabilities = [f"execution.driver.{item.name}"]
-                if item.name == "foamMultiRun":
-                    capabilities += ["execution.multiregion", "heat_transfer.conjugate"]
-                elif item.name == "foamRun":
-                    capabilities += ["execution.single_region", "execution.solver_module"]
             elif item.category == "solver_application":
                 provider_type = "solver_application"
                 capabilities = [f"solver.application.{item.name}"]
             else:
                 provider_type = "utility"
-                capabilities = [f"utility.{item.name}", f"application.{item.name}"]
+                capabilities = [f"application.{item.name}"]
             providers.append(
                 CapabilityProvider(
                     id=f"installed.application.{item.name}",
@@ -117,7 +160,7 @@ class CapabilityCatalog:
                     openfoam_version=installation.version,
                     verified=True,
                     verification_level="binary_present",
-                    metadata={"runtime_load_verified": False, "native_test_verified": False},
+                    metadata=dict(common_metadata),
                     evidence=evidence,
                 )
             )
@@ -125,38 +168,14 @@ class CapabilityCatalog:
             if item.category == "solver_module":
                 ptype = "solver_module"
                 capabilities = [f"solver.module.{item.name}"]
-                if item.name == "solid":
-                    capabilities += ["heat_transfer.solid", "equation.energy.solid", "heat_transfer.conjugate"]
-                elif item.name == "fluid":
-                    capabilities += ["heat_transfer.fluid", "equation.energy.temperature", "heat_transfer.conjugate"]
-                elif item.name == "incompressibleFluid":
-                    capabilities += ["flow.incompressible"]
                 provider_id = f"installed.solver_module.{item.name}"
             elif item.category == "fv_model":
                 ptype = "fv_model"
                 capabilities = [f"fvModel.{item.name}"]
-                if item.name == "heatSource":
-                    capabilities += ["source.heat.volumetric", "heat_generation.volumetric"]
-                elif item.name in {"solidificationMelting", "VoFSolidificationMelting"}:
-                    capabilities += [
-                        "phase_change.solid_liquid",
-                        "melting",
-                        "solidification",
-                        "energy.latent_heat",
-                    ]
-                    if item.name == "VoFSolidificationMelting":
-                        capabilities.append("multiphase.vof")
-                    else:
-                        capabilities.append("phase_change.enthalpy_porosity")
-                elif item.name in {"heatTransferLimitedPhaseChange", "coefficientPhaseChange"}:
-                    capabilities += [
-                        "phase_change.fluid_fluid",
-                        "phase_change.mass_transfer",
-                    ]
                 provider_id = f"installed.fv_model.{item.name}"
             elif item.category == "function_object":
                 ptype = "function_object"
-                capabilities = [f"functionObject.{item.name}", "postprocessing"]
+                capabilities = [f"functionObject.{item.name}"]
                 provider_id = f"installed.function_object.{item.name}"
             elif item.category == "source_component":
                 ptype = "source_component"
@@ -173,7 +192,7 @@ class CapabilityCatalog:
                     openfoam_version=installation.version,
                     verified=True,
                     verification_level="source_discovered",
-                    metadata={"runtime_load_verified": False, "native_test_verified": False},
+                    metadata=dict(common_metadata),
                     evidence=evidence,
                 )
             )
