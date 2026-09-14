@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from openfoam_agent.capabilities.graph import CapabilityGraph
@@ -12,9 +11,11 @@ from .references import normalize_query
 class CapabilityCatalog:
     """Read-only documented + installed capability evidence for CFDEngineeringAgent.
 
-    Static v13/v14 graphs supply documented semantics. The sourced installation is
-    authoritative for executable availability and augments the graph with every trusted
-    application plus runtime-selectable components actually discovered from the installed source tree.
+    The capability graph owns semantic claims. Installation discovery owns only
+    existence/registration observations. A provider receives design-stage installed
+    verification only when a documented semantic provider can be joined to a matching
+    installed identity by name/version/type compatibility. Python never manufactures
+    physics capability strings from a component name.
     """
 
     def __init__(self, graph_path: str | Path, *, installation: InstalledOpenFOAMIR | None = None):
@@ -33,10 +34,69 @@ class CapabilityCatalog:
             "installed_ir_fingerprint": self.installation.fingerprint if self.installation is not None else None,
         }
 
+    @staticmethod
+    def _provider_types_compatible(documented: str, installed: str) -> bool:
+        if documented == installed:
+            return True
+        # Foundation capability graphs historically used `solver` for runtime
+        # selectable modules while installation discovery can observe them as
+        # `solver_module`. This is a representation compatibility rule only; it
+        # does not infer any physics capability.
+        return {documented, installed} <= {"solver", "solver_module"}
+
+    def _joined_documented_provider(self, provider: CapabilityProvider) -> CapabilityProvider:
+        matches = [
+            item
+            for item in self._installed
+            if item.name == provider.name
+            and item.openfoam_version == provider.openfoam_version
+            and self._provider_types_compatible(provider.provider_type, item.provider_type)
+        ]
+        if not matches:
+            return provider
+        installed = sorted(matches, key=lambda item: item.id)[0]
+        evidence = [*provider.evidence]
+        for item in installed.evidence:
+            if item.model_dump(mode="json") not in [x.model_dump(mode="json") for x in evidence]:
+                evidence.append(item)
+        metadata = dict(provider.metadata)
+        metadata.update(
+            {
+                "installed_identity_provider": installed.id,
+                "semantic_capability_source": provider.id,
+                "runtime_load_verified": bool(installed.metadata.get("runtime_load_verified", False)),
+                "native_test_verified": bool(installed.metadata.get("native_test_verified", False)),
+            }
+        )
+        return provider.model_copy(
+            update={
+                "verified": bool(provider.verified and installed.verified),
+                "verification_level": installed.verification_level,
+                "evidence": evidence,
+                "metadata": metadata,
+            }
+        )
+
     def all_providers(self) -> list[CapabilityProvider]:
-        merged: dict[str, CapabilityProvider] = {item.id: item for item in self.graph.spec.providers}
+        documented = [self._joined_documented_provider(item) for item in self.graph.spec.providers]
+        merged: dict[str, CapabilityProvider] = {item.id: item for item in documented}
+
+        # Keep unmatched installation identities queryable, but with identity-only
+        # capability strings. These records prove presence/registration, not CFD
+        # semantics. Documented providers above remain the semantic authority.
+        documented_matches = {
+            (item.name, item.openfoam_version, item.provider_type)
+            for item in documented
+        }
         for item in self._installed:
-            merged.setdefault(item.id, item)
+            matched = any(
+                name == item.name
+                and version == item.openfoam_version
+                and self._provider_types_compatible(ptype, item.provider_type)
+                for name, version, ptype in documented_matches
+            )
+            if not matched:
+                merged.setdefault(item.id, item)
         return [merged[key] for key in sorted(merged)]
 
     def provider(self, provider_id: str):
@@ -90,7 +150,7 @@ class CapabilityCatalog:
             CapabilityEvidence(
                 kind="installation_discovery",
                 reference=f"installed:foundation:{installation.version}",
-                note="Discovered from the sourced trusted OpenFOAM installation.",
+                note="Observed in the sourced trusted OpenFOAM installation; this evidence proves identity/presence only.",
             )
         ]
         providers: list[CapabilityProvider] = []
@@ -98,16 +158,12 @@ class CapabilityCatalog:
             if item.category == "execution_driver":
                 provider_type = "execution_driver"
                 capabilities = [f"execution.driver.{item.name}"]
-                if item.name == "foamMultiRun":
-                    capabilities += ["execution.multiregion", "heat_transfer.conjugate"]
-                elif item.name == "foamRun":
-                    capabilities += ["execution.single_region", "execution.solver_module"]
             elif item.category == "solver_application":
                 provider_type = "solver_application"
                 capabilities = [f"solver.application.{item.name}"]
             else:
                 provider_type = "utility"
-                capabilities = [f"utility.{item.name}", f"application.{item.name}"]
+                capabilities = [f"application.{item.name}"]
             providers.append(
                 CapabilityProvider(
                     id=f"installed.application.{item.name}",
@@ -125,38 +181,14 @@ class CapabilityCatalog:
             if item.category == "solver_module":
                 ptype = "solver_module"
                 capabilities = [f"solver.module.{item.name}"]
-                if item.name == "solid":
-                    capabilities += ["heat_transfer.solid", "equation.energy.solid", "heat_transfer.conjugate"]
-                elif item.name == "fluid":
-                    capabilities += ["heat_transfer.fluid", "equation.energy.temperature", "heat_transfer.conjugate"]
-                elif item.name == "incompressibleFluid":
-                    capabilities += ["flow.incompressible"]
                 provider_id = f"installed.solver_module.{item.name}"
             elif item.category == "fv_model":
                 ptype = "fv_model"
                 capabilities = [f"fvModel.{item.name}"]
-                if item.name == "heatSource":
-                    capabilities += ["source.heat.volumetric", "heat_generation.volumetric"]
-                elif item.name in {"solidificationMelting", "VoFSolidificationMelting"}:
-                    capabilities += [
-                        "phase_change.solid_liquid",
-                        "melting",
-                        "solidification",
-                        "energy.latent_heat",
-                    ]
-                    if item.name == "VoFSolidificationMelting":
-                        capabilities.append("multiphase.vof")
-                    else:
-                        capabilities.append("phase_change.enthalpy_porosity")
-                elif item.name in {"heatTransferLimitedPhaseChange", "coefficientPhaseChange"}:
-                    capabilities += [
-                        "phase_change.fluid_fluid",
-                        "phase_change.mass_transfer",
-                    ]
                 provider_id = f"installed.fv_model.{item.name}"
             elif item.category == "function_object":
                 ptype = "function_object"
-                capabilities = [f"functionObject.{item.name}", "postprocessing"]
+                capabilities = [f"functionObject.{item.name}"]
                 provider_id = f"installed.function_object.{item.name}"
             elif item.category == "source_component":
                 ptype = "source_component"
