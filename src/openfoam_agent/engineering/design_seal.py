@@ -82,8 +82,8 @@ def _sealed_solver_mirror(design: EngineeringDesign) -> tuple[str, str]:
 def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> EngineeringPlan:
     """Seal Agent decisions with controller-owned identity/provenance metadata.
 
-    This function never chooses a solver, mesh, BC, material value, or numerical
-    setting. It only validates provider identities the Agent already chose and attaches
+    This function never chooses a solver, mesh, BC, material value, numerical setting
+    or region topology. It validates identities the Agent already chose and attaches
     deterministic state that Python already owns.
     """
     if state.intake is None or not state.intake_digest:
@@ -91,6 +91,18 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
     if not design.required_case_files:
         raise DesignSealError(
             "Agent-owned required case manifest is empty; staged design cannot be sealed."
+        )
+
+    # v5.0: user authorization and controller progress policy are distinct. Engineering
+    # defaults may only be sealed when the request/session actually authorized delegated
+    # completion. A prompt-policy bug can therefore never promote false authorization.
+    delegated = bool(
+        getattr(getattr(state, "user_request", None), "exploratory_completion_authorized", False)
+    )
+    if design.engineering_defaults and not delegated:
+        raise DesignSealError(
+            "Engineering defaults were proposed without user-authorized exploratory completion. "
+            "Python will not promote controller policy into user authorization."
         )
 
     versions: set[str] = set()
@@ -129,12 +141,14 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
 
     solver, solver_provider_id = _sealed_solver_mirror(design)
     fact_ids = [fact.id for fact in state.intake.facts if fact.category != "context"]
-    # Identity/coverage anchors only. Authoring/native gates establish implementation truth.
+    # These are identity-closure anchors only. They do not claim that every confirmed
+    # fact has a universal case-file representation; artifact/native truth is checked
+    # separately by the validation stack.
     bindings = [
         ConfirmedFactBinding(
             fact_id=fact_id,
             plan_fields=["problem_interpretation"],
-            explanation="Controller-owned frozen-intake coverage anchor; not artifact implementation evidence.",
+            explanation="Frozen-intake identity anchor only; not artifact implementation evidence.",
         )
         for fact_id in fact_ids
     ]
