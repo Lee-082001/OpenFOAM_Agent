@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from openfoam_agent.contracts.regions import region_layouts
 
+from openfoam_agent.contracts.regions import region_layouts
 from openfoam_agent.schemas.engineering import EngineeringPlan
 from openfoam_agent.tools.foam_file import validate_foam_file_header
 from openfoam_agent.tools.openfoam import OpenFOAMTools
@@ -17,11 +17,9 @@ from openfoam_agent.verification.foam_semantics import (
 )
 
 
-_CORE_SYSTEM_FILES = ("system/controlDict", "system/fvSchemes", "system/fvSolution")
-_FIELD_DIR = "0/"
-# Narrow executable constraint types whose effective field patch type must match
-# the mesh patch type. Ordinary patch/wall boundaries intentionally are excluded.
-_CONSTRAINT_PATCH_TYPES = frozenset({"empty", "wedge", "symmetry", "symmetryPlane", "cyclic", "cyclicAMI"})
+_CONSTRAINT_PATCH_TYPES = frozenset(
+    {"empty", "wedge", "symmetry", "symmetryPlane", "cyclic", "cyclicAMI"}
+)
 
 
 @dataclass
@@ -38,11 +36,12 @@ class PreSolveValidationResult:
 
 
 class PreSolveCompletenessGate:
-    """Validate solver-input completeness without making CFD engineering choices.
+    """Validate the Agent-declared solve-input manifest without inventing CFD inputs.
 
-    The Engineering Agent declares solver-specific required case files. Python only
-    verifies that those declarations exist, parse as OpenFOAM dictionaries where
-    applicable, and that declared initial fields cover every mesh boundary patch.
+    v5.0 authority rule: ``EngineeringPlan.required_case_files`` is the solver-input
+    manifest. Python may validate files and native mesh artifacts, but it must not add
+    solver-specific dictionaries or fields that the Agent/provider contract never
+    declared. The selected OpenFOAM consumer remains the strongest compatibility check.
     """
 
     def __init__(self, tools: OpenFOAMTools, workspace: CaseWorkspace) -> None:
@@ -59,15 +58,19 @@ class PreSolveCompletenessGate:
             left = result.regions.get(interface.region, {})
             right = result.regions.get(interface.neighbour_region, {})
             if interface.patch not in left.get("mesh_patches", []):
-                result.failures.append(f"Interface patch missing: {interface.region}/{interface.patch}.")
+                result.failures.append(
+                    f"Interface patch missing: {interface.region}/{interface.patch}."
+                )
             if interface.neighbour_patch not in right.get("mesh_patches", []):
-                result.failures.append(f"Interface neighbour patch missing: {interface.neighbour_region}/{interface.neighbour_patch}.")
+                result.failures.append(
+                    f"Interface neighbour patch missing: "
+                    f"{interface.neighbour_region}/{interface.neighbour_patch}."
+                )
             for field_name in interface.fields:
                 for region in (interface.region, interface.neighbour_region):
-                    if f"0/{region}/{field_name}" not in result.checked_files:
-                        result.failures.append(f"Interface field not declared: 0/{region}/{field_name}.")
-            # Membership is deterministic; correct physical coupling is not inferred
-            # from matching patch names. Native and balance evidence remain separate.
+                    expected = f"0/{region}/{field_name}" if region else f"0/{field_name}"
+                    if expected not in result.checked_files:
+                        result.failures.append(f"Interface field not declared: {expected}.")
             result.warnings.append(
                 f"Interface {interface.region}/{interface.patch} membership checked; "
                 "physical coupling and flux conservation require native/QoI verification."
@@ -75,9 +78,12 @@ class PreSolveCompletenessGate:
         result.valid = not result.failures
         return result
 
-    def validate_required_case_files(self, required_case_files: list[str]) -> PreSolveValidationResult:
+    def validate_required_case_files(
+        self, required_case_files: list[str]
+    ) -> PreSolveValidationResult:
         try:
-            return self._validate_layouts(required_case_files, region_layouts(required_files=required_case_files))
+            layouts = region_layouts(required_files=required_case_files)
+            return self._validate_layouts(required_case_files, layouts)
         except ValueError as exc:
             return PreSolveValidationResult(valid=False, failures=[str(exc)])
 
@@ -86,38 +92,56 @@ class PreSolveCompletenessGate:
         for layout in layouts:
             partial = self._validate_region(required_case_files, layout)
             result.regions[layout.region] = {
-                "valid": partial.valid, "mesh_patches": partial.mesh_patches,
+                "valid": partial.valid,
+                "mesh_patches": partial.mesh_patches,
                 "mesh_patch_types": partial.mesh_patch_types,
                 "checked_files": partial.checked_files,
                 "solver_module": layout.solver_module,
             }
             result.failures.extend(partial.failures)
             result.warnings.extend(partial.warnings)
-            result.checked_files.extend(p for p in partial.checked_files if p not in result.checked_files)
+            result.checked_files.extend(
+                path for path in partial.checked_files if path not in result.checked_files
+            )
             prefix = layout.region + "/" if layout.region else ""
-            result.mesh_patches.extend(prefix + p for p in partial.mesh_patches)
-            result.mesh_patch_types.update({prefix+k: v for k,v in partial.mesh_patch_types.items()})
+            result.mesh_patches.extend(prefix + patch for patch in partial.mesh_patches)
+            result.mesh_patch_types.update(
+                {prefix + key: value for key, value in partial.mesh_patch_types.items()}
+            )
             result.boundary_resolutions.update(partial.boundary_resolutions)
             result.file_header_classes.update(partial.file_header_classes)
         result.valid = not result.failures
         return result
 
+    @staticmethod
+    def _belongs_to_layout(path: str, layout) -> bool:
+        parts = PurePosixPath(path).parts
+        if len(parts) == 2:
+            # Root controls/constants are shared case inputs when the Agent explicitly
+            # declared them. Named-region cases may legitimately share controlDict.
+            return True
+        parent = str(PurePosixPath(path).parent)
+        return parent in {layout.field_dir, layout.system_dir, layout.constant_dir}
+
     def _validate_region(self, required_case_files, layout) -> PreSolveValidationResult:
         failures: list[str] = []
         warnings: list[str] = []
         boundary_resolutions: dict[str, dict[str, str]] = {}
-        core = ["system/controlDict", f"{layout.system_dir}/fvSchemes", f"{layout.system_dir}/fvSolution"]
-        # Validate shared root controls plus this region, never demand root dummy fv*.
-        selected = [p for p in required_case_files
-                    if (len(PurePosixPath(p).parts) == 2
-                        or str(PurePosixPath(p).parent) in {layout.field_dir, layout.system_dir, layout.constant_dir})]
-        required = list(dict.fromkeys([*core, *selected,
-                        *(f"{layout.field_dir}/{name}" for name in layout.required_fields)]))
-        field_files = [item for item in required if str(PurePosixPath(item).parent) == layout.field_dir]
-        if not field_files:
-            failures.append(
-                "EngineeringPlan.required_case_files must declare the solver-required initial field files under 0/."
+
+        # No hidden solver-specific files are added here. The Agent/provider-owned
+        # manifest is the authority; Python validates only its relevant projection.
+        required = list(
+            dict.fromkeys(
+                path
+                for path in required_case_files
+                if self._belongs_to_layout(path, layout)
             )
+        )
+        field_files = [
+            item
+            for item in required
+            if str(PurePosixPath(item).parent) == layout.field_dir
+        ]
 
         file_header_classes: dict[str, str] = {}
         for relative in required:
@@ -130,14 +154,13 @@ class PreSolveCompletenessGate:
                 header = validate_foam_file_header(
                     relative,
                     text,
-                    expected_class=("dictionary" if relative.startswith("system/") else None),
+                    expected_class=(
+                        "dictionary" if relative.startswith("system/") else None
+                    ),
                 )
                 file_header_classes[relative] = header.header.class_name
                 failures.extend(header.failures)
                 warnings.extend(header.warnings)
-                if header.valid:
-                    # The actual OpenFOAM consumer is the stronger validator.
-                    pass
 
         boundary_relative = f"{layout.mesh_dir}/boundary"
         boundary_path = self.workspace.resolve_case_path(boundary_relative)
@@ -145,14 +168,18 @@ class PreSolveCompletenessGate:
         mesh_patches: list[str] = []
         mesh_patch_types: dict[str, str] = {}
         if not boundary_path.is_file():
-            failures.append(f"{boundary_relative} is missing; mesh patch coverage cannot be verified.")
+            failures.append(
+                f"{boundary_relative} is missing; mesh patch coverage cannot be verified."
+            )
         else:
             boundary_text = boundary_path.read_text(encoding="utf-8", errors="replace")
             mesh = parse_mesh_boundary(boundary_text)
             mesh_patches = mesh.names
             mesh_patch_types = mesh.patch_types
             if not mesh_patches:
-                failures.append(f"No mesh boundary patches could be parsed from {boundary_relative}.")
+                failures.append(
+                    f"No mesh boundary patches could be parsed from {boundary_relative}."
+                )
 
         if mesh is not None and mesh.patches:
             interpreter = BoundaryFieldInterpreter()
@@ -175,19 +202,17 @@ class PreSolveCompletenessGate:
                 )
                 if missing:
                     failures.append(
-                        f"Boundary coverage mismatch in {relative}; missing patchField entries: {missing} (no effective OpenFOAM selector matched)"
+                        f"Boundary coverage mismatch in {relative}; missing patchField "
+                        f"entries: {missing} (no effective OpenFOAM selector matched)"
                     )
 
-                indeterminate = [
-                    resolution
-                    for resolution in resolutions.values()
-                    if resolution.status == ResolutionStatus.INDETERMINATE
-                ]
-                for resolution in indeterminate:
-                    warnings.append(
-                        f"Boundary coverage is indeterminate in {relative} for patch {resolution.patch.name}: "
-                        f"{resolution.reason}. Python did not prove this patch missing."
-                    )
+                for resolution in resolutions.values():
+                    if resolution.status == ResolutionStatus.INDETERMINATE:
+                        warnings.append(
+                            f"Boundary coverage is indeterminate in {relative} for patch "
+                            f"{resolution.patch.name}: {resolution.reason}. Python did not "
+                            "prove this patch missing."
+                        )
 
                 for patch_name, resolution in sorted(resolutions.items()):
                     if resolution.status != ResolutionStatus.RESOLVED:
@@ -201,26 +226,31 @@ class PreSolveCompletenessGate:
                         or field_type in _CONSTRAINT_PATCH_TYPES
                     ) and mesh_type != field_type:
                         via = resolution.match_kind.value
-                        selector = resolution.selector.key.raw if resolution.selector is not None else "<OpenFOAM auto rule>"
+                        selector = (
+                            resolution.selector.key.raw
+                            if resolution.selector is not None
+                            else "<OpenFOAM auto rule>"
+                        )
                         failures.append(
                             "Boundary constraint-type mismatch in "
-                            f"{relative} for patch {patch_name}: mesh={mesh_type}, field={field_type} "
-                            f"(resolved via {via} {selector}). "
-                            "Constraint patches such as empty/wedge/symmetry/cyclic must match before the selected OpenFOAM runtime."
+                            f"{relative} for patch {patch_name}: mesh={mesh_type}, "
+                            f"field={field_type} (resolved via {via} {selector}). "
+                            "Constraint patch types must agree before native execution."
                         )
+
                 field_entries, field_projection_complete = parse_top_level_assignments(text)
                 for required_key in ("internalField", "dimensions"):
                     if required_key in field_entries:
                         continue
                     if field_projection_complete:
                         failures.append(
-                            f"Required initial field {relative} does not declare {required_key}."
+                            f"Declared initial field {relative} does not declare {required_key}."
                         )
                     else:
                         warnings.append(
-                            f"Required initial field {relative} has no literal top-level {required_key}, "
-                            "but dynamic OpenFOAM directives/expansions make the effective value "
-                            "indeterminate; Python did not prove it missing."
+                            f"Declared initial field {relative} has no literal top-level "
+                            f"{required_key}, but dynamic OpenFOAM directives/expansions make "
+                            "the effective value indeterminate; Python did not prove it missing."
                         )
 
         return PreSolveValidationResult(
@@ -236,4 +266,6 @@ class PreSolveCompletenessGate:
 
     @staticmethod
     def _should_dictionary_validate(path: Path) -> bool:
-        return path.suffix.lower() not in {".stl", ".obj", ".off", ".vtk", ".csv", ".dat", ".emesh"}
+        return path.suffix.lower() not in {
+            ".stl", ".obj", ".off", ".vtk", ".csv", ".dat", ".emesh"
+        }
