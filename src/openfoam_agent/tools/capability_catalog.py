@@ -12,8 +12,8 @@ class CapabilityCatalog:
     """Read-only documented + installed capability evidence for CFDEngineeringAgent.
 
     The capability graph owns documented CFD semantics. Installation discovery owns only
-    existence/readiness observations.  Python never infers physics capability from an
-    executable/component name.  When a documented provider and an installed identity
+    existence/readiness observations. Python never infers physics capability from an
+    executable/component name. When a documented provider and an installed identity
     observation describe the same provider, the catalog joins those independent facts
     without manufacturing additional semantics.
     """
@@ -39,7 +39,7 @@ class CapabilityCatalog:
         if documented == installed:
             return True
         # Historical graphs use both ``solver`` and ``solver_module`` for modular
-        # Foundation solvers.  Treat that naming difference as identity compatibility,
+        # Foundation solvers. Treat that naming difference as identity compatibility,
         # not as a semantic capability inference.
         return {documented, installed} <= {"solver", "solver_module"}
 
@@ -69,10 +69,16 @@ class CapabilityCatalog:
             for item in observed.evidence:
                 if item not in evidence:
                     evidence.append(item)
-            # Keep the graph's documented verification level: documentation proves the
-            # semantics while the joined installation observation proves local presence.
+            # The graph continues to own semantic meaning; the installed observation
+            # only upgrades local readiness. The combined provider therefore exposes
+            # the observed readiness level while retaining documented semantic evidence.
             merged[provider.id] = provider.model_copy(
-                update={"metadata": metadata, "evidence": evidence, "verified": True}
+                update={
+                    "metadata": metadata,
+                    "evidence": evidence,
+                    "verified": True,
+                    "verification_level": observed.verification_level,
+                }
             )
         for item in self._installed:
             merged.setdefault(item.id, item)
