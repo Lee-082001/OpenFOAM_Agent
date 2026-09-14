@@ -4,27 +4,36 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from openfoam_agent.tools.native_contracts import native_tool_contract, required_dictionary, command_permitted
+from openfoam_agent.engineering.native_scope import (
+    dedupe_invocations,
+    final_check_mesh_commands,
+    invocation_region,
+    mesh_affecting_path,
+    scoped_arguments,
+    system_dictionary_scopes,
+    validate_scopes_against_plan,
+)
 from openfoam_agent.schemas.engineering import NativeOpenFOAMCommand
 from openfoam_agent.tools.foam_file import validate_foam_file_header
+from openfoam_agent.tools.native_contracts import (
+    command_permitted,
+    native_tool_contract,
+    required_dictionary,
+)
 
-_NON_DICTIONARY_EXTENSIONS = {".stl", ".obj", ".off", ".vtk", ".vtp", ".csv", ".dat", ".emesh", ".gz"}
-_SURFACE_EXTENSIONS = {".stl", ".obj", ".off", ".vtk", ".vtp"}
-_MESH_AFFECTING_EXACT = {
-    "system/blockMeshDict", "system/snappyHexMeshDict", "system/surfaceFeatureExtractDict",
-    "system/createPatchDict", "system/topoSetDict", "system/setFieldsDict", "system/decomposeParDict",
+_NON_DICTIONARY_EXTENSIONS = {
+    ".stl", ".obj", ".off", ".vtk", ".vtp", ".csv", ".dat", ".emesh", ".gz"
 }
-_MESH_AFFECTING_PREFIXES = ("constant/triSurface/", "constant/polyMesh/")
+_SURFACE_EXTENSIONS = {".stl", ".obj", ".off", ".vtk", ".vtp"}
 
 
 @dataclass(frozen=True)
 class CaseDeltaGraph:
     """Controller-owned graph for edits to an already committed case.
 
-    LLM repair payloads describe content deltas and native strategy hints only.  The
-    controller builds the effective case in memory, proves required-file coverage and
-    content safety before mutation, and compiles validators/native consumers from that
-    effective state.  Stale model validation paths never become executable actions.
+    v5.0 uses the same region/native-scope rules as initial authoring. Repair hints are
+    non-authoritative; Python derives only deterministic consumers of changed artifacts
+    and final checkMesh scope from the frozen execution topology.
     """
 
     changed_files: dict[str, str]
@@ -41,22 +50,6 @@ class CaseDeltaGraph:
     @property
     def valid(self) -> bool:
         return not self.failures
-
-
-def _dedupe_native(items: Iterable[NativeOpenFOAMCommand]) -> list[NativeOpenFOAMCommand]:
-    out: list[NativeOpenFOAMCommand] = []
-    seen: set[tuple[str, tuple[str, ...]]] = set()
-    for item in items:
-        token = (item.command, tuple(item.arguments))
-        if token in seen:
-            continue
-        seen.add(token)
-        out.append(item)
-    return out
-
-
-def _mesh_affecting(path: str) -> bool:
-    return path in _MESH_AFFECTING_EXACT or path.startswith(_MESH_AFFECTING_PREFIXES)
 
 
 def compile_case_delta_graph(
@@ -76,15 +69,13 @@ def compile_case_delta_graph(
     failures: list[str] = []
     warnings: list[str] = []
     requested_drops = tuple(dict.fromkeys(str(path) for path in drop_paths))
-    drops: tuple[str, ...] = ()
 
-    # Build an effective path/content view from controller-tracked files plus every
-    # required solve input that physically exists.  Native-generated polyMesh files do
-    # not need to be materialized as text to establish required input coverage.
     effective: dict[str, str | None] = {}
     for path in workspace.list_authored():
         try:
-            effective[path] = workspace.read_text(path, max_chars=workspace.max_file_bytes + 1)
+            effective[path] = workspace.read_text(
+                path, max_chars=workspace.max_file_bytes + 1
+            )
         except (FileNotFoundError, OSError, UnicodeError) as exc:
             failures.append(f"Unable to inspect committed case file {path}: {exc}")
     for path in plan.required_case_files:
@@ -92,7 +83,7 @@ def compile_case_delta_graph(
             continue
         try:
             target = workspace.resolve_case_path(path, must_exist=True)
-        except (FileNotFoundError, OSError) :
+        except (FileNotFoundError, OSError):
             continue
         try:
             effective[path] = target.read_text(encoding="utf-8", errors="replace")
@@ -108,8 +99,6 @@ def compile_case_delta_graph(
         active_drops.append(path)
     drops = tuple(active_drops)
 
-    # Normalize replacement ownership. Exact repeated values are harmless; conflicting
-    # values for one path are a semantic delta conflict and are never silently chosen.
     changed: dict[str, str] = {}
     replacement_paths: set[str] = set()
     for path, content in replacements:
@@ -119,9 +108,6 @@ def compile_case_delta_graph(
         changed[path] = content
         replacement_paths.add(path)
 
-    # Patches are applied in-memory to the effective candidate. No workspace mutation
-    # occurs until the complete delta graph has passed all deterministic checks.
-    patched_paths: set[str] = set()
     for path, old, new in patches:
         if path in replacement_paths:
             failures.append(f"Case delta cannot patch and replace {path} in the same turn.")
@@ -145,13 +131,11 @@ def compile_case_delta_graph(
             continue
         effective[path] = current.replace(old, new, 1)
         changed[path] = str(effective[path])
-        patched_paths.add(path)
 
     for path in drops:
         if path in changed:
             failures.append(f"Case delta cannot replace and drop {path} in the same turn.")
         effective.pop(path, None)
-
     for path, content in changed.items():
         effective[path] = content
 
@@ -159,12 +143,11 @@ def compile_case_delta_graph(
     effective_set = set(effective_paths)
     missing = tuple(path for path in plan.required_case_files if path not in effective_set)
     if missing:
-        failures.append("Required case manifest would be incomplete after repair: " + ", ".join(missing))
+        failures.append(
+            "Required case manifest would be incomplete after repair: " + ", ".join(missing)
+        )
 
-    # Preflight every prospective write with the same safety/content policy as the real
-    # workspace. Aggregate size validation is also performed before commit.
-    bundle_failures = workspace.validate_candidate_bundle(changed, drop_paths=drops)
-    failures.extend(bundle_failures)
+    failures.extend(workspace.validate_candidate_bundle(changed, drop_paths=drops))
     for path, content in changed.items():
         if not validate_pre_solve or Path(path).suffix.lower() in _NON_DICTIONARY_EXTENSIONS:
             continue
@@ -176,45 +159,110 @@ def compile_case_delta_graph(
         failures.extend(f"{path}: {failure}" for failure in header.failures)
 
     changed_paths = set(changed)
-    dictionary_paths = tuple(sorted(
-        path for path in changed_paths
-        if Path(path).suffix.lower() not in _NON_DICTIONARY_EXTENSIONS
-    ))
-    surface_paths = tuple(sorted(
-        path for path in changed_paths
-        if Path(path).suffix.lower() in _SURFACE_EXTENSIONS
-    ))
+    all_delta_paths = changed_paths | set(drops)
+    dictionary_paths = tuple(
+        sorted(
+            path
+            for path in changed_paths
+            if Path(path).suffix.lower() not in _NON_DICTIONARY_EXTENSIONS
+        )
+    )
+    surface_paths = tuple(
+        sorted(
+            path
+            for path in changed_paths
+            if Path(path).suffix.lower() in _SURFACE_EXTENSIONS
+        )
+    )
 
     hints = list(native_hints)
     if not hints:
-        hints = [NativeOpenFOAMCommand(command=str(command), role="mesh") for command in mesh_commands]
+        hints = [
+            NativeOpenFOAMCommand(command=str(command), role="mesh")
+            for command in mesh_commands
+        ]
+    check_hints = [item for item in hints if item.command == "checkMesh"]
     strategy: list[NativeOpenFOAMCommand] = []
-    for item in _dedupe_native(hints):
+    for item in dedupe_invocations(hints):
         if item.command in {"foamDictionary", "surfaceCheck", "checkMesh"}:
             continue
-        contract = native_tool_contract(item.command)
         if not command_permitted(item.command, phase):
-            warnings.append(f"Dropped native hint {item.command}: command is not permitted in {phase} phase.")
+            warnings.append(
+                f"Dropped native hint {item.command}: command is not permitted in {phase} phase."
+            )
             continue
-        required = required_dictionary(item.command, item.arguments)
+        try:
+            required = required_dictionary(item.command, item.arguments)
+        except ValueError as exc:
+            failures.append(f"Invalid native invocation {item.command}: {exc}")
+            continue
         if required and required not in effective_set:
-            warnings.append(f"Dropped stale native hint {item.command}: required input {required} is absent after delta.")
+            warnings.append(
+                f"Dropped stale native hint {item.command}: required input {required} is absent after delta."
+            )
             continue
         strategy.append(item)
 
-    commands = [item.command for item in strategy]
-    if "system/blockMeshDict" in changed_paths and "blockMesh" not in commands:
-        strategy.insert(0, NativeOpenFOAMCommand(command="blockMesh", role="mesh"))
-        commands.insert(0, "blockMesh")
-    if "system/snappyHexMeshDict" in changed_paths and "snappyHexMesh" not in commands:
-        index = commands.index("blockMesh") + 1 if "blockMesh" in commands else len(strategy)
-        strategy.insert(index, NativeOpenFOAMCommand(command="snappyHexMesh", arguments=["-overwrite"], role="mesh"))
+    try:
+        scopes = {(item.command, invocation_region(item)) for item in strategy}
+        changed_block_scopes = system_dictionary_scopes(changed_paths, "blockMeshDict")
+        changed_snappy_scopes = system_dictionary_scopes(changed_paths, "snappyHexMeshDict")
+        invalid_scopes = validate_scopes_against_plan(
+            plan, [*changed_block_scopes, *changed_snappy_scopes]
+        )
+        if invalid_scopes:
+            failures.append(
+                "Repair changes mesh dictionaries outside the authoritative execution topology: "
+                + ", ".join(invalid_scopes)
+            )
+    except ValueError as exc:
+        failures.append(f"Invalid repair region scope: {exc}")
+        scopes = set()
+        changed_block_scopes = []
+        changed_snappy_scopes = []
 
-    mesh_changed = any(_mesh_affecting(path) for path in changed_paths | set(drops))
-    mesh_changed = mesh_changed or any(native_tool_contract(item.command).effect in {"mesh", "decomposition", "initialization"} for item in strategy)
+    inferred_blocks = [
+        NativeOpenFOAMCommand(
+            command="blockMesh",
+            arguments=scoped_arguments(region),
+            role="mesh",
+        )
+        for region in changed_block_scopes
+        if ("blockMesh", region) not in scopes
+    ]
+    strategy = inferred_blocks + strategy
+    scopes.update(("blockMesh", region) for region in changed_block_scopes)
+
+    for region in changed_snappy_scopes:
+        if ("snappyHexMesh", region) in scopes:
+            continue
+        invocation = NativeOpenFOAMCommand(
+            command="snappyHexMesh",
+            arguments=scoped_arguments(region, "-overwrite"),
+            role="mesh",
+        )
+        same_scope_blocks = [
+            index
+            for index, item in enumerate(strategy)
+            if item.command == "blockMesh" and invocation_region(item) == region
+        ]
+        insert_at = same_scope_blocks[-1] + 1 if same_scope_blocks else len(strategy)
+        strategy.insert(insert_at, invocation)
+        scopes.add(("snappyHexMesh", region))
+
+    mesh_changed = any(mesh_affecting_path(path) for path in all_delta_paths)
+    mesh_changed = mesh_changed or any(
+        native_tool_contract(item.command).effect
+        in {"mesh", "decomposition", "initialization"}
+        for item in strategy
+    )
     if mesh_changed:
-        strategy = [item for item in strategy if item.command != "checkMesh"]
-        strategy.append(NativeOpenFOAMCommand(command="checkMesh", role="mesh_validation"))
+        try:
+            checks, scope_warnings = final_check_mesh_commands(plan, check_hints)
+            warnings.extend(scope_warnings)
+            strategy = [item for item in strategy if item.command != "checkMesh"] + checks
+        except ValueError as exc:
+            failures.append(f"Invalid repair checkMesh topology: {exc}")
 
     for hinted in list(validate_dictionaries) + list(surface_checks):
         if hinted not in effective_set:
