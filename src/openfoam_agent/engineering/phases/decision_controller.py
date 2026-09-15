@@ -208,8 +208,11 @@ def execute_prepare_decision_impl(
                     self.checkpoint(state, "authoring-partition-accepted")
                     return False
             else:
-                if action.task_id is not None or action.defer_native:
-                    raise ValueError("No controller-issued authoring task is pending.")
+                # task_id/defer_native are controller-owned partition metadata. A model
+                # can harmlessly echo them when partitioning was unnecessary; they must
+                # not invalidate an otherwise complete unpartitioned bundle.
+                data["task_id"] = None
+                data["defer_native"] = False
                 execution = ExecuteCasePlanAction.model_validate(data)
         except ValueError as exc:
             event = self._event(

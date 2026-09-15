@@ -2333,7 +2333,22 @@ class CFDEngineeringAgent:
                         "Native consumer validation is disabled; static pre-solve validation is deferred.",
                         validation_status="inconclusive", failure_category="infra",
                     )
-                result = self.presolve.validate_required_case_files(action.required_case_files)
+                plan = self._pending_execution_plan or (state.engineering_plan if state is not None else None)
+                if plan is None:
+                    return self._event(
+                        step, action.type, False,
+                        "Pre-solve validation requires the controller-held EngineeringPlan.",
+                        "The required-file list alone is not a topology authority; execution.scopes and interfaces must be preserved.",
+                        validation_status="fail", failure_category="infra",
+                    )
+                if list(action.required_case_files) != list(plan.required_case_files):
+                    return self._event(
+                        step, action.type, False,
+                        "Pre-solve validation manifest diverged from the controller-held EngineeringPlan.",
+                        "ValidatePreSolveAction.required_case_files must match EngineeringPlan.required_case_files exactly.",
+                        validation_status="fail", failure_category="infra",
+                    )
+                result = self.presolve.validate(plan)
                 if not result.valid:
                     return self._event(
                         step, action.type, False, "Pre-solve deterministic readiness validation failed.",
@@ -2344,7 +2359,6 @@ class CFDEngineeringAgent:
                 validation_status = "pass"
                 failure_category = None
                 native_ran = False
-                plan = self._pending_execution_plan or (state.engineering_plan if state is not None else None)
                 validator = getattr(self.tools, "zero_step_consumer_validate", None)
                 if (self.policy.zero_step_consumer_validation and plan is not None and plan.execution is not None and callable(validator)):
                     native_result, note = validator(
