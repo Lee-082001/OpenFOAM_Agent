@@ -1,0 +1,117 @@
+{
+  "schema_version": "1.0",
+  "release": "5.2.1",
+  "status": "NOT_RUN",
+  "variants": [
+    "plain_llm",
+    "native_validation",
+    "ours"
+  ],
+  "result_file_template": "{trial_id}__{variant}.json",
+  "trials": [
+    {
+      "trial_id": "N01_internal_pipe",
+      "category": "steady_internal_flow",
+      "prompt": "Steady water flow through a circular pipe with a user-specified mean inlet velocity.",
+      "expected_outcome": "accept",
+      "expected_requirement_violation_detection": false,
+      "notes": "Baseline single-region executable case."
+    },
+    {
+      "trial_id": "N02_vortex_re1000",
+      "category": "transient_external_flow",
+      "prompt": "2D vortex shedding around an obstacle at Reynolds number 1000.",
+      "expected_outcome": "accept",
+      "expected_requirement_violation_detection": false,
+      "notes": "Exercises explicit dimensionless target binding and transient execution."
+    },
+    {
+      "trial_id": "N03_battery_heater",
+      "category": "multi_solid_heat_transfer",
+      "prompt": "Transient heating of a cylindrical battery by a separate contacting heater; no fluid flow.",
+      "expected_outcome": "accept",
+      "expected_requirement_violation_detection": false,
+      "notes": "Two named solid scopes with an interface."
+    },
+    {
+      "trial_id": "N04_conjugate_heat",
+      "category": "conjugate_heat_transfer",
+      "prompt": "Conjugate heat transfer between an internal fluid and a heated solid wall.",
+      "expected_outcome": "accept",
+      "expected_requirement_violation_detection": false,
+      "notes": "Fluid-solid interface and multi-region execution."
+    },
+    {
+      "trial_id": "N05_snappy_feature",
+      "category": "snappyhexmesh_geometry",
+      "prompt": "External flow around a curved STL geometry using feature-aware snappyHexMesh.",
+      "expected_outcome": "accept",
+      "expected_requirement_violation_detection": false,
+      "notes": "Exercises surfaceFeatures/snappy dependency ordering."
+    },
+    {
+      "trial_id": "N06_moving_mesh",
+      "category": "moving_mesh",
+      "prompt": "Transient prescribed periodic body motion in water with a moving mesh.",
+      "expected_outcome": "accept",
+      "expected_requirement_violation_detection": false,
+      "notes": "Exercises non-static mesh semantics."
+    },
+    {
+      "trial_id": "R01_missing_energy_solver",
+      "category": "runtime_repair",
+      "prompt": "Two-solid transient heat transfer with a valid physical setup.",
+      "expected_outcome": "repair_then_accept",
+      "expected_requirement_violation_detection": false,
+      "fault_injection": "Remove the required energy-equation solver entry from fvSolution before the first native solve.",
+      "notes": "Repair should be failure-local and should not rerun mesh generation."
+    },
+    {
+      "trial_id": "R02_bad_thermo_keyword",
+      "category": "pre_solve_repair",
+      "prompt": "Transient solid heat conduction with valid material properties.",
+      "expected_outcome": "repair_then_accept",
+      "expected_requirement_violation_detection": false,
+      "fault_injection": "Replace one supported OpenFOAM thermophysical keyword with an unsupported keyword.",
+      "notes": "Native diagnostic should drive bounded repair.",
+      "repair_success_stage": "pre_solve"
+    },
+    {
+      "trial_id": "R03_bad_numerical_timestep",
+      "category": "runtime_numerical_repair",
+      "prompt": "Transient CFD case with Agent-owned numerical time step.",
+      "expected_outcome": "repair_then_accept",
+      "expected_requirement_violation_detection": false,
+      "fault_injection": "Use an unstable Agent-owned deltaT that may be reduced by entry-level runtime repair.",
+      "notes": "controlDict numerical repair is allowed only for unprotected entries."
+    },
+    {
+      "trial_id": "R04_region_mesh_delta",
+      "category": "scoped_mesh_revalidation",
+      "prompt": "Two-region case where only region A mesh input is revised after a mesh failure.",
+      "expected_outcome": "repair_then_accept",
+      "expected_requirement_violation_detection": false,
+      "fault_injection": "Corrupt only region A blockMeshDict while region B retains passing mesh evidence.",
+      "notes": "Region B checkMesh evidence should be reused.",
+      "repair_success_stage": "pre_solve"
+    },
+    {
+      "trial_id": "F01_reynolds_mismatch",
+      "category": "requirement_false_acceptance",
+      "prompt": "2D flow with Reynolds number exactly 1000.",
+      "expected_outcome": "reject",
+      "expected_requirement_violation_detection": true,
+      "fault_injection": "Freeze a final candidate whose U, L and nu recompute to Reynolds number 500 while claiming Re=1000.",
+      "notes": "A successful-looking case must not be accepted with a contradictory frozen numeric requirement."
+    },
+    {
+      "trial_id": "F02_protected_deltaT_mutation",
+      "category": "frozen_requirement_repair_violation",
+      "prompt": "Transient case with user-specified deltaT=0.01 s.",
+      "expected_outcome": "reject",
+      "expected_requirement_violation_detection": true,
+      "fault_injection": "Runtime repair attempts to change the user-protected deltaT entry.",
+      "notes": "Mutation must be blocked before workspace commit."
+    }
+  ]
+}

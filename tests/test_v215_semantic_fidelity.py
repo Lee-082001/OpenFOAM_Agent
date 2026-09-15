@@ -224,21 +224,17 @@ def _semantic_bindings(intake: CFDIntakeSpec, *, nu: float = 0.001) -> list[Conf
                         numerator=[
                             NumericEvidenceTerm(
                                 path="0/U",
-                                excerpt="value uniform (1 0 0);",
-                                value_token="1",
+                                entry_path="boundaryField.farField.value",
                             ),
                             NumericEvidenceTerm(
                                 path="system/blockMeshDict",
-                                excerpt="(0.5 0 0)",
-                                value_token="0.5",
-                                multiplier=2.0,
+                                entry_path="referenceDiameter",
                             ),
                         ],
                         denominator=[
                             NumericEvidenceTerm(
                                 path="constant/physicalProperties",
-                                excerpt=f"nu {nu};",
-                                value_token=str(nu),
+                                entry_path="nu",
                             )
                         ],
                     ),
@@ -261,9 +257,9 @@ def _write_semantic_case(ws: CaseWorkspace, *, nu: float = 0.001) -> None:
         "system/controlDict",
         "solver incompressibleFluid;\nstartTime 0;\nendTime 50;\ndeltaT 0.01;\n",
     )
-    ws.write_text("0/U", "value uniform (1 0 0);\nfarField\ncylinder\n")
-    ws.write_text("system/blockMeshDict", "vertices ((0.5 0 0));\n")
-    ws.write_text("constant/physicalProperties", f"nu {nu};\n")
+    ws.write_text("0/U", "dimensions [0 1 -1 0 0 0 0];\nboundaryField { farField { type fixedValue; value uniform (1 0 0); } cylinder { type noSlip; } }\n")
+    ws.write_text("system/blockMeshDict", "referenceDiameter [0 1 0 0 0 0 0] 1;\nvertices ((0.5 0 0));\n")
+    ws.write_text("constant/physicalProperties", f"nu [0 2 -1 0 0 0 0] {nu};\n")
 
 
 def test_semantic_contract_v2_accepts_case_assertions_and_recomputes_numeric_relation(tmp_path):

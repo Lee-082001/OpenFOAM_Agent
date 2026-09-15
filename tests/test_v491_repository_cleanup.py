@@ -40,7 +40,8 @@ def _unused_module_imports(path: Path) -> list[str]:
 
 
 def test_release_version():
-    assert __version__ == "4.9.1"
+    import tomllib
+    assert __version__ == tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
 
 
 def test_split_engineering_controllers_do_not_keep_monolith_import_bloat():

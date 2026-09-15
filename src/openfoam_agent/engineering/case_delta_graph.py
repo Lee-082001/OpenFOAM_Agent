@@ -9,8 +9,11 @@ from openfoam_agent.schemas.engineering import NativeOpenFOAMCommand
 from openfoam_agent.contracts.execution_scopes import (
     affected_mesh_scope_keys,
     auto_consumers_for_delta,
+    execution_scopes,
     final_mesh_validation_commands,
+    scope_key,
 )
+from openfoam_agent.engineering.case_build_graph import _stable_dependency_order
 from openfoam_agent.tools.foam_file import validate_foam_file_header
 
 _NON_DICTIONARY_EXTENSIONS = {".stl", ".obj", ".off", ".vtk", ".vtp", ".csv", ".dat", ".emesh", ".gz"}
@@ -35,6 +38,9 @@ class CaseDeltaGraph:
     surface_paths: tuple[str, ...]
     native_pipeline: tuple[NativeOpenFOAMCommand, ...]
     validate_pre_solve: bool
+    affected_mesh_scope_keys: tuple[str, ...]
+    reused_mesh_scope_keys: tuple[str, ...]
+    revalidation_domains: tuple[str, ...]
     failures: tuple[str, ...]
     warnings: tuple[str, ...]
 
@@ -201,11 +207,11 @@ def compile_case_delta_graph(
 
     changed_mesh_inputs = set(changed_paths) | set(drops)
     try:
-        inferred = auto_consumers_for_delta(plan, effective_set, changed_mesh_inputs)
+        inferred = auto_consumers_for_delta(plan, effective_set, changed_mesh_inputs, strategy)
     except ValueError as exc:
         failures.append(f"Could not compile scope-bound delta consumers: {exc}")
         inferred = []
-    strategy = _dedupe_native([*inferred, *strategy])
+    strategy = _dedupe_native([*strategy, *inferred])
 
     try:
         affected_scopes = affected_mesh_scope_keys(
@@ -224,6 +230,26 @@ def compile_case_delta_graph(
             final_mesh_validation_commands(plan, only_scope_keys=affected_scopes)
         )
 
+    # Repair/revision execution uses the same producer->consumer dependency order as
+    # initial case authoring. Independent commands retain the Agent's relative order.
+    finalizers = [item for item in strategy if native_tool_contract(item.command).controller_finalizer]
+    consumers = [item for item in strategy if not native_tool_contract(item.command).controller_finalizer]
+    strategy, ordering_failures = _stable_dependency_order(plan, _dedupe_native(consumers))
+    strategy.extend(finalizers)
+    failures.extend(ordering_failures)
+
+    all_scope_keys = {scope_key(scope) for scope in execution_scopes(plan)}
+    reused_scopes = all_scope_keys - set(affected_scopes)
+    domains: list[str] = []
+    if dictionary_paths:
+        domains.append("dictionary")
+    if surface_paths:
+        domains.append("surface")
+    if affected_scopes:
+        domains.append("mesh")
+    if validate_pre_solve:
+        domains.append("pre_solve")
+
     for hinted in list(validate_dictionaries) + list(surface_checks):
         if hinted not in effective_set:
             warnings.append(f"Ignored stale validation hint for absent path after delta: {hinted}")
@@ -237,6 +263,9 @@ def compile_case_delta_graph(
         surface_paths=surface_paths,
         native_pipeline=tuple(strategy),
         validate_pre_solve=bool(validate_pre_solve),
+        affected_mesh_scope_keys=tuple(sorted(affected_scopes)),
+        reused_mesh_scope_keys=tuple(sorted(reused_scopes)),
+        revalidation_domains=tuple(domains),
         failures=tuple(dict.fromkeys(failures)),
         warnings=tuple(dict.fromkeys(warnings)),
     )

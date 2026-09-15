@@ -109,7 +109,7 @@ class CFDWorkflow:
                 # RUNTIME_REPAIR is an internal transient state owned by RuntimeOrchestrator.
                 # Reaching the top-level workflow means an internal repair exit failed to close
                 # its state transition. Block deterministically instead of exposing a generic
-                # "No v2 handler" failure that hides the orchestration bug.
+                # "No workflow handler" failure that hides the orchestration bug.
                 state.solve_approved = False
                 state.transition(
                     State.ENGINEERING_BLOCKED,

@@ -298,9 +298,9 @@ class NumericRelationAssertion(_EngineeringModel):
 class ConfirmedFactBinding(_EngineeringModel):
     """Optional truthful implementation assertion for one confirmed fact.
 
-    Fact identity closure lives in ``EngineeringPlan.confirmed_fact_ids``. This object
-    exists only when there is a real plan/artifact mapping to assert; Python must not
-    fabricate one merely to satisfy completeness.
+    Frozen fact identity is controller-owned. This object exists only when there is
+    a real plan/artifact mapping to assert; Python must not fabricate one merely to
+    satisfy completeness.
 
     The wire format deliberately separates case-file paths from plan fields so the
     model does not need to memorize a string-prefix mini-protocol such as
@@ -502,6 +502,31 @@ class NativeOpenFOAMCommand(_EngineeringModel):
         return self
 
 
+
+
+class RevalidationRecord(_EngineeringModel):
+    """Audit record for dependency-scoped validation after a committed case delta.
+
+    The record describes what the controller invalidated and what mesh evidence it
+    intentionally reused.  It is telemetry/audit state only; it does not authorize
+    a repair or replace native validation evidence.
+    """
+
+    phase: Literal["repair", "runtime_repair", "strategy_revision"]
+    changed_paths: list[str] = Field(default_factory=list, max_length=64)
+    dropped_paths: list[str] = Field(default_factory=list, max_length=64)
+    revalidation_domains: list[Literal["dictionary", "surface", "mesh", "pre_solve"]] = Field(default_factory=list)
+    affected_mesh_scopes: list[str] = Field(default_factory=list, max_length=64)
+    reused_mesh_scopes: list[str] = Field(default_factory=list, max_length=64)
+    dictionary_checks: int = Field(default=0, ge=0)
+    surface_checks: int = Field(default=0, ge=0)
+    native_commands: list[str] = Field(default_factory=list, max_length=64)
+    pre_solve_required: bool = False
+    solver_retry_required: bool = False
+
+    @property
+    def mesh_validation_scopes_avoided(self) -> int:
+        return len(self.reused_mesh_scopes)
 
 
 class RepairEpisode(_EngineeringModel):
@@ -726,8 +751,25 @@ class EngineeringPlanPatch(_EngineeringModel):
         for key, value in updates.items():
             if key in non_nullable and value is None:
                 raise ValueError(f"EngineeringPlanPatch cannot clear required/list field: {key}")
+            if key == "completion" and (value is None or not value.required_result_fields):
+                raise ValueError(
+                    "EngineeringPlanPatch cannot clear the explicit result-artifact contract."
+                )
             data[key] = value
-        return EngineeringPlan.model_validate(data)
+        merged = EngineeringPlan.model_validate(data)
+        if merged.completion is not None and merged.completion.required_result_fields:
+            required = set(merged.required_case_files)
+            missing = [
+                f"0/{str(field).removeprefix('0/')}"
+                for field in merged.completion.required_result_fields
+                if f"0/{str(field).removeprefix('0/')}" not in required
+            ]
+            if missing:
+                raise ValueError(
+                    "EngineeringPlanPatch result fields lost their declared initial solution artifacts: "
+                    + ", ".join(sorted(missing))
+                )
+        return merged
 
 
 class InspectEnvironmentAction(_EngineeringModel):
@@ -1105,6 +1147,7 @@ class RunMeshCommandAction(_EngineeringModel):
     command: Literal[
         "blockMesh",
         "surfaceFeatureExtract",
+        "surfaceFeatures",
         "snappyHexMesh",
         "createPatch",
         "checkMesh",
@@ -1214,6 +1257,10 @@ class EngineeringDesign(_EngineeringModel):
     decisions: list[EngineeringDecision] = Field(default_factory=list, max_length=80)
     assumptions: list[str] = Field(default_factory=list, max_length=80)
     engineering_defaults: list[EngineeringDesignDefault] = Field(default_factory=list, max_length=80)
+    # Agent-owned implementation claims for frozen user requirements.  Python owns
+    # fact identity/digest closure, but the Engineering Agent must declare how a
+    # machine-verifiable requirement is realized in the case it chose.
+    requirement_bindings: list[ConfirmedFactBinding] = Field(default_factory=list, max_length=200)
     required_case_files: list[str] = Field(default_factory=list, max_length=80)
     postprocess_strategy: list[str] = Field(default_factory=list, max_length=40)
 

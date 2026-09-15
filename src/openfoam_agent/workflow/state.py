@@ -12,6 +12,7 @@ from openfoam_agent.schemas.engineering import (
     EngineeringPlan,
     MeshEvidence,
     RepairEpisode,
+    RevalidationRecord,
 )
 from openfoam_agent.schemas.intake import CFDIntakeSpec
 from openfoam_agent.schemas.request import UserRequest
@@ -61,6 +62,8 @@ class CFDState(BaseModel):
     secondary_failures: list[dict] = Field(default_factory=list)
     resolved_failures: list[dict] = Field(default_factory=list)
     repair_episode: RepairEpisode | None = None
+    revalidation_records: list[RevalidationRecord] = Field(default_factory=list)
+    engineering_llm_usage_records: list[dict] = Field(default_factory=list)
     semantic_assurance_warnings: list[str] = Field(default_factory=list)
     engineering_next_step: int = Field(default=1, ge=1)
     pending_action: dict | None = None
@@ -147,11 +150,29 @@ class CFDState(BaseModel):
         self.active_revision_proposal = None
         self.transition(target, f"User rejected revision proposal {proposal_id}; sealed case remains unchanged.")
 
-    def accept_result(self) -> None:
+    def result_acceptance_blockers(self) -> list[str]:
+        """Explain why human acceptance cannot transition this result to COMPLETE."""
+        blockers: list[str] = []
         if self.current_state != State.RESULT_REVIEW_REQUIRED:
-            raise ValueError("Result acceptance requires RESULT_REVIEW_REQUIRED.")
-        if self.simulation is None or not self.simulation.success or self.simulation.outputs_verified is not True:
-            raise ValueError("Cannot accept incomplete calculation or unverified output as COMPLETE.")
+            blockers.append("Result acceptance requires RESULT_REVIEW_REQUIRED.")
+            return blockers
+        result = self.simulation
+        if result is None:
+            return ["No runtime result is available for acceptance."]
+        if not result.completed or not result.termination_verified:
+            blockers.append("Calculation completion/termination is not deterministically verified.")
+        if result.return_code != 0 or not result.process_success:
+            blockers.append("Native solver execution did not exit cleanly.")
+        if result.outputs_verified is not True:
+            blockers.append("Required final result artifacts are not deterministically verified.")
+        if not result.success and not blockers:
+            blockers.append("Runtime result is not eligible for acceptance.")
+        return blockers
+
+    def accept_result(self) -> None:
+        blockers = self.result_acceptance_blockers()
+        if blockers:
+            raise ValueError("Cannot accept incomplete or unverified result: " + " | ".join(blockers))
         for feedback in self.human_feedback:
             if feedback.status in {"awaiting_review", "revision_proposed", "unresolved"}:
                 feedback.status = "resolved"

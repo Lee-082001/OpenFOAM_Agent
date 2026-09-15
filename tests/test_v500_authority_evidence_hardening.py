@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from openfoam_agent.contracts.models import CompletionContract
+
 import hashlib
 import json
 from types import SimpleNamespace
@@ -114,6 +116,7 @@ def test_v500_design_seal_keeps_identity_closure_without_fake_fact_bindings():
         motion_kind="static",
         mesh_motion_requirement="static",
         mesh_strategy="Agent-selected two-region blockMesh strategy.",
+        completion=CompletionContract(mode="transient", end_time=10.0, required_result_fields=["battery/T", "heater/T"]),
         required_case_files=[
             "system/controlDict",
             "system/battery/blockMeshDict", "system/heater/blockMeshDict",

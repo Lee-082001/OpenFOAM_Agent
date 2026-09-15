@@ -1,0 +1,142 @@
+{
+  "base_version": "5.2.0",
+  "release": "5.2.1",
+  "modified_files": [
+    {
+      "path": "README.md",
+      "before_sha256": "f3a801d110d0f9d6e3b14217362df031afb945e0ee42ec90b7038c29bde1cbc9",
+      "after_sha256": "b58acb76cff85973e4c158c285364fdb1c6f03f7951b1e9631fe03322447c57c"
+    },
+    {
+      "path": "scripts/run_v4_regression.sh",
+      "before_sha256": "f11ddc2185ba52d20cbcdce464ab40c84a3e994426945f18c36733c1a95c55f5",
+      "after_sha256": "63ba0f2f21e3b2df1f956613311f42b114800a65fee7d29868aef48f4e42bed4"
+    },
+    {
+      "path": "scripts/verify_v4_evidence.py",
+      "before_sha256": "f91b740c1a1b76526b3b3c3eb91299c9f11f698269f643ff868d15ed7da42fc6",
+      "after_sha256": "921f1674ad3b5f87d8082d50a2730e605d93f0aa70ce9b4455ecbc600f0017be"
+    },
+    {
+      "path": "src/openfoam_agent/verification/safety.py",
+      "before_sha256": "7b8541cb85029f9e5dc4fbee808b4c42fc582670de1d66ce59481b3a21d53f64",
+      "after_sha256": "e2c573d6c440ed06b56572ffb62408ddf70792be79942a55163dcf39d114f558"
+    },
+    {
+      "path": "src/openfoam_agent/data/native_tool_contracts.json",
+      "before_sha256": "9c11a12c5fd9fdcf786502ab4117428b8b84ec03a553fc76358a0ab3220199bf",
+      "after_sha256": "779adbfda72a0353ef2477d1d81446767126581b1fb9f99b7addcab2df55e786"
+    },
+    {
+      "path": "src/openfoam_agent/contracts/execution_scopes.py",
+      "before_sha256": "d6b549d11788a1f57893e0fd7e95d6d9366717d22286a724df834260be31890c",
+      "after_sha256": "a03b8bf92727c19d23376088234f1e24b0eb4c3894ecc77af9a8d0aeb124b7dd"
+    },
+    {
+      "path": "src/openfoam_agent/contracts/execution.py",
+      "before_sha256": "1951b0e74a1036daf7c08b64992f2f09465b4eba2fb14af2d9026be348bb6493",
+      "after_sha256": "97ed8b180da0c884de297ea3e24261f3afaf50c0bedbe46b0486dd30815fff09"
+    },
+    {
+      "path": "src/openfoam_agent/tools/native_contracts.py",
+      "before_sha256": "d06b5cbae7f4833807bc459de14c77910aae068401878c2e3f4a19ee44aefefc",
+      "after_sha256": "a98862da5a6c54aa94038f0176894159dbf4d65f3347078ccea7322e654c564b"
+    },
+    {
+      "path": "src/openfoam_agent/workflow/engine.py",
+      "before_sha256": "58fca8787ea45959c772287d19332f407b88b994609e66cfda915aecf45e2a0d",
+      "after_sha256": "ac0bf7be36873cd4490cf74e7d482ef28b781123e4f85c580bc4db610bfdff87"
+    },
+    {
+      "path": "src/openfoam_agent/qualification/reliability.py",
+      "before_sha256": "eb8ca36b79e19a8cf15ca78daf043e87ea7517f9e2b0701ed50cea68d46e82a5",
+      "after_sha256": "f8278a919fa2965b64c53cfabab3aaec453ce570ea59b4e7becbb43aa7750e0a"
+    },
+    {
+      "path": "src/openfoam_agent/engineering/phases/decision_controller.py",
+      "before_sha256": "8d7892a13060023d170405d92f9428f6e4445127bd07d230cbd2845499b01fbc",
+      "after_sha256": "433ce95091124a5b64537790bbd7410ac10f5b7fb045f18809b50af9a995a578"
+    },
+    {
+      "path": "src/openfoam_agent/engineering/phases/repair_controller.py",
+      "before_sha256": "a88bde089e22f47f804004ba67688ffaa367f7bd6bbcdf9ef3b915ed106d0dbe",
+      "after_sha256": "e8ddaa1d5d693b876bcf7037d93e85f442afc70bca7f3dc87f6135ae3cde374d"
+    },
+    {
+      "path": "src/openfoam_agent/engineering/agent.py",
+      "before_sha256": "53d9025fcaa337ce358fb7de477a6e6d0f794096874597dbad4fd0c9e7ec4009",
+      "after_sha256": "5185bd5c4a66f269e85769402bbf6f636b5e2918556aa98c612a0584646faed7"
+    },
+    {
+      "path": "src/openfoam_agent/engineering/case_build_graph.py",
+      "before_sha256": "1cdde8beb375faefe735eb3a85cb48dee37dc2fa41b52b6b8f1057e8b55dd4aa",
+      "after_sha256": "c72a63e0849887edc16055b678f2d023a63fe4c576efef63183cfb762507fcb7"
+    },
+    {
+      "path": "src/openfoam_agent/engineering/case_delta_graph.py",
+      "before_sha256": "bc50d09c5fb9b3878d3d1e85dcd8e0a4e3b6d34b706b4acac9da2a2f5b686127",
+      "after_sha256": "70fd4735843dcaf9bf753ac83067edf58637abc357a748379807ad9ce6791bf4"
+    },
+    {
+      "path": "src/openfoam_agent/llm/prompts/engineering.py",
+      "before_sha256": "3abe0faa3f36ec188265eac661ad8e5581ef6c7e2529022af668315ace3144e1",
+      "after_sha256": "88230a1d36c753a397ab2bf44e471791d6ead71a80eecd2e4a957d198f2fe6de"
+    },
+    {
+      "path": "src/openfoam_agent/__init__.py",
+      "before_sha256": "a6b067f06952219ed66dfb2df38a77609d6d013b5d564629259d6678c36ed501",
+      "after_sha256": "c702a2fd6272a212366d9f3d6589fcbb4934ba30b9546d9604200f41b3751cbf"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "before_sha256": "8f12a8b721070dd1a5bb89d928479ed25c9588f055ffba1765011d72aa93b1f3",
+      "after_sha256": "9dc5269b45ad8e45afd1798b2012d3d821ca07ad7c1dd1027a7c842ccd458c9d"
+    },
+    {
+      "path": "docker/Dockerfile",
+      "before_sha256": "f99a54aae2ce48396e444d1c4544b8e85058b75672de89d1befb2087858c4976",
+      "after_sha256": "610752a9b4417921695f58b7627e1660089ea8005881a2f41bb95571b2eceb5a"
+    },
+    {
+      "path": "pyproject.toml",
+      "before_sha256": "93eebf78549a54ab3e661b4fe3767b9ac54ef3b0c84ba99c3c8f4d2985cd2204",
+      "after_sha256": "3a7bad672b533ffa98fbe48e3bc2d806da0315a48975bd14bbe7395da935bffc"
+    },
+    {
+      "path": "tests/test_v520_release.py",
+      "before_sha256": "328992ff479c4b3b155917bac1126abe8216b92f72423a0093d6ae1e5eb94112",
+      "after_sha256": "ff313f2348eb340a597259a65b4e202bacd881878098bf2645911067bd2ba6e3"
+    },
+    {
+      "path": "tests/test_v510_requirement_assurance.py",
+      "before_sha256": "f12f8162f9e1d181d26ffea9904b2206dac658ea4b34819c46cb3ddfd8748129",
+      "after_sha256": "eb7fe0075bf921cd02155d70babbdd6e00d8b3f5b6c485bf66230c877775fcc4"
+    },
+    {
+      "path": "tests/test_v2_architecture.py",
+      "before_sha256": "baf3da6fc3da1f657676fcf6c6d2c2d0e07c193f4002eeab84c2005b40d648fe",
+      "after_sha256": "52b729eec01c1954e018efd4c2cc8a4c8758a7b2fa15297b7a38aebb353869fa"
+    },
+    {
+      "path": "tests/test_v215_semantic_fidelity.py",
+      "before_sha256": "87dd13a0f2c9668e63e3318064a4a3584f61edf758407e8de185d37669795cff",
+      "after_sha256": "ddf4d13d52465d555841548a7572521e25c543adba328650cdc467b5a111adb2"
+    },
+    {
+      "path": "tests/test_v216_compact_semantic_evidence.py",
+      "before_sha256": "dd8e1c32b618e2507c55edb724699af20195fef7c0b528f6e122ebddad302eb8",
+      "after_sha256": "5cdf8704ba4dc94b5caa4d10b130b88fadff55dbaed64025769bb517c580f761"
+    },
+    {
+      "path": "tests/test_v491_repository_cleanup.py",
+      "before_sha256": "f6458a939fb22c40c2b998e40fbeb4347b6a23626607c9ee254b0b43f444ef3b",
+      "after_sha256": "8fa4662dab728b02540ea55576f5f06c48b671c72cfde4ccbde98522229c3ef9"
+    },
+    {
+      "path": "tests/test_v440_semantic_assurance_policy.py",
+      "before_sha256": "2001516f08a233c25374d6cae9dfbd7f669a8226f412dcbfde6d9b1cf57580ce",
+      "after_sha256": "2fcc0f768fbcf54ee8105e4ba632b4fb4323b351ea16341c8eee4e1aa276b542"
+    }
+  ],
+  "removed_original_files": []
+}

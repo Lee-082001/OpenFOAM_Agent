@@ -23,7 +23,10 @@
       ],
       "controller_auto_consumer": true,
       "execution_order": 100,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_outputs": [
+        "mesh:{scope_key}:base"
+      ]
     },
     {
       "command": "snappyHexMesh",
@@ -52,6 +55,13 @@
       "execution_order": 200,
       "default_arguments": [
         "-overwrite"
+      ],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "features:global:ready"
+      ],
+      "ordering_outputs": [
+        "mesh:{scope_key}:snapped"
       ]
     },
     {
@@ -70,7 +80,51 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "mesh_dependency_inputs": [
+        "system/surfaceFeatureExtractDict",
+        "constant/triSurface"
+      ],
+      "mesh_dependency_outputs": [
+        "constant/triSurface"
+      ],
+      "ordering_outputs": [
+        "features:global:ready"
+      ],
+      "controller_delta_consumer": true,
+      "ordering_inputs": [
+        "surface:global:transformed"
+      ]
+    },
+    {
+      "command": "surfaceFeatures",
+      "effect": "mesh",
+      "required_dictionary": "system/surfaceFeaturesDict",
+      "permitted_phases": [
+        "authoring",
+        "repair",
+        "runtime_repair",
+        "strategy_revision"
+      ],
+      "scope_arguments": [],
+      "mesh_dependency_inputs": [
+        "system/surfaceFeaturesDict",
+        "constant/triSurface"
+      ],
+      "mesh_dependency_outputs": [
+        "constant/triSurface",
+        "constant/extendedFeatureEdgeMesh"
+      ],
+      "controller_auto_consumer": false,
+      "execution_order": 500,
+      "default_arguments": [],
+      "ordering_outputs": [
+        "features:global:ready"
+      ],
+      "controller_delta_consumer": true,
+      "ordering_inputs": [
+        "surface:global:transformed"
+      ]
     },
     {
       "command": "createBaffles",
@@ -83,7 +137,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "splitMeshRegions",
@@ -96,7 +154,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "setsToZones",
@@ -109,7 +171,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "surfaceTransformPoints",
@@ -122,7 +188,10 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_outputs": [
+        "surface:global:transformed"
+      ]
     },
     {
       "command": "topoSet",
@@ -147,7 +216,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "setFields",
@@ -165,7 +238,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "createPatch",
@@ -190,7 +267,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "decomposePar",
@@ -208,7 +289,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "extrudeMesh",
@@ -226,7 +311,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "checkMesh",
@@ -243,7 +332,11 @@
         "{scope_name}"
       ],
       "execution_order": 10000,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "surfaceCheck",
@@ -282,7 +375,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "renumberMesh",
@@ -301,7 +398,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "transformPoints",
@@ -320,7 +421,11 @@
       ],
       "controller_auto_consumer": false,
       "execution_order": 500,
-      "default_arguments": []
+      "default_arguments": [],
+      "ordering_inputs": [
+        "mesh:{scope_key}:base",
+        "mesh:{scope_key}:snapped"
+      ]
     },
     {
       "command": "gmshToFoam",

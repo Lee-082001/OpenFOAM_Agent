@@ -1,15 +1,34 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Literal
 
 from openfoam_agent.schemas.intake import IntakeFact
 
 
+
+_NUMERIC = re.compile(r"(?<![A-Za-z0-9_.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?(?![A-Za-z0-9_.])")
+
+
+def _is_critical_quantitative_user_fact(fact: IntakeFact) -> bool:
+    if fact.source != "user":
+        return False
+    if fact.quantity is not None:
+        return True
+    if len(_NUMERIC.findall(fact.value)) != 1:
+        return False
+    if fact.category in {"scale", "property"}:
+        return True
+    return bool(fact.unit) and fact.category in {
+        "geometry", "material", "physics", "temporal", "motion", "boundary"
+    }
+
 AssuranceMode = Literal[
     "routing_provenance",
     "artifact_recommended",
     "numeric_relation_recommended",
+    "machine_assertion_required",
     "provenance",
 ]
 
@@ -41,9 +60,21 @@ def expectation_for_fact(fact: IntakeFact) -> SemanticAssuranceExpectation:
             "Routing/interpretation fact is preserved by intake digest and binding provenance, not by an invented case-file token.",
         )
 
-    # A direct single numeric user requirement can often be recomputed from one or
-    # more artifacts.  When the Agent supplies such a relation Python verifies it
-    # strictly, but not every quantity has a generic file representation.
+    # v5.1 reliability contract: an explicitly typed physical quantity supplied by
+    # the user is no longer provenance-only.  It must be tied to the selected case
+    # by either an exact dictionary/content assertion or a numeric recomputation.
+    # The quantity object is created only after intake-side unit/dimension checks, so
+    # this rule does not guess that arbitrary digits in natural language are physics.
+    if _is_critical_quantitative_user_fact(fact):
+        return SemanticAssuranceExpectation(
+            "machine_assertion_required",
+            True,
+            "Explicit user physical quantities require machine-verifiable implementation evidence in the authored case.",
+        )
+
+    # Untyped direct numeric facts retain the v5.0 advisory policy because counts,
+    # labels and strategy-dependent quantities do not all have a universal artifact
+    # representation.
     if fact.source == "user" and fact.category in {"scale", "property", "physics"}:
         return SemanticAssuranceExpectation(
             "numeric_relation_recommended",

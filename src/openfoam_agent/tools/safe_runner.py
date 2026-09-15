@@ -42,6 +42,7 @@ class SafeRunner:
     OFFLINE_FALLBACK_ALLOWED = {
         "blockMesh",
         "surfaceFeatureExtract",
+        "surfaceFeatures",
         "surfaceCheck",
         "snappyHexMesh",
         "createPatch",

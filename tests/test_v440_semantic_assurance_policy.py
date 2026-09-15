@@ -80,7 +80,7 @@ def test_v440_user_temporal_fact_without_assertion_is_advisory_not_case_failure(
     assert any("temporal.behavior" in warning for warning in result.warnings)
 
 
-def test_v440_numeric_user_fact_without_relation_is_advisory(tmp_path):
+def test_v440_critical_numeric_user_fact_without_relation_is_rejected(tmp_path):
     intake = CFDIntakeSpec(
         semantic_contract_version="2",
         title="Reynolds target",
@@ -101,8 +101,8 @@ def test_v440_numeric_user_fact_without_relation_is_advisory(tmp_path):
     ws = CaseWorkspace(tmp_path)
     _write_minimum_case(ws)
     result = DeterministicSafetyGate(FakeOpenFOAMTools(), ws).validate_plan(plan, intake)
-    assert result.valid, result.failures
-    assert any("numeric user fact" in warning for warning in result.warnings)
+    assert not result.valid
+    assert any("Critical requirement assurance missing" in failure for failure in result.failures)
 
 
 def test_v440_claimed_semantic_assertion_still_fails_on_contradiction(tmp_path):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from openfoam_agent.contracts.models import CompletionContract
+
 from types import SimpleNamespace
 
 import pytest
@@ -46,6 +48,7 @@ def _design(required_case_files):
         motion_kind="static",
         mesh_motion_requirement="static",
         mesh_strategy="Agent-selected static mesh.",
+        completion=CompletionContract(mode="steady", required_result_fields=["U"]),
         required_case_files=required_case_files,
     )
 
@@ -59,7 +62,7 @@ def test_staged_design_schema_requires_nonempty_required_manifest():
 
 
 def test_sealer_defensively_rejects_model_copy_with_empty_manifest():
-    valid = _design(["system/controlDict"])
+    valid = _design(["system/controlDict", "0/U"])
     bypassed = valid.model_copy(update={"required_case_files": []})
     with pytest.raises(DesignSealError, match="required case manifest is empty"):
         materialize_engineering_plan(bypassed, make_state(), _Catalog())

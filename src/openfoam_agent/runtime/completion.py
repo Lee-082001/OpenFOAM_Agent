@@ -42,8 +42,17 @@ def _entry_number(entries, key, default=None):
     return value if math.isfinite(value) else None
 
 
-def _required_result_fields(plan):
-    return list(dict.fromkeys(p[2:] for p in plan.required_case_files if p.startswith("0/") and len(p) > 2))
+def _declared_result_fields(plan):
+    """Return only Agent-declared result fields.
+
+    Initial fields under ``0/`` are solver inputs, not evidence that the solver must
+    write the same artifact at the final time.  Result-output authority therefore
+    comes exclusively from the completion contract.
+    """
+    completion = getattr(plan, "completion", None)
+    if completion is None:
+        return []
+    return list(dict.fromkeys(str(item).removeprefix("0/") for item in completion.required_result_fields if str(item).strip()))
 
 
 def _engineering_default_controls(plan):
@@ -99,7 +108,7 @@ def compile_runtime_contract(plan, workspace, *, wall_seconds=None) -> RuntimeCo
     Incomplete result-acceptance criteria are review information, not solve blockers.
     """
     entries, complete = _control_entries(workspace)
-    fields = _required_result_fields(plan)
+    fields = _declared_result_fields(plan)
     control_start = _entry_number(entries, "startTime", 0.0) if complete else None
     control_end = _entry_number(entries, "endTime") if complete else None
     start_from = _entry_text(entries, "startFrom", "startTime") if complete else None
@@ -135,6 +144,10 @@ def compile_runtime_contract(plan, workspace, *, wall_seconds=None) -> RuntimeCo
             if max_iterations is None:
                 max_iterations = default_max_iterations
         bound_source = "plan_completion" if mode == "transient" else ("mixed" if max_iterations is not None else "plan_completion")
+        if not fields:
+            warnings.append(
+                "No explicit required result fields were declared; final output completeness cannot be deterministically verified."
+            )
         execution_bound = ExecutionBoundContract(
             mode=mode,
             start_time=start_time,
@@ -142,7 +155,7 @@ def compile_runtime_contract(plan, workspace, *, wall_seconds=None) -> RuntimeCo
             max_iterations=max_iterations,
             wall_seconds=wall_seconds,
             minimum_steps=explicit.minimum_steps,
-            required_result_fields=explicit.required_result_fields or fields,
+            required_result_fields=fields,
             source=bound_source,
             warnings=warnings,
         )
@@ -203,6 +216,11 @@ def compile_runtime_contract(plan, workspace, *, wall_seconds=None) -> RuntimeCo
             bound_source = "engineering_defaults"
         else:
             warnings.append("Custom execution has no deterministic iteration bound; the runtime wall-time limit is the hard execution bound.")
+
+    if not fields:
+        warnings.append(
+            "No explicit required result fields were declared; final output completeness cannot be deterministically verified."
+        )
 
     execution_bound = ExecutionBoundContract(
         mode=mode,
@@ -303,7 +321,7 @@ def verify_result_outputs(workspace, plan, contract, last_time, *, before=None):
         if isinstance(contract, RuntimeContract)
         else contract.required_result_fields
     )
-    fields = declared_fields or [p[2:] for p in plan.required_case_files if p.startswith("0/")]
+    fields = list(declared_fields)
     if not fields:
         return False, ["No required result fields are declared; output completeness is unverified."], records
     if last_time is None:

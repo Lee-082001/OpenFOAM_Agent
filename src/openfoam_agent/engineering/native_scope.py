@@ -22,6 +22,7 @@ _MESH_SYSTEM_DICTIONARIES = {
     "blockMeshDict",
     "snappyHexMeshDict",
     "surfaceFeatureExtractDict",
+    "surfaceFeaturesDict",
     "createPatchDict",
     "topoSetDict",
     "setFieldsDict",

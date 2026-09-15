@@ -1,3 +1,23 @@
+## v5.2.2 result-evidence and acceptance hotfix
+
+v5.2.2 separates solver initial fields from final result evidence. Executable staged designs must explicitly declare `completion.required_result_fields`; runtime verification checks only those fresh final-time artifacts. `/accept` now uses deterministic acceptance blockers and can never crash the interactive CLI when result evidence is incomplete. See `V5_2_2_RELEASE.md`.
+
+## v5.2.1 reliability fixes
+
+This patch fixes quantitative false acceptance, transitive mesh revalidation,
+entry-level numerical repair authorization, and runtime-repair success accounting.
+It also restores a reproducible regression runner and Docker COPY inputs.
+
+- Release details and limitations: [V5_2_1_RELEASE.md](V5_2_1_RELEASE.md)
+- Korean handoff and measured tests: [REVIEW_5_2_1_KO.md](REVIEW_5_2_1_KO.md)
+- Complete test command: `sh scripts/run_regression.sh`
+- Results are not native CFD qualification. Existing regression failures remain
+  explicit; see the handoff before treating this patch as a production release.
+
+## v5.2.0 scoped revalidation and reliability benchmark
+
+> v5.2.0 adds dependency-scoped revalidation after committed case deltas and a reproducible reliability benchmark harness. Unchanged mesh scopes retain current `checkMesh` evidence, mesh-affecting changes rebuild/recheck only affected scopes, and repair pipelines use the same native producer/consumer dependency ordering as initial authoring. Reports now expose revalidation audit records and engineering token/native-cost observables. The 36-report comparison manifest under `research/` is intentionally shipped as `NOT_RUN`; missing reports are never counted as successes. See `V5_2_0_RELEASE.md`.
+
 ## v4.8.1 prepare-repair terminal ownership fix
 
 > v4.8.1 fixes a controller phase-order bug exposed by a Foundation OpenFOAM v14 lid-driven cavity run. A zero-step/pre-solve case repair could carry `retry_solver=true` from the shared LLM repair schema and incorrectly append `RetrySolverAction` while still in the prepare phase. Prepare repair now always terminates through `finish_preview` and the normal validation/seal/explicit `/solve` approval path; runtime repair always terminates through `retry_solver`. The LLM hint no longer changes controller phase authority. See `V4_8_1_CHANGES.md`.
@@ -836,7 +856,7 @@ The engineering agent receives bounded actions for:
 - case file list/read/write/delete;
 - `foamDictionary` validation;
 - `surfaceCheck`;
-- `blockMesh`, `surfaceFeatureExtract`, `snappyHexMesh`, `createPatch`, `checkMesh`;
+- `blockMesh`, `surfaceFeatureExtract`, `surfaceFeatures`, `snappyHexMesh`, `createPatch`, `checkMesh`;
 - final preview sealing;
 - same-solver runtime retry or review-required blocking.
 
@@ -960,7 +980,7 @@ When native execution is enabled, `/confirm` resolves only the trusted `checkMes
 
 ### Unified native failure diagnostics (v2.5.0)
 
-Native failures no longer collapse to only `returned status 1`/`-6`. The same bounded `NativeFailureDiagnostic` path is used by `foamDictionary`, `surfaceCheck`, `blockMesh`, `surfaceFeatureExtract`, `snappyHexMesh`, `createPatch`, `checkMesh`, `foamRun`, and `foamPostProcess`. Complete stdout/stderr remains in the private workspace log; a bounded raw OpenFOAM diagnostic is surfaced to both the next relevant Agent turn and normal CLI progress. For example:
+Native failures no longer collapse to only `returned status 1`/`-6`. The same bounded `NativeFailureDiagnostic` path is used by `foamDictionary`, `surfaceCheck`, `blockMesh`, `surfaceFeatureExtract`, `surfaceFeatures`, `snappyHexMesh`, `createPatch`, `checkMesh`, `foamRun`, and `foamPostProcess`. Complete stdout/stderr remains in the private workspace log; a bounded raw OpenFOAM diagnostic is surfaced to both the next relevant Agent turn and normal CLI progress. For example:
 
 ```text
 [ENGINEERING 10/12] FAIL snappyHexMesh returned status 1; native diagnostic captured.

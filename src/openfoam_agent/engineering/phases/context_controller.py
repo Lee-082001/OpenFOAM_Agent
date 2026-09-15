@@ -1026,6 +1026,11 @@ def generate_turn(
         usage = dict(usage)
         if isinstance(model_name, str) and model_name:
             usage["model"] = model_name
+        state.engineering_llm_usage_records.append({
+            "phase": contract_phase,
+            "step": local_step,
+            **{key: value for key, value in usage.items() if isinstance(value, (int, float, str))},
+        })
         self.progress.emit(
             ProgressEvent(
                 phase="llm-usage",

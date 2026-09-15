@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from openfoam_agent.contracts.evidence_policy import provider_is_sufficient
-from openfoam_agent.contracts.regions import region_layouts, region_mesh_digest, validate_design
+from openfoam_agent.contracts.regions import region_mesh_digest, validate_design
 from openfoam_agent.contracts.execution_scopes import (
     current_mesh_evidence_failures,
     execution_scopes,
@@ -1042,7 +1042,7 @@ class CFDEngineeringAgent:
     ) -> tuple[EngineeringEvent, RepairOutcome | None]:
         result = self.safety.validate_plan(action.plan, state.intake)  # type: ignore[arg-type]
         if native_execution:
-            result.failures.extend(self._region_mesh_failures(state, action.plan))
+            result.failures.extend(self._mesh_evidence_failures(state, action.plan))
             result.valid = not result.failures
         result.failures.extend(self._validate_observed_provenance(action.plan, state))
         result.failures.extend(self._validate_engineering_defaults(action.plan, state))
@@ -1073,18 +1073,11 @@ class CFDEngineeringAgent:
                     if presolve.valid:
                         self._presolve_case_manifest = self.workspace.manifest_digest()
                         self._presolve_required_case_files = tuple(action.plan.required_case_files)
-            if state.mesh_evidence is None or not state.mesh_evidence.passed:
-                result.failures.append(
-                    "A passing checkMesh result with cell-count evidence is required before an automatic solver retry."
-                )
-            elif state.mesh_evidence.cell_count is not None and state.mesh_evidence.cell_count > self.policy.max_mesh_cells:
-                result.failures.append(
-                    f"Mesh cell count {state.mesh_evidence.cell_count} exceeds bounded policy limit {self.policy.max_mesh_cells}."
-                )
-            elif self._checkmesh_mesh_manifest != self.workspace.mesh_manifest_digest():
-                result.failures.append(
-                    "Mesh-affecting inputs changed after checkMesh; re-run checkMesh before retry_solver."
-                )
+            # v5 scope-keyed mesh evidence is the sole retry authority.
+            # _mesh_evidence_failures() above already checks every declared scope for
+            # pass/fail, bounded cell count, and scope-local freshness. Legacy root
+            # mirrors (state.mesh_evidence/_checkmesh_mesh_manifest) are projections
+            # only and must not reject a valid named-region retry.
             result.valid = not result.failures
         if result.valid:
             state.engineering_plan = action.plan

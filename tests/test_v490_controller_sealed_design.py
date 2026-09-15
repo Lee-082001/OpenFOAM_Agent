@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from conftest import make_state
 from openfoam_agent.engineering.design_seal import materialize_engineering_plan
+from openfoam_agent.contracts.models import CompletionContract
 from openfoam_agent.schemas.engineering import (
     DesignCaseAction,
     EngineeringDesign,
@@ -43,6 +44,7 @@ def _design():
         motion_kind="static",
         mesh_motion_requirement="static",
         mesh_strategy="Agent-selected exploratory 2D mesh strategy.",
+        completion=CompletionContract(mode="transient", end_time=10.0, required_result_fields=["U"]),
         engineering_defaults=[
             EngineeringDesignDefault(
                 parameter="domain extent", value="representative", rationale="Exploratory case"

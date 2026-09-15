@@ -20,8 +20,11 @@ class NativeToolContract:
     mesh_dependency_inputs: tuple[str, ...] = ()
     mesh_dependency_outputs: tuple[str, ...] = ()
     controller_auto_consumer: bool = False
+    controller_delta_consumer: bool = False
     execution_order: int = 500
     default_arguments: tuple[str, ...] = ()
+    ordering_inputs: tuple[str, ...] = ()
+    ordering_outputs: tuple[str, ...] = ()
 
 
 # Controller-owned executable contracts are auditable package data, not hidden CFD
@@ -44,8 +47,11 @@ def _load_registry() -> dict[str, NativeToolContract]:
             mesh_dependency_inputs=tuple(item.get("mesh_dependency_inputs", [])),
             mesh_dependency_outputs=tuple(item.get("mesh_dependency_outputs", [])),
             controller_auto_consumer=bool(item.get("controller_auto_consumer", False)),
+            controller_delta_consumer=bool(item.get("controller_delta_consumer", False)),
             execution_order=int(item.get("execution_order", 500)),
             default_arguments=tuple(item.get("default_arguments", [])),
+            ordering_inputs=tuple(item.get("ordering_inputs", [])),
+            ordering_outputs=tuple(item.get("ordering_outputs", [])),
         )
     return registry
 

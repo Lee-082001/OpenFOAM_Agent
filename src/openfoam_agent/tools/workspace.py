@@ -17,6 +17,7 @@ _EXECUTION_INPUT_TOP_LEVEL = {"0", "constant", "system"}
 _MESH_AFFECTING_EXACT_PATHS = {
     "system/blockMeshDict",
     "system/surfaceFeatureExtractDict",
+    "system/surfaceFeaturesDict",
     "system/snappyHexMeshDict",
     "system/createPatchDict",
 }
@@ -337,7 +338,7 @@ class CaseWorkspace:
         if len(parts) >= 3 and parts[0] == "constant" and "polyMesh" in parts[1:3]:
             return True
         if parts[0] == "system" and parts[-1] in {
-            "blockMeshDict", "snappyHexMeshDict", "surfaceFeatureExtractDict", "createPatchDict",
+            "blockMeshDict", "snappyHexMeshDict", "surfaceFeatureExtractDict", "surfaceFeaturesDict", "createPatchDict",
             "topoSetDict", "extrudeMeshDict", "decomposeParDict", "meshQualityDict",
         }:
             return True

@@ -248,16 +248,74 @@ def affected_mesh_scope_keys(workspace, plan, changed_paths, native_invocations=
     return affected
 
 
-def auto_consumers_for_delta(plan, available_paths, changed_paths) -> list[NativeOpenFOAMCommand]:
-    """Return only auto-consumers whose declared mesh inputs intersect a delta."""
-    changed = {str(PurePosixPath(path)) for path in changed_paths}
-    result: list[NativeOpenFOAMCommand] = []
-    for scope, invocation in auto_mesh_consumers(plan, available_paths):
+def auto_consumers_for_delta(plan, available_paths, changed_paths, native_invocations=()) -> list[NativeOpenFOAMCommand]:
+    """Find downstream consumers to a fixed point, including generated outputs.
+
+    Extra feature consumers are eligible only when their explicit dictionary exists;
+    they are not guessed from geometry. Each invocation is visited once, preventing
+    loops for tools that read and write polyMesh or triSurface in place.
+    """
+    paths = set(available_paths)
+    dirty = {str(PurePosixPath(path)) for path in changed_paths}
+    candidates = list(auto_mesh_consumers(plan, paths))
+    scopes = execution_scopes(plan)
+    for contract in registered_contracts():
+        if not contract.controller_delta_consumer:
+            continue
+        # Global feature dictionaries are shared, not blindly given -region.
+        if contract.required_dictionary in paths:
+            candidates.append((None, NativeOpenFOAMCommand(
+                command=contract.command, arguments=list(contract.default_arguments), role="mesh")))
+        if contract.scope_arguments:
+            for scope in scopes:
+                if scope.name is None:
+                    continue
+                args = _contract_arguments(contract.command, scope)
+                if required_dictionary(contract.command, args) in paths:
+                    candidates.append((scope, NativeOpenFOAMCommand(
+                        command=contract.command, arguments=args, role="mesh")))
+
+    def dependency_paths(scope, invocation, outputs=False):
         contract = native_tool_contract(invocation.command)
-        inputs = [render_scope_template(item, scope) for item in contract.mesh_dependency_inputs]
-        if any(_path_overlap(path, dep) for path in changed for dep in inputs):
-            result.append(invocation)
-    return result
+        templates = contract.mesh_dependency_outputs if outputs else contract.mesh_dependency_inputs
+        values = [render_scope_template(t, scope) if scope is not None else t for t in templates]
+        if not outputs:
+            # -dict overrides the default dictionary; it is not an additional input.
+            default = required_dictionary(invocation.command, _contract_arguments(invocation.command, scope)) if scope is not None else contract.required_dictionary
+            actual = required_dictionary(invocation.command, invocation.arguments)
+            if actual and default:
+                values = [actual if value == default else value for value in values]
+        return values
+
+    selected = []
+    seen = set()
+    explicit = list(native_invocations)
+    for invocation in explicit:
+        contract = native_tool_contract(invocation.command)
+        scope = scope_for_native_arguments(plan, invocation.arguments) if any(
+            "{scope" in t or "{constant_dir}" in t or "{system_dir}" in t
+            for t in contract.mesh_dependency_inputs + contract.mesh_dependency_outputs) else None
+        token = (invocation.command, tuple(invocation.arguments))
+        seen.add(token)
+        dirty.update(dependency_paths(scope, invocation, outputs=True))
+    # Explicit invocations replace inferred defaults for the same command/scope.
+    explicit_keys = {(item.command, native_command_region(item.arguments)) for item in explicit}
+    candidates = [(scope, item) for scope, item in candidates
+                  if (item.command, native_command_region(item.arguments)) not in explicit_keys]
+    while True:
+        added = False
+        for scope, invocation in candidates:
+            token = (invocation.command, tuple(invocation.arguments))
+            if token in seen:
+                continue
+            inputs = dependency_paths(scope, invocation)
+            if any(_path_overlap(path, dep) for path in dirty for dep in inputs):
+                selected.append(invocation)
+                seen.add(token)
+                dirty.update(dependency_paths(scope, invocation, outputs=True))
+                added = True
+        if not added:
+            return selected
 
 
 def scope_mesh_digest(workspace, scope: ExecutionScope) -> str:

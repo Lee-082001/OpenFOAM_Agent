@@ -7,8 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from openfoam_agent.schemas.common import ToolResult
-from openfoam_agent.schemas.engineering import EngineeringPlan, MeshEvidence
+from openfoam_agent.schemas.engineering import EngineeringPlan, MeshEvidence, NumericEvidenceTerm
 from openfoam_agent.schemas.intake import CFDIntakeSpec
+from openfoam_agent.contracts.quantities import si_value, UNITS
+from openfoam_agent.contracts.execution import literal_entry_payload
 from openfoam_agent.tools.openfoam import OpenFOAMTools
 from openfoam_agent.tools.foam_file import validate_foam_file_header
 from openfoam_agent.tools.workspace import CaseWorkspace, WorkspaceSafetyError
@@ -85,6 +87,9 @@ class DeterministicSafetyGate:
             )
         for binding in plan.confirmed_fact_bindings:
             fact = intake.fact(binding.fact_id)
+            critical = fact is not None and intake.semantic_contract_version == "2" and expectation_for_fact(fact).mode == "machine_assertion_required"
+            if critical:
+                failures.extend(self._validate_quantitative_binding(fact, binding))
             for relative in binding.case_files:
                 try:
                     bound_path = self.workspace.resolve_case_path(relative)
@@ -139,14 +144,14 @@ class DeterministicSafetyGate:
                             f"Semantic assertion for {binding.fact_id} is not present in {assertion.path}: {snippet!r}."
                         )
 
-            if binding.numeric_relation is not None:
+            if binding.numeric_relation is not None and not critical:
                 if fact is None:
                     failures.append(
                         f"Numeric semantic assertion references unknown confirmed fact {binding.fact_id}."
                     )
                 else:
                     failures.extend(
-                        self._validate_numeric_relation(binding.fact_id, fact.value, binding.numeric_relation)
+                        self._validate_numeric_relation(binding.fact_id, fact, binding.numeric_relation)
                     )
 
         # v5.0 semantic assurance policy: absence of an optional machine assertion is
@@ -169,6 +174,11 @@ class DeterministicSafetyGate:
                     and (binding.case_assertions or binding.numeric_relation is not None)
                 )
                 if not expectation.machine_assertion_recommended or has_machine_assertion:
+                    continue
+                if expectation.mode == "machine_assertion_required":
+                    failures.append(
+                        f"Critical requirement assurance missing for {fact.id}: explicit user physical quantity has no machine-verifiable case assertion or numeric relation."
+                    )
                     continue
                 if expectation.mode == "numeric_relation_recommended":
                     numeric_targets = _finite_numbers(fact.value)
@@ -231,7 +241,135 @@ class DeterministicSafetyGate:
 
         return SafetyCheckResult(valid=not failures, failures=failures, warnings=warnings)
 
-    def _validate_numeric_relation(self, fact_id: str, fact_value: str, relation) -> list[str]:
+    def _validate_quantitative_binding(self, fact, binding) -> list[str]:
+        """Bind quantitative proof to the frozen target, not model expected_value.
+
+        Supported proof: a literal scalar/field value, or the explicit U*L/nu
+        Reynolds relation. Arbitrary product formulae and model multipliers are not
+        quantitative authority. This is input assurance, not a physical output oracle.
+        """
+        prefix = f"Critical requirement assurance for {fact.id}"
+        quantity = fact.quantity
+        try:
+            if quantity is not None:
+                target = si_value(quantity)
+                if quantity.time_dependence != "constant":
+                    raise ValueError("time-dependent quantitative proof is not supported by a scalar locator")
+            else:
+                numbers = _finite_numbers(fact.value)
+                if len(numbers) != 1:
+                    raise ValueError("exactly one frozen numeric target is required")
+                target = numbers[0]
+                if fact.unit:
+                    unit = "1" if fact.unit.casefold() == "dimensionless" else fact.unit
+                    if unit not in UNITS:
+                        raise ValueError("unsupported target unit")
+                    scale, offset, _ = UNITS[unit]
+                    target = target * scale + offset
+            name = " ".join([fact.id, fact.label, quantity.quantity if quantity else ""]).casefold()
+            reynolds = "reynolds" in name
+            relation = binding.numeric_relation
+            if relation is None:
+                if reynolds:
+                    raise ValueError("Reynolds proof requires U*L/nu, not a content assertion")
+                assertions = binding.case_assertions
+                if not assertions or any(not a.entry_path for a in assertions):
+                    raise ValueError("a quantitative assertion requires an exact dictionary entry; a text anchor is not proof")
+                terms = [NumericEvidenceTerm(path=a.path, entry_path=a.entry_path) for a in assertions]
+                groups = [(terms, [])]  # every direct assertion must implement the target
+            else:
+                if not relation.numerator:
+                    raise ValueError("numeric semantic assertion requires at least one numerator term")
+                if not math.isfinite(relation.relative_tolerance) or not (0 < relation.relative_tolerance <= 1e-6):
+                    raise ValueError("quantitative proof tolerance must be at most 1e-6")
+                if reynolds:
+                    if len(relation.numerator) != 2 or len(relation.denominator) != 1:
+                        raise ValueError("Reynolds proof requires exactly two numerator terms and one denominator")
+                elif len(relation.numerator) != 1 or relation.denominator:
+                    raise ValueError("unsupported quantitative formula; direct scalar proof requires exactly one term")
+                groups = [(relation.numerator, relation.denominator)]
+            for numerator, denominator in groups:
+                values = []
+                resolved = []
+                for term in [*numerator, *denominator]:
+                    if term.multiplier != 1.0:
+                        raise ValueError("model-supplied multipliers are not unit-conversion authority; case values must be SI")
+                    entry = term.entry_path
+                    # One unambiguous legacy field locator can be upgraded without
+                    # arbitrary substring/number-window matching.
+                    if not entry and term.anchor == "internalField uniform" and term.occurrence == 0:
+                        entry = "internalField"
+                    if not entry or term.number_index != 0:
+                        raise ValueError("an exact numeric entry locator is required")
+                    content = self.workspace.resolve_case_path(term.path, must_exist=True).read_text(encoding="utf-8")
+                    raw = literal_entry_payload(content, entry)
+                    if raw is None:
+                        raise ValueError(f"cannot resolve complete literal entry {term.path}:{entry}")
+                    parts = Path(term.path).parts
+                    if not reynolds and quantity is not None:
+                        if quantity.region:
+                            if len(parts) < 3 or parts[1] != quantity.region:
+                                raise ValueError("numeric evidence targets the wrong region")
+                        if quantity.patch and entry != f"boundaryField.{quantity.patch}.value":
+                            raise ValueError("numeric evidence must read the confirmed boundary patch value")
+                        if quantity.patch:
+                            bc = literal_entry_payload(content, f"boundaryField.{quantity.patch}.type")
+                            if bc != "fixedValue":
+                                raise ValueError("non-fixed boundary values need a dedicated verifier; initial value is not a prescribed boundary proof")
+                    raw_dimensions = literal_entry_payload(content, "dimensions") if parts[0] == "0" else None
+                    embedded = re.search(r"\[([^]]+)\]", raw)
+                    dimensions = None
+                    dim_text = embedded.group(1) if embedded else (raw_dimensions.strip("[] ") if raw_dimensions else None)
+                    if dim_text is not None:
+                        dims = _finite_numbers(dim_text)
+                        if len(dims) != 7 or any(v != int(v) for v in dims):
+                            raise ValueError("invalid evidence dimensions")
+                        dimensions = tuple(int(v) for v in dims)
+                    if parts[0] == "0" and dimensions is None:
+                        raise ValueError("field evidence requires explicit dimensions")
+                    if not reynolds and quantity is not None and dimensions is not None and dimensions != quantity.dimensions:
+                        raise ValueError("evidence dimensions disagree with the confirmed quantity")
+                    payload = re.sub(r"\[[^]]+\]", "", raw).strip()
+                    if payload.startswith("uniform "):
+                        payload = payload[len("uniform "):].strip()
+                    if payload.startswith("(") and payload.endswith(")") and Path(term.path).name == "U":
+                        vector = payload[1:-1].split()
+                        if len(vector) != 3:
+                            raise ValueError("velocity evidence requires three components")
+                        value = math.sqrt(sum(float(v) ** 2 for v in vector))
+                    else:
+                        value = float(payload)
+                    if not math.isfinite(value):
+                        raise ValueError("non-finite quantitative evidence")
+                    values.append(value)
+                    resolved.append((term.path, entry, dimensions))
+                if reynolds:
+                    velocity = [i for i, (path, entry, dims) in enumerate(resolved[:2])
+                                if Path(path).name == "U" and Path(path).parts[0] == "0"
+                                and dims == (0, 1, -1, 0, 0, 0, 0)
+                                and (entry == "internalField" or (entry.startswith("boundaryField.") and entry.endswith(".value"))) ]
+                    if len(velocity) != 1:
+                        raise ValueError("Reynolds velocity must refer to an actual dimensioned U field")
+                    length_index = 1 - velocity[0]
+                    if resolved[length_index][2] != (0, 1, 0, 0, 0, 0, 0):
+                        raise ValueError("Reynolds reference length requires a dimensioned length entry")
+                    nu_path, nu_entry, nu_dims = resolved[2]
+                    if not nu_path.startswith("constant/") or nu_entry.rsplit(".", 1)[-1] != "nu" or nu_dims != (0, 2, -1, 0, 0, 0, 0):
+                        raise ValueError("Reynolds viscosity must be a dimensioned nu entry")
+                    if any(value <= 0 for value in values):
+                        raise ValueError("Reynolds inputs must be positive")
+                    computed = values[0] * values[1] / values[2]
+                    observed = [computed]
+                else:
+                    observed = values
+                for computed in observed:
+                    if not math.isclose(computed, target, rel_tol=1e-6, abs_tol=1e-12):
+                        raise ValueError(f"numeric semantic assertion recomputes to {computed}, not the confirmed target {target}")
+        except (ValueError, OSError, WorkspaceSafetyError, OverflowError) as exc:
+            return [f"{prefix}: {exc}."]
+        return []
+
+    def _validate_numeric_relation(self, fact_id: str, fact, relation) -> list[str]:
         failures: list[str] = []
         if not relation.numerator:
             failures.append(
@@ -245,13 +383,20 @@ class DeterministicSafetyGate:
                 f"Numeric semantic assertion for {fact_id} has an invalid relative tolerance."
             )
             return failures
-        targets = _finite_numbers(fact_value)
-        if len(targets) != 1:
-            failures.append(
-                f"Numeric semantic assertion for {fact_id} requires exactly one numeric target in the confirmed fact value."
-            )
-            return failures
-        target = targets[0]
+        if getattr(fact, "quantity", None) is not None:
+            try:
+                target = si_value(fact.quantity)
+            except ValueError as exc:
+                failures.append(f"Numeric semantic assertion for {fact_id} has invalid typed quantity: {exc}")
+                return failures
+        else:
+            targets = _finite_numbers(fact.value)
+            if len(targets) != 1:
+                failures.append(
+                    f"Numeric semantic assertion for {fact_id} requires exactly one numeric target in the confirmed fact value."
+                )
+                return failures
+            target = targets[0]
         numerator = 1.0
         denominator = 1.0
         for side, terms in (("numerator", relation.numerator), ("denominator", relation.denominator)):

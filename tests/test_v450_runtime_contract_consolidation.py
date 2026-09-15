@@ -162,6 +162,8 @@ def test_v450_current_state_message_ignores_stale_superseded_failure():
 
 def test_v450_interactive_solve_path_does_not_require_duplicate_steady_completion_contract(tmp_path, graph_path):
     state, plan, ws = _steady_plan(tmp_path)
+    # v5.2.2 separates result-artifact declaration from convergence acceptance.
+    plan.completion = CompletionContract(mode="steady", required_result_fields=["U", "p"])
     tools = FakeOpenFOAMTools(
         foam_runs=[ToolResult(
             success=True,

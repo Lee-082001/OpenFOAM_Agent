@@ -75,6 +75,84 @@ def _dedupe_invocations(items: list[NativeOpenFOAMCommand]) -> list[NativeOpenFO
     return unique
 
 
+
+
+def _render_ordering_tokens(plan, invocation: NativeOpenFOAMCommand, templates: tuple[str, ...]) -> set[str]:
+    """Render controller-owned dependency labels for one native invocation.
+
+    Labels may be global (no scope placeholders) or execution-scope specific. They
+    are ordering metadata only and never authorize a command or assert that a file
+    exists.
+    """
+    if not templates:
+        return set()
+    needs_scope = any("{scope_key}" in item or "{scope_name}" in item for item in templates)
+    scope = None
+    if needs_scope:
+        scope = scope_for_native_arguments(plan, invocation.arguments)
+    rendered: set[str] = set()
+    for template in templates:
+        value = template
+        if scope is not None:
+            value = value.replace("{scope_key}", "root" if scope.name is None else f"region:{scope.name}")
+            value = value.replace("{scope_name}", scope.name or "")
+        rendered.add(value)
+    return rendered
+
+
+def _stable_dependency_order(plan, invocations: list[NativeOpenFOAMCommand]) -> tuple[list[NativeOpenFOAMCommand], list[str]]:
+    """Stable topological sort using native-contract producer/consumer labels.
+
+    Original Agent order is the tie-breaker for independent nodes. Only declared
+    producer->consumer relationships may move a command.
+    """
+    count = len(invocations)
+    if count < 2:
+        return list(invocations), []
+    inputs: list[set[str]] = []
+    outputs: list[set[str]] = []
+    failures: list[str] = []
+    for item in invocations:
+        contract = native_tool_contract(item.command)
+        try:
+            inputs.append(_render_ordering_tokens(plan, item, contract.ordering_inputs))
+            outputs.append(_render_ordering_tokens(plan, item, contract.ordering_outputs))
+        except ValueError as exc:
+            failures.append(f"Could not bind native dependency scope for {item.command}: {exc}")
+            inputs.append(set())
+            outputs.append(set())
+    if failures:
+        return list(invocations), failures
+
+    outgoing = [set() for _ in range(count)]
+    indegree = [0] * count
+    for producer in range(count):
+        if not outputs[producer]:
+            continue
+        for consumer in range(count):
+            if producer == consumer or not inputs[consumer]:
+                continue
+            if outputs[producer].intersection(inputs[consumer]) and consumer not in outgoing[producer]:
+                outgoing[producer].add(consumer)
+                indegree[consumer] += 1
+
+    ready = [index for index, degree in enumerate(indegree) if degree == 0]
+    ordered_indices: list[int] = []
+    while ready:
+        index = min(ready)
+        ready.remove(index)
+        ordered_indices.append(index)
+        for child in sorted(outgoing[index]):
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                ready.append(child)
+    if len(ordered_indices) != count:
+        cycle = [invocations[i].command for i, degree in enumerate(indegree) if degree > 0]
+        return list(invocations), [
+            "Native command dependency graph contains a cycle: " + ", ".join(cycle)
+        ]
+    return [invocations[i] for i in ordered_indices], []
+
 def _path_is_within(path: str, root: str) -> bool:
     normalized = str(PurePosixPath(path)).rstrip("/")
     normalized_root = str(PurePosixPath(root)).rstrip("/")
@@ -174,7 +252,11 @@ def compile_case_build_graph(
     except ValueError as exc:
         failures.append(f"Could not compile scope-bound mesh consumers: {exc}")
         inferred = []
-    strategy = _dedupe_invocations([*inferred, *strategy])
+    # Keep Agent-proposed order as the stable baseline; inferred consumers fill gaps.
+    # Dependency contracts below, not list prepending, own any required reordering.
+    explicit_keys = {(item.command, native_command_region(item.arguments)) for item in strategy}
+    inferred = [item for item in inferred if (item.command, native_command_region(item.arguments)) not in explicit_keys]
+    strategy = _dedupe_invocations([*strategy, *inferred])
 
     executable_strategy: list[NativeOpenFOAMCommand] = []
     for invocation in strategy:
@@ -192,6 +274,9 @@ def compile_case_build_graph(
             )
             continue
         executable_strategy.append(invocation)
+
+    executable_strategy, ordering_failures = _stable_dependency_order(execution.plan, executable_strategy)
+    failures.extend(ordering_failures)
 
     authored_required = tuple(path for path in required if path in authored_set)
     deferred_native = _deferred_native_required_paths(

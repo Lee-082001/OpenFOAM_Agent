@@ -111,9 +111,7 @@ def _bindings(intake: CFDIntakeSpec) -> list[ConfirmedFactBinding]:
                             ),
                             NumericEvidenceTerm(
                                 path="system/blockMeshDict",
-                                anchor="(0.5 0 0)",
-                                number_index=0,
-                                multiplier=2.0,
+                                entry_path="referenceDiameter",
                             ),
                         ],
                         denominator=[
@@ -138,7 +136,8 @@ def _bindings(intake: CFDIntakeSpec) -> list[ConfirmedFactBinding]:
 def _write_case(ws: CaseWorkspace, *, nu: float = 0.001) -> None:
     ws.write_text(
         "0/U",
-        """boundaryField
+        """dimensions [0 1 -1 0 0 0 0];
+boundaryField
 {
     inlet
     {
@@ -156,8 +155,8 @@ def _write_case(ws: CaseWorkspace, *, nu: float = 0.001) -> None:
         "system/controlDict",
         "solver incompressibleFluid;\nadjustTimeStep yes;\nendTime 50;\n",
     )
-    ws.write_text("system/blockMeshDict", "vertices\n(\n    (0.5 0 0)\n);\n")
-    ws.write_text("constant/physicalProperties", f"nu {nu};\n")
+    ws.write_text("system/blockMeshDict", "referenceDiameter [0 1 0 0 0 0 0] 1;\nvertices\n(\n    (0.5 0 0)\n);\n")
+    ws.write_text("constant/physicalProperties", f"nu [0 2 -1 0 0 0 0] {nu};\n")
 
 
 def test_compact_artifact_pointers_verify_current_case_without_repeated_value_tokens(tmp_path):

@@ -6,7 +6,6 @@ from openfoam_agent.engineering.repair_context import repair_episode_requires_di
 from openfoam_agent.contracts.regions import validate_design
 from openfoam_agent.contracts.execution_scopes import current_mesh_evidence_failures
 
-import re
 
 from openfoam_agent.progress import ProgressEvent
 from openfoam_agent.schemas.engineering import (

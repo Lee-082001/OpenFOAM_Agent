@@ -199,6 +199,12 @@ class OpenFOAMTools:
             cwd=case_dir,
         )
 
+    def surface_features(self, case_dir: str | Path):
+        return self.runner.run(
+            ["surfaceFeatures", "-case", str(Path(case_dir).resolve())],
+            cwd=case_dir,
+        )
+
     def surface_check(self, geometry_path: str | Path, cwd: str | Path | None = None):
         return self.runner.run(
             ["surfaceCheck", str(Path(geometry_path).resolve())],
@@ -523,6 +529,7 @@ class OpenFOAMTools:
         dispatch = {
             "blockMesh": self.block_mesh,
             "surfaceFeatureExtract": self.surface_feature_extract,
+            "surfaceFeatures": self.surface_features,
             "snappyHexMesh": self.snappy_hex_mesh,
             "createPatch": self.create_patch,
             "checkMesh": self.check_mesh,

@@ -1,3 +1,19 @@
+## v5.2.1 assurance and repair boundary
+
+Quantitative assertions now resolve literal artifact values against the frozen SI
+target; model-authored strings and multipliers do not provide quantitative authority.
+Repair authorization validates the whole candidate before mutation and carries exact
+hashes for both numerical dictionaries and controlDict. Dependency delta propagation
+includes generated outputs until no downstream registered consumer is newly affected.
+The registry still describes a bounded set of native utility dependencies, not every
+possible in-place pipeline or an independent physical verification system.
+
+## v5.2.0 dependency-scoped revalidation boundary
+
+Committed case deltas no longer imply broad mesh revalidation. `CaseDeltaGraph` computes validation invalidation from changed artifacts, the persistent mesh dependency DAG, declared execution scopes, and native producer effects. Dictionary/surface checks remain local to changed artifacts; mesh consumers and final `checkMesh` are compiled only for affected scopes; current mesh evidence for unaffected scopes is reused. Pre-solve validation still runs after solver-input mutations because it validates the effective case/consumer contract rather than mesh quality alone.
+
+`RevalidationRecord` is durable audit telemetry describing the controller decision, not an execution permission. Reliability benchmark aggregation consumes these records plus provider/native usage from ordinary JSON run reports. The shipped v5.2 benchmark manifest is a qualification plan with explicit ground-truth expectations and `NOT_RUN` status; only supplied run reports contribute measured rates.
+
 ## v4.8.1 prepare/runtime repair terminal boundary
 
 The repair schema is shared across prepare and runtime recovery, but terminal execution authority is not. `repair_controller.repair_actions(..., runtime=False)` must end with `FinishPreviewAction` regardless of the model's `retry_solver` hint, so a zero-step/dictionary/native validation repair returns through CaseSeal and explicit solve approval. `runtime=True` must end with `RetrySolverAction`, because only a previously authorized solver failure owns a retry edge. This phase-owned terminator rule prevents model hints from crossing the prepare/runtime authorization boundary.
@@ -444,7 +460,7 @@ Model routing changes reasoning capacity/cost allocation only. It does not grant
 
 ## Unified native failure observation (v2.5.0)
 
-All failed allowlisted OpenFOAM executions now pass through one `NativeFailureDiagnostic` observation path rather than command-specific error handling. This covers engineering utilities (`foamDictionary`, `surfaceCheck`, `blockMesh`, `surfaceFeatureExtract`, `snappyHexMesh`, `createPatch`, `checkMesh`), runtime `foamRun`, and post-processing `foamPostProcess`.
+All failed allowlisted OpenFOAM executions now pass through one `NativeFailureDiagnostic` observation path rather than command-specific error handling. This covers engineering utilities (`foamDictionary`, `surfaceCheck`, `blockMesh`, `surfaceFeatureExtract`, `surfaceFeatures`, `snappyHexMesh`, `createPatch`, `checkMesh`), runtime `foamRun`, and post-processing `foamPostProcess`.
 
 The command layer preserves complete stdout/stderr in the private workspace log. A deterministic extractor then identifies the first OpenFOAM fatal/IO marker or common process-failure marker (abort, segmentation fault, floating-point exception); if no explicit marker exists, it returns a bounded output tail. The diagnostic records only the logical command name, return code, observed diagnostic kind, and bounded native excerpt. Local absolute paths are redacted before model/user display.
 

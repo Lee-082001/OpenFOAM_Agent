@@ -34,6 +34,7 @@ from openfoam_agent.tools.workspace import WorkspaceSafetyError
 from openfoam_agent.workflow.state import CFDState
 from openfoam_agent.workflow.states import State
 from openfoam_agent.engineering.phases.repair_episode import record_repair
+from openfoam_agent.engineering.revalidation import record_scoped_revalidation
 from openfoam_agent.schemas.simulation import RuntimeRepairDecision
 from openfoam_agent.engineering.agent import RepairOutcome
 
@@ -391,6 +392,9 @@ def execute_prepare_repair_plan(
     if progress_phase.startswith("revision") and (graph.changed_files or graph.drop_paths):
         self._begin_confirmed_revision_mutation(state)
     committed = self.workspace.commit_text_transaction(graph.changed_files, drop_paths=graph.drop_paths)
+    record_scoped_revalidation(
+        state, graph, phase=progress_phase, solver_retry_required=False
+    )
     record_repair(state, diagnosis=repair.diagnosis, changed_files=list(graph.changed_files) + list(graph.drop_paths))
     self._precommitted_files.update(committed)
     self._precommitted_drops.update(graph.drop_paths)
@@ -602,6 +606,9 @@ def execute_strategy_revision(
             state.transition(State.ENGINEERING_BLOCKED, event.summary)
             return True
     committed = self.workspace.commit_text_transaction(graph.changed_files, drop_paths=graph.drop_paths)
+    record_scoped_revalidation(
+        state, graph, phase="strategy_revision", solver_retry_required=False
+    )
     self._precommitted_files.update(committed)
     self._precommitted_drops.update(graph.drop_paths)
     for index, member in enumerate(actions, start=1):
@@ -720,6 +727,10 @@ def execute_runtime_repair_plan(
             state.execution_approval.check_plan(plan)
         except ValueError as exc:
             return RepairOutcome(RuntimeRepairDecision.NEEDS_USER_REVIEW, reason=str(exc))
+        try:
+            state.execution_approval.check_repair_delta(self.workspace, graph.changed_files)
+        except ValueError as exc:
+            return RepairOutcome(RuntimeRepairDecision.BLOCKED, reason=str(exc))
     if plan.solver != approved_solver:
         return RepairOutcome(
             RuntimeRepairDecision.NEEDS_USER_REVIEW,
@@ -747,6 +758,10 @@ def execute_runtime_repair_plan(
             self._record_unresolved_failure(state, event)
             return RepairOutcome(RuntimeRepairDecision.BLOCKED, reason=event.summary + " " + event.output_excerpt)
     committed = self.workspace.commit_text_transaction(graph.changed_files, drop_paths=graph.drop_paths)
+    record_scoped_revalidation(
+        state, graph, phase="runtime_repair",
+        solver_retry_required=any(isinstance(item, RetrySolverAction) for item in actions),
+    )
     self._precommitted_files.update(committed)
     self._precommitted_drops.update(graph.drop_paths)
     for index, member in enumerate(actions, start=1):

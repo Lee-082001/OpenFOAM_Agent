@@ -71,6 +71,25 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
         raise DesignSealError(
             "Agent-owned required case manifest is empty; staged design cannot be sealed."
         )
+    if design.completion is None or not design.completion.required_result_fields:
+        raise DesignSealError(
+            "Executable staged design must declare completion.required_result_fields; "
+            "initial fields under 0/ are not inferred as final result evidence."
+        )
+    required_case_files = set(design.required_case_files)
+    missing_result_inputs: list[str] = []
+    for raw in design.completion.required_result_fields:
+        field = str(raw).strip().removeprefix("0/")
+        if not field or field.startswith("/") or ".." in field.split("/"):
+            raise DesignSealError(f"Unsafe required result field path: {raw!r}.")
+        initial = f"0/{field}"
+        if initial not in required_case_files:
+            missing_result_inputs.append(initial)
+    if missing_result_inputs:
+        raise DesignSealError(
+            "Required result fields must correspond to declared initial solution fields: "
+            + ", ".join(sorted(missing_result_inputs))
+        )
 
     if design.execution is not None:
         execution_failures = validate_execution_contract(design.execution)
@@ -113,9 +132,18 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
 
     solver, solver_provider_id = _sealed_solver_mirror(design)
     fact_ids = [fact.id for fact in state.intake.facts if fact.category != "context"]
-    # Frozen intake digest + confirmed_fact_ids are the identity closure.  Do not
-    # manufacture implementation evidence merely to make every fact appear artifact-backed.
-    bindings = []
+    # Frozen intake digest + confirmed_fact_ids are the identity closure.  The Agent
+    # owns truthful implementation mappings because those depend on its chosen CFD
+    # representation; Python validates that they reference only frozen fact IDs and
+    # declared case artifacts, and never fabricates a mapping on the Agent's behalf.
+    fact_id_set = set(fact_ids)
+    bindings = list(design.requirement_bindings)
+    unknown_binding_ids = sorted({item.fact_id for item in bindings} - fact_id_set)
+    if unknown_binding_ids:
+        raise DesignSealError(
+            "Engineering design requirement bindings reference unknown frozen facts: "
+            + ", ".join(unknown_binding_ids)
+        )
     defaults = [
         EngineeringDefaultAssumption(
             parameter=item.parameter,
@@ -130,6 +158,7 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
     ]
 
     data = design.model_dump(mode="python")
+    data.pop("requirement_bindings", None)
     # execution.scopes is authoritative; region_layouts is a legacy compatibility
     # mirror reconstructed downstream when required. Never retain a second topology
     # authority from Agent output during sealing.

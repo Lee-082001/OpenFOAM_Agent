@@ -10,7 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_release_version():
-    assert __version__ == "4.8.1"
+    import tomllib
+    root = Path(__file__).resolve().parents[1]
+    assert __version__ == tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
 
 
 def test_legacy_engineering_modules_are_deleted():
@@ -45,6 +47,7 @@ def test_command_allowlist_is_narrow_openfoam_only():
     assert SafeRunner.DEFAULT_ALLOWED == {
         "blockMesh",
         "surfaceFeatureExtract",
+        "surfaceFeatures",
         "surfaceCheck",
         "snappyHexMesh",
         "createPatch",

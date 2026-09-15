@@ -788,6 +788,18 @@ def build_report(
     tool_actions_per_llm_turn = (
         len(round_events) / round_llm_turns if round_llm_turns else 0.0
     )
+    usage_keys = ("inputTokens", "outputTokens", "totalTokens", "cachedInputTokens")
+    engineering_usage_totals = {
+        key: sum(
+            int(item.get(key, 0) or 0)
+            for item in state.engineering_llm_usage_records
+            if isinstance(item.get(key, 0), (int, float))
+        )
+        for key in usage_keys
+    }
+    mesh_validation_scopes_avoided = sum(
+        len(item.reused_mesh_scopes) for item in state.revalidation_records
+    )
     return {
         "architecture": "v4",
         "version": __version__,
@@ -797,6 +809,7 @@ def build_report(
         "assets": list(state.assets),
         "parallel_evidence": state.parallel_evidence,
         "result_output_evidence": state.result_output_evidence,
+        "result_acceptance_blockers": state.result_acceptance_blockers() if state.current_state == State.RESULT_REVIEW_REQUIRED else [],
         "quantity_analyses": state.quantity_analyses,
         "conservation_analyses": state.conservation_analyses,
         "execution_isolation": {
@@ -810,6 +823,14 @@ def build_report(
         "secondary_failures": list(state.secondary_failures),
         "semantic_assurance_warnings": list(state.semantic_assurance_warnings),
         "native_process_records": state.native_process_records,
+        "revalidation_records": [item.model_dump(mode="json") for item in state.revalidation_records],
+        "engineering_llm_usage_records": list(state.engineering_llm_usage_records),
+        "reliability_observables": {
+            "mesh_validation_scopes_avoided": mesh_validation_scopes_avoided,
+            "scoped_revalidation_count": len(state.revalidation_records),
+            "engineering_llm_usage": engineering_usage_totals,
+            "runtime_repair_attempts": max(0, (len(state.runtime_report.attempts) - 1)) if state.runtime_report else 0,
+        },
         "run_id": state.run_id,
         "prompt": request.prompt,
         "conversation_turns": list(request.conversation_turns),
@@ -932,9 +953,16 @@ def _limitations(state: CFDState) -> list[str]:
             f"{len(state.runtime_contract.result_acceptance.warnings)} runtime result-acceptance item(s) remain advisory/incomplete; bounded solver execution is independent of those review criteria."
         )
     if state.current_state == State.RESULT_REVIEW_REQUIRED:
-        out.append(
-            "Runtime/post-processing evidence is available, but human review is still required; use /accept or /feedback in interactive mode."
-        )
+        blockers = state.result_acceptance_blockers()
+        if blockers:
+            out.append(
+                "Human review is available, but deterministic acceptance is blocked: "
+                + " | ".join(blockers)
+            )
+        else:
+            out.append(
+                "Runtime/post-processing evidence is available, but human review is still required; use /accept or /feedback in interactive mode."
+            )
     if state.current_state == State.COMPLETE:
         out.append(
             "COMPLETE records explicit human acceptance of the reviewed result; it is not a universal proof of mesh/time-step independence or experimental validation."
@@ -1158,7 +1186,11 @@ def _print_human_report(report: dict[str, Any]) -> None:
     elif report["final_state"] == State.MESH_READY.value:
         print("next: pre-solve completeness validation is still required before /solve")
     if report["final_state"] == State.RESULT_REVIEW_REQUIRED.value:
-        print("next: /accept to complete, or /feedback <observation> to request a revision")
+        blockers = report.get("result_acceptance_blockers") or []
+        if blockers:
+            print("next: /feedback <observation> to request a revision; /accept is blocked until deterministic result evidence is complete")
+        else:
+            print("next: /accept to complete, or /feedback <observation> to request a revision")
     if report["final_state"] == State.REVISION_READY.value:
         print("next: /confirm to authorize the proposed revision, or /reject to keep the current sealed case")
     print(f"run_id: {report['run_id']}")
@@ -1522,7 +1554,21 @@ def _accept_session(session, args, llm, backend, model) -> None:
     if state is None or state.current_state != State.RESULT_REVIEW_REQUIRED:
         print("/accept는 RESULT_REVIEW_REQUIRED에서만 사용할 수 있습니다.")
         return
-    state.accept_result()
+    blockers = state.result_acceptance_blockers()
+    if blockers:
+        print("[RESULT-ACCEPT] BLOCKED")
+        for blocker in blockers:
+            print(f"- {blocker}")
+        print("next: /feedback <observation> to request a revision")
+        return
+    try:
+        state.accept_result()
+    except ValueError as exc:
+        # Fail-safe: state invariants must never crash the interactive CLI.
+        print("[RESULT-ACCEPT] BLOCKED")
+        print(f"- {exc}")
+        print("next: /feedback <observation> to request a revision")
+        return
     session.last_state = state.current_state.value
     run_workspace = Path(state.case_dir).resolve().parent if state.case_dir else args.workspace
     engineering_policy, runtime_policy, postprocessing_policy = _policies_from_args(args)
@@ -1761,7 +1807,10 @@ def _interactive(args, llm, backend, model) -> int:
             State.REVISION_READY,
         }:
             if pending.current_state == State.RESULT_REVIEW_REQUIRED:
-                print("현재 result review 상태입니다. /feedback <내용> 또는 /accept를 사용하세요. 새 문제는 /new 후 입력하세요.")
+                if pending.result_acceptance_blockers():
+                    print("현재 result review 상태이지만 deterministic acceptance evidence가 불완전합니다. /feedback <내용>을 사용하세요. 새 문제는 /new 후 입력하세요.")
+                else:
+                    print("현재 result review 상태입니다. /feedback <내용> 또는 /accept를 사용하세요. 새 문제는 /new 후 입력하세요.")
             elif pending.current_state == State.SOLVE_READY:
                 print("현재 solve-ready review 상태입니다. /feedback <내용> 또는 /solve를 사용하세요. 새 문제는 /new 후 입력하세요.")
             elif pending.current_state == State.MESH_READY:

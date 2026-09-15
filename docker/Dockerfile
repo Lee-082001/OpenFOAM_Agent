@@ -21,7 +21,7 @@ RUN wget -qO- https://dl.openfoam.org/gpg.key \
     && apt-get install -y --no-install-recommends openfoam14 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ARCHITECTURE.md V2_CHANGES.md /workspace/
+COPY pyproject.toml README.md ARCHITECTURE.md V5_2_1_RELEASE.md /workspace/
 COPY src /workspace/src
 COPY examples /workspace/examples
 COPY config /workspace/config
