@@ -156,4 +156,5 @@ def test_v522_revision_cannot_clear_result_artifact_contract():
 
 
 def test_v522_version_metadata():
-    assert openfoam_agent.__version__ == "5.2.2"
+    version = tuple(int(part) for part in openfoam_agent.__version__.split("."))
+    assert version >= (5, 2, 2)

@@ -19,7 +19,7 @@ class CheckpointError(RuntimeError):
 _SNAPSHOT_FIELDS = (
     "_checkmesh_mesh_manifest", "_presolve_case_manifest", "_presolve_required_case_files",
     "_pending_execution_plan", "_draft_design_plan", "_draft_authoring_brief", "_authoring_task_queue",
-    "_pending_candidate_execution", "_pending_candidate_failed_paths", "_structured_block_mesh",
+    "_pending_candidate_execution", "_pending_candidate_failed_paths", "_pending_candidate_failure_diagnostic", "_structured_block_mesh",
     "_phase_prompt_counts", "_phase_context_snapshots", "_evidence_gap_ledger",
     "_retrieval_cycles", "_evidence_retrieval_disabled", "_active_transaction",
 )

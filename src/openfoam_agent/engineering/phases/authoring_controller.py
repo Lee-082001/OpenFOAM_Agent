@@ -44,6 +44,39 @@ def candidate_failure_paths(
     return matched[:12]
 
 
+
+
+def candidate_failure_diagnostic(
+    self,
+    event,
+    failed_paths: list[str] | tuple[str, ...],
+) -> dict[str, object]:
+    """Return a bounded, model-safe projection of the active pre-commit failure.
+
+    The full EngineeringEvent remains controller/audit state. Candidate replan only
+    needs the latest deterministic reason that explains why the retained artifact was
+    rejected. Keeping this separate from failed_artifacts prevents the v5.2.2 failure
+    mode where the model saw *which* file failed but not *why*.
+    """
+    diagnostic = self._redact_local_paths(str(getattr(event, "output_excerpt", "") or ""))
+    summary = self._redact_local_paths(str(getattr(event, "summary", "") or ""))
+    lowered = f"{summary}\n{diagnostic}".casefold()
+    category = getattr(event, "failure_category", None)
+    if category is None:
+        if "executable/unsafe directives" in lowered or "non-allowlisted libraries" in lowered:
+            category = "security"
+        else:
+            category = "case"
+    return {
+        "action_type": str(getattr(event, "action_type", "case_bundle_preflight")),
+        "category": str(category),
+        "validation_status": str(getattr(event, "validation_status", "fail")),
+        "summary": summary[:2000],
+        "diagnostic": diagnostic[:6000],
+        "failed_paths": list(dict.fromkeys(str(path) for path in failed_paths if str(path).strip()))[:20],
+    }
+
+
 def candidate_repair_context(self) -> dict[str, object] | None:
     """Return a bounded capsule for repairing the retained in-memory candidate."""
     candidate = self._pending_candidate_execution
@@ -109,6 +142,7 @@ def candidate_repair_context(self) -> dict[str, object] | None:
     return {
         "goal": candidate.goal,
         "failed_paths": list(self._pending_candidate_failed_paths),
+        "deterministic_failure": dict(self._pending_candidate_failure_diagnostic or {}),
         "missing_required_files": missing_required,
         "deferred_native_required_files": deferred_native_required,
         "manifest": manifest,
@@ -263,6 +297,9 @@ def execute_case_plan(
         )
         self._pending_candidate_execution = execution
         self._pending_candidate_failed_paths = tuple(dict.fromkeys(conflict_paths))[:12]
+        self._pending_candidate_failure_diagnostic = candidate_failure_diagnostic(
+            self, event, self._pending_candidate_failed_paths
+        )
         self._pending_execution_plan = None
         return blocked
 
@@ -294,6 +331,9 @@ def execute_case_plan(
             # regenerating the whole case as a large Structured Output object.
             self._pending_candidate_execution = execution
             self._pending_candidate_failed_paths = (item.path,)
+            self._pending_candidate_failure_diagnostic = candidate_failure_diagnostic(
+                self, event, self._pending_candidate_failed_paths
+            )
             self._pending_execution_plan = None
             return blocked
         rendered_files.append((item.path, content))
@@ -318,6 +358,9 @@ def execute_case_plan(
             )
             self._pending_candidate_execution = execution
             self._pending_candidate_failed_paths = ("system/blockMeshDict",)
+            self._pending_candidate_failure_diagnostic = candidate_failure_diagnostic(
+                self, event, self._pending_candidate_failed_paths
+            )
             self._pending_execution_plan = None
             return blocked
 
@@ -367,6 +410,9 @@ def execute_case_plan(
         )
         self._pending_candidate_execution = execution
         self._pending_candidate_failed_paths = tuple(build_graph.missing_required_paths)[:20]
+        self._pending_candidate_failure_diagnostic = candidate_failure_diagnostic(
+            self, event, self._pending_candidate_failed_paths
+        )
         self._pending_execution_plan = None
         return blocked
 
@@ -421,6 +467,9 @@ def execute_case_plan(
         self._pending_candidate_failed_paths = tuple(
             self._candidate_failure_paths(bundle_failures, candidate_bundle)
         )
+        self._pending_candidate_failure_diagnostic = candidate_failure_diagnostic(
+            self, event, self._pending_candidate_failed_paths
+        )
         self._pending_execution_plan = None
         return blocked
 
@@ -458,6 +507,7 @@ def execute_case_plan(
             )
             self._pending_candidate_execution = None
             self._pending_candidate_failed_paths = ()
+            self._pending_candidate_failure_diagnostic = None
             self._pending_execution_plan = None
             return True
     else:
@@ -490,6 +540,7 @@ def execute_case_plan(
     # filesystem level; following write actions are audit/progress no-ops.
     self._pending_candidate_execution = None
     self._pending_candidate_failed_paths = ()
+    self._pending_candidate_failure_diagnostic = None
     # Since all file writes precede dictionary or
     # native execution in the expanded plan, later OpenFOAM failures always see a
     # complete authored bundle and can use true delta RepairTurn semantics.

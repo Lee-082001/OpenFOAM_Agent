@@ -255,6 +255,7 @@ class CFDEngineeringAgent:
         self._draft_authoring_brief: str = ""
         self._pending_candidate_execution: ExecuteCasePlanAction | None = None
         self._pending_candidate_failed_paths: tuple[str, ...] = ()
+        self._pending_candidate_failure_diagnostic: dict[str, object] | None = None
         self._structured_block_mesh: TypedBlockMeshFile | None = None
         self._phase_prompt_counts: dict[str, int] = {}
         self._phase_context_snapshots: dict[str, dict[str, str | None]] = {}

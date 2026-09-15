@@ -64,6 +64,19 @@ def project_candidate_replan_capsule(
     deferred = [str(path) for path in list(retained.get("deferred_native_required_files") or []) if str(path).strip()]
     failed_paths = [str(path) for path in list(retained.get("failed_paths") or []) if str(path).strip()]
 
+    failure = retained.get("deterministic_failure")
+    failure = failure if isinstance(failure, dict) else {}
+    bounded_failure = {
+        "action_type": failure.get("action_type"),
+        "category": failure.get("category"),
+        "validation_status": failure.get("validation_status"),
+        "summary": compact_text(str(failure.get("summary") or ""), 2000) if failure.get("summary") else "",
+        "diagnostic": compact_text(str(failure.get("diagnostic") or ""), 6000) if failure.get("diagnostic") else "",
+        "failed_paths": [
+            str(path) for path in list(failure.get("failed_paths") or []) if str(path).strip()
+        ][:20],
+    }
+
     plan_capsule = retained.get("plan_capsule") if isinstance(retained.get("plan_capsule"), dict) else {}
     required = [str(path) for path in list(plan_capsule.get("required_case_files") or []) if str(path).strip()]
     focus = set(missing) | set(deferred) | set(failed_paths)
@@ -84,6 +97,7 @@ def project_candidate_replan_capsule(
         "retained_candidate": {
             "goal": retained.get("goal"),
             "failed_paths": failed_paths[:20],
+            "deterministic_failure": bounded_failure,
             "missing_required_files": missing[:40],
             "deferred_native_required_files": deferred[:40],
             "manifest": deepcopy(manifest[:manifest_limit]),
@@ -146,6 +160,9 @@ def build_partitioned_candidate_replan_prompt(
                 "candidateReplanPartitionAttempts": index,
                 "candidateReplanManifestVisible": len(list(manifest or [])),
                 "candidateReplanFocusedArtifacts": len(list(artifacts or [])),
+                "candidateReplanDiagnosticChars": len(
+                    str((retained.get("deterministic_failure") or {}).get("diagnostic") or "")
+                ) if isinstance(retained, dict) else 0,
             }
         except ContextBudgetError as exc:
             last_error = exc

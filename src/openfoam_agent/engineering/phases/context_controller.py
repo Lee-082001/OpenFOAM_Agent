@@ -835,9 +835,11 @@ def generate_turn(
         elif contract_phase == "replan":
             instruction = (
                 "The previous complete case bundle failed deterministic pre-commit authoring checks. "
-                "The full candidate is retained in Python memory. Return only repair_candidate_case_plan "
-                "with the minimum delta for the implicated candidate path(s), or block. No partial "
-                "workspace case was committed:\n"
+                "The full candidate is retained in Python memory. The bounded retained_candidate.deterministic_failure "
+                "contains the controller-owned reason the artifact was rejected. Return only repair_candidate_case_plan "
+                "with the minimum delta for the implicated candidate path(s), or block. When the failure is an unsafe "
+                "runtime-code/directive policy rejection, preserve the frozen CFD boundary-condition intent using ordinary "
+                "declarative OpenFOAM dictionary syntax; do not weaken or bypass the policy. No partial workspace case was committed:\n"
             )
         elif contract_phase == "block_mesh_replan":
             instruction = (
