@@ -20,6 +20,12 @@ from openfoam_agent.engineering.repair_context import (
     project_validation_repair_plan,
     repair_episode_requires_direct_attempt,
 )
+from openfoam_agent.engineering.runtime_repair_context import (
+    build_partitioned_runtime_repair_prompt,
+)
+from openfoam_agent.engineering.candidate_replan_context import (
+    build_partitioned_candidate_replan_prompt,
+)
 from openfoam_agent.contracts.regions import region_layouts
 from openfoam_agent.contracts.execution_scopes import current_mesh_evidence_failures
 from openfoam_agent.tools.execution_contracts import contract_summary
@@ -532,6 +538,9 @@ def generate_turn(
                 }
                 if state.engineering_plan is not None else None
             ),
+            "approved_plan_sha256": (
+                state.engineering_plan.digest() if state.engineering_plan is not None else None
+            ),
             "native_failure": self._redact_local_paths(runtime_log[-6000:]) if runtime_log else None,
             "case_file_contract_scan": self._runtime_case_file_contract_scan(state),
             "relevant_case_files": self._runtime_relevant_case_files(state, runtime_log),
@@ -890,7 +899,19 @@ def generate_turn(
         else self.policy.max_model_prompt_chars
     )
     try:
-        if contract_phase == "repair":
+        if contract_phase == "runtime_repair":
+            prompt_result, payload, context_partition_metrics = build_partitioned_runtime_repair_prompt(
+                instruction,
+                payload,
+                max_chars=prompt_char_limit,
+            )
+        elif contract_phase == "replan":
+            prompt_result, payload, context_partition_metrics = build_partitioned_candidate_replan_prompt(
+                instruction,
+                payload,
+                max_chars=prompt_char_limit,
+            )
+        elif contract_phase == "repair":
             prompt_result, payload, context_partition_metrics = build_partitioned_validation_repair_prompt(
                 instruction,
                 payload,
@@ -921,6 +942,11 @@ def generate_turn(
                 initial_evidence_limit=len(evidence_records),
             )
             self.checkpoint(state, "design-context-partitioned")
+        elif contract_phase == "replan":
+            # Candidate replan already exhausted failure-local partitions. Preserve
+            # the retained candidate untouched rather than falling back to the full
+            # generic engineering context.
+            raise
         elif contract_phase == "revision":
             # build_partitioned_revision_prompt already performed every bounded
             # projection.  Preserve the explicit domain-specific diagnostic.
@@ -943,7 +969,11 @@ def generate_turn(
     metrics["evidenceShown"] = (
         len(payload.get("supporting_evidence", []))
         if contract_phase == "repair" and isinstance(payload, dict)
-        else len(evidence_records)
+        else (
+            len(payload.get("available_evidence", []))
+            if contract_phase == "runtime_repair" and isinstance(payload, dict)
+            else len(evidence_records)
+        )
     )
     metrics["evidenceObserved"] = evidence_total
     metrics["stagedAuthoring"] = bool(self.policy.staged_case_authoring)

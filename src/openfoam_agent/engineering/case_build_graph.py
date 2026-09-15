@@ -7,6 +7,8 @@ from openfoam_agent.schemas.engineering import ExecuteCasePlanAction, NativeOpen
 from openfoam_agent.contracts.execution_scopes import (
     auto_mesh_consumers,
     final_mesh_validation_commands,
+    render_scope_template,
+    scope_for_native_arguments,
 )
 from openfoam_agent.tools.native_contracts import (
     command_permitted,
@@ -38,6 +40,8 @@ class CaseBuildGraph:
 
     required_paths: tuple[str, ...]
     authored_paths: tuple[str, ...]
+    authored_required_paths: tuple[str, ...]
+    deferred_native_required_paths: tuple[str, ...]
     missing_required_paths: tuple[str, ...]
     dictionary_paths: tuple[str, ...]
     surface_paths: tuple[str, ...]
@@ -71,6 +75,48 @@ def _dedupe_invocations(items: list[NativeOpenFOAMCommand]) -> list[NativeOpenFO
     return unique
 
 
+def _path_is_within(path: str, root: str) -> bool:
+    normalized = str(PurePosixPath(path)).rstrip("/")
+    normalized_root = str(PurePosixPath(root)).rstrip("/")
+    return normalized == normalized_root or normalized.startswith(normalized_root + "/")
+
+
+def _deferred_native_required_paths(
+    plan,
+    required_paths: tuple[str, ...],
+    native_pipeline: list[NativeOpenFOAMCommand],
+) -> tuple[str, ...]:
+    """Return manifest paths whose producer is an executable native graph node.
+
+    This is producer-contract based, not a filename exception.  A required polyMesh
+    artifact is deferred only when the compiled case graph contains a native utility
+    whose declared ``mesh_dependency_outputs`` cover that exact scope/path.  External
+    or pre-existing mesh inputs therefore remain ordinary required inputs when no
+    producer exists in the current graph.
+    """
+    output_roots: list[str] = []
+    for invocation in native_pipeline:
+        contract = native_tool_contract(invocation.command)
+        if not contract.mesh_dependency_outputs:
+            continue
+        try:
+            scope = scope_for_native_arguments(plan, invocation.arguments)
+        except ValueError:
+            # An invocation that cannot be bound to one declared scope cannot prove
+            # ownership of any required output. Other validation will surface the
+            # malformed/ambiguous native strategy.
+            continue
+        for template in contract.mesh_dependency_outputs:
+            root = render_scope_template(template, scope)
+            if root not in output_roots:
+                output_roots.append(root)
+    return tuple(
+        path
+        for path in required_paths
+        if any(_path_is_within(path, root) for root in output_roots)
+    )
+
+
 def compile_case_build_graph(
     execution: ExecuteCasePlanAction,
     candidate_bundle: dict[str, str],
@@ -87,17 +133,12 @@ def compile_case_build_graph(
     required = tuple(dict.fromkeys(execution.plan.required_case_files))
     authored = tuple(candidate_bundle.keys())
     authored_set = set(authored)
-    missing = tuple(path for path in required if path not in authored_set)
     failures: list[str] = []
     warnings: list[str] = []
 
     if not required:
         failures.append(
             "EngineeringPlan.required_case_files is empty; the Agent must declare at least one solve-input path before authoring."
-        )
-    if missing:
-        failures.append(
-            "Required case manifest is not fully authored: " + ", ".join(missing)
         )
 
     dictionary_paths = tuple(
@@ -152,6 +193,23 @@ def compile_case_build_graph(
             continue
         executable_strategy.append(invocation)
 
+    authored_required = tuple(path for path in required if path in authored_set)
+    deferred_native = _deferred_native_required_paths(
+        execution.plan,
+        tuple(path for path in required if path not in authored_set),
+        executable_strategy,
+    )
+    deferred_set = set(deferred_native)
+    missing = tuple(
+        path for path in required
+        if path not in authored_set and path not in deferred_set
+    )
+    if missing:
+        failures.append(
+            "Required case manifest is not fully authored or backed by a compiled native producer: "
+            + ", ".join(missing)
+        )
+
     try:
         checks = final_mesh_validation_commands(execution.plan)
     except ValueError as exc:
@@ -173,6 +231,8 @@ def compile_case_build_graph(
     return CaseBuildGraph(
         required_paths=required,
         authored_paths=authored,
+        authored_required_paths=authored_required,
+        deferred_native_required_paths=deferred_native,
         missing_required_paths=missing,
         dictionary_paths=dictionary_paths,
         surface_paths=surface_paths,

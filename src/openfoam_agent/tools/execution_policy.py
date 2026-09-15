@@ -123,7 +123,7 @@ class ValidationExecutionContext:
         if expected_dir == root or root not in expected_dir.parents:
             raise ExecutionPolicyError("Validation execution must stay inside the bounded workspace.")
         if ranks != 1:
-            raise ExecutionPolicyError("Zero-step consumer validation is serial only.")
+            raise ExecutionPolicyError("Shadow consumer validation is serial only.")
         if timeout > self.max_wall_seconds:
             raise ExecutionPolicyError("Validation execution exceeds the bounded validation wall time.")
         if command != self.expected_command:

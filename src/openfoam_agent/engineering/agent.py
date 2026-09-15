@@ -136,12 +136,15 @@ class EngineeringPolicy:
     max_mesh_cells: int = 5_000_000
     require_solve_ready_gate: bool = False
 
-    # v4.3 validation routing. Documentary dictionary probes are advisory;
-    # stronger consumer validation can initialize the selected solver in a
-    # Python-owned, serial, endTime=0 shadow case.
+    # Consumer validation runs only in Python-owned serial shadow cases.  The
+    # zero-step probe catches construction/selection-table errors; the one-step
+    # probe additionally exercises the first assembled equation solve so missing
+    # fvSolution entries (for example a solid energy field) are caught before /solve.
     foam_dictionary_probe: bool = False
     zero_step_consumer_validation: bool = True
     zero_step_validation_timeout: int = 60
+    one_step_consumer_validation: bool = True
+    one_step_validation_timeout: int = 60
 
     # v2.9: when the capability graph is small, preload deterministic provider
     # evidence into the first engineering prompt so solver selection does not
@@ -185,6 +188,7 @@ class EngineeringPolicy:
             "max_mesh_cells": self.max_mesh_cells,
             "max_preloaded_capabilities": self.max_preloaded_capabilities,
             "zero_step_validation_timeout": self.zero_step_validation_timeout,
+            "one_step_validation_timeout": self.one_step_validation_timeout,
         }
         for name, value in integer_fields.items():
             if value < 1:
@@ -2383,14 +2387,64 @@ class CFDEngineeringAgent:
                         if assessment.status == "inconclusive":
                             validation_status = "inconclusive"
                             failure_category = assessment.category or "tool"
+                one_step_validator = getattr(self.tools, "one_step_consumer_validate", None)
+                if (
+                    self.policy.one_step_consumer_validation
+                    and plan is not None
+                    and plan.execution is not None
+                    and plan.temporal_behavior == "transient"
+                    and callable(one_step_validator)
+                ):
+                    one_step_result, note = one_step_validator(
+                        self.workspace.case_dir,
+                        plan.execution,
+                        timeout=self.policy.one_step_validation_timeout,
+                    )
+                    output_lines.append(note)
+                    if one_step_result is None:
+                        if validation_status == "pass":
+                            validation_status = "inconclusive"
+                            failure_category = "tool"
+                    else:
+                        native_ran = True
+                        native_output = _tool_output(one_step_result)
+                        self.workspace.write_log(f"{step:03d}.oneStepConsumer.log", native_output)
+                        assessment = classify_native_validation(
+                            one_step_result, command_name=plan.execution.driver, probe=False
+                        )
+                        output_lines.append(
+                            assessment.diagnostic.render()
+                            if assessment.diagnostic is not None
+                            else native_output
+                        )
+                        if assessment.status == "fail":
+                            return self._event(
+                                step,
+                                action.type,
+                                False,
+                                "One-step OpenFOAM consumer execution rejected the case.",
+                                "\n".join(output_lines),
+                                native_command_executed=True,
+                                validation_status="fail",
+                                failure_category="case",
+                            )
+                        if assessment.status == "inconclusive":
+                            validation_status = "inconclusive"
+                            failure_category = assessment.category or "tool"
+                        else:
+                            # A successful one-step probe exercises initialization plus
+                            # the first equation solve, so it supersedes a weaker
+                            # zero-step inconclusive result.
+                            validation_status = "pass"
+                            failure_category = None
                 self._presolve_case_manifest = self.workspace.manifest_digest()
                 self._presolve_required_case_files = tuple(action.required_case_files)
                 if state is not None:
                     self._resolve_failure_action(state, action.type, "pre-solve validation passed")
                 return self._event(
                     step, action.type, True,
-                    ("Pre-solve readiness passed; zero-step consumer validation was inconclusive but did not prove the case invalid."
-                     if validation_status == "inconclusive" else "Pre-solve readiness and consumer initialization validation passed."),
+                    ("Pre-solve readiness passed; shadow consumer validation was inconclusive but did not prove the case invalid."
+                     if validation_status == "inconclusive" else "Pre-solve readiness and shadow consumer validation passed."),
                     "\n".join(output_lines), native_command_executed=native_ran,
                     validation_status=validation_status, failure_category=failure_category,
                 )

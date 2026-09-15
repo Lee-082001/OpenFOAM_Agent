@@ -118,7 +118,7 @@ def project_strategy_plan(plan: object) -> dict[str, object] | None:
         defaults.append({
             'parameter': compact_text(str(item.get('parameter') or ''), 120),
             'value': compact_text(str(item.get('value') or ''), 180),
-            'unit': compact_text(str(item.get('unit') or ''), 60),
+            'unit': compact_text(str(item.get('unit') or ''), 80),
             'basis': item.get('basis'),
             'source': item.get('source'),
         })

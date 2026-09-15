@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import hashlib
 import json
+import math
 import re
 import shutil
 import uuid
@@ -393,6 +394,124 @@ class OpenFOAMTools:
             with self.runner.validation_execution(context):
                 result = self.runner.run(command, cwd=shadow, timeout=min(timeout, 60))
             return result, "Zero-step consumer validation executed in a temporary shadow case."
+        finally:
+            shutil.rmtree(shadow, ignore_errors=True)
+            try:
+                shadow_root.rmdir()
+            except OSError:
+                pass
+
+    def one_step_consumer_validate(
+        self,
+        case_dir: str | Path,
+        execution: OpenFOAMExecutionSpec,
+        *,
+        timeout: int = 60,
+        max_shadow_bytes: int = 512_000_000,
+    ) -> tuple[ToolResult | None, str]:
+        """Execute exactly one transient step in an isolated shadow case.
+
+        This complements ``zero_step_consumer_validate``.  The zero-step probe proves
+        that the selected modules/dictionaries can initialize, but it cannot expose
+        dictionary lookups that happen only when the first equation is assembled and
+        solved.  The one-step probe preserves the production case byte-for-byte and
+        refuses ambiguous controlDicts rather than inventing a time step.
+        """
+
+        case = Path(case_dir).resolve()
+        if execution.parallel.mode != "serial" or execution.parallel.ranks != 1:
+            return None, "One-step consumer validation is deferred for parallel execution topologies."
+        if execution.arguments:
+            return None, "Custom production solver arguments are not replayed before approval; one-step consumer validation deferred."
+        control = case / "system" / "controlDict"
+        if not control.is_file():
+            return None, "system/controlDict is missing; one-step consumer validation was not attempted."
+
+        total = 0
+        for top in ("0", "constant", "system"):
+            root = case / top
+            if not root.exists():
+                continue
+            for item in root.rglob("*"):
+                if item.is_symlink():
+                    return None, "One-step shadow validation refuses symlinked case inputs."
+                if item.is_file():
+                    total += item.stat().st_size
+                    if total > max_shadow_bytes:
+                        return None, "Case inputs exceed the bounded one-step shadow-copy budget."
+
+        text = control.read_text(encoding="utf-8", errors="replace")
+        function_marker = re.search(r"(?m)^\s*functions\s*\{", text)
+        if function_marker and not re.search(r"(?ms)^\s*functions\s*\{\s*\}\s*", text):
+            return None, "Non-empty controlDict functions are deferred to approved runtime; one-step probe skipped."
+
+        delta_matches = list(re.finditer(r"(?m)^deltaT\s+([^;\n]+);", text))
+        if len(delta_matches) != 1:
+            return None, "One-step controlDict normalization requires exactly one literal top-level deltaT entry."
+        delta_token = delta_matches[0].group(1).strip()
+        try:
+            delta_t = float(delta_token)
+        except ValueError:
+            return None, "One-step controlDict deltaT is not a literal numeric value."
+        if not math.isfinite(delta_t) or delta_t <= 0:
+            return None, "One-step controlDict deltaT must be finite and positive."
+
+        def set_entry(source: str, key: str, value: str) -> str:
+            pattern = re.compile(rf"(?m)^(?P<indent>[ \t]*){re.escape(key)}\s+[^;\n]+;")
+            matches = list(pattern.finditer(source))
+            if len(matches) > 1:
+                raise ValueError(f"controlDict contains duplicate literal {key} entries.")
+            replacement = f"{key}    {value};"
+            if matches:
+                match = matches[0]
+                if match.group("indent"):
+                    raise ValueError(f"controlDict {key} is not a literal top-level entry.")
+                return source[:match.start()] + replacement + source[match.end():]
+            return source.rstrip() + "\n" + replacement + "\n"
+
+        try:
+            end_time = format(delta_t, ".17g")
+            for key, value in (
+                ("startFrom", "startTime"),
+                ("startTime", "0"),
+                ("stopAt", "endTime"),
+                ("endTime", end_time),
+                ("deltaT", end_time),
+                ("adjustTimeStep", "false"),
+                ("writeControl", "timeStep"),
+                ("writeInterval", "1"),
+                ("purgeWrite", "0"),
+                ("runTimeModifiable", "false"),
+            ):
+                text = set_entry(text, key, value)
+        except ValueError as exc:
+            return None, f"One-step controlDict normalization was inconclusive: {exc}"
+
+        shadow_root = (self.runner.workspace_root or case.parent) / ".validation-shadow"
+        shadow = shadow_root / uuid.uuid4().hex
+        shadow_root.mkdir(parents=True, exist_ok=True)
+        shadow.mkdir(parents=True, exist_ok=False)
+        try:
+            for top in ("0", "constant", "system"):
+                source = case / top
+                if source.exists():
+                    shutil.copytree(source, shadow / top)
+            (shadow / "system" / "controlDict").write_text(text, encoding="utf-8")
+
+            try:
+                args = runtime_arguments(execution)
+            except ValueError as exc:
+                return None, f"One-step execution contract is invalid: {exc}"
+            command = [execution.driver, *args]
+            context = ValidationExecutionContext(
+                expected_command=command,
+                case_dir=shadow,
+                workspace_root=(self.runner.workspace_root or case.parent),
+                max_wall_seconds=min(timeout, 60),
+            )
+            with self.runner.validation_execution(context):
+                result = self.runner.run(command, cwd=shadow, timeout=min(timeout, 60))
+            return result, "One-step consumer validation executed in a temporary shadow case."
         finally:
             shutil.rmtree(shadow, ignore_errors=True)
             try:

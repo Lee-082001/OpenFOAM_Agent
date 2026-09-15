@@ -94,22 +94,32 @@ def candidate_repair_context(self) -> dict[str, object] | None:
                     "spec": candidate.block_mesh.model_dump(mode="json"),
                 }
             )
-    authored_paths = {item["path"] for item in manifest}
-    missing_required = [
-        path for path in candidate.plan.required_case_files if path not in authored_paths
-    ]
+    authored_paths = {str(item["path"]) for item in manifest}
+    # Use the same producer-aware manifest compiler as the real pre-commit path.
+    # Native outputs (for example blockMesh-generated polyMesh files) must never be
+    # handed back to the model as files it should author directly. Content is not
+    # needed for ownership classification, only the candidate path set and native
+    # tool contracts.
+    ownership_graph = compile_case_build_graph(
+        candidate,
+        {path: "" for path in authored_paths},
+    )
+    missing_required = list(ownership_graph.missing_required_paths)
+    deferred_native_required = list(ownership_graph.deferred_native_required_paths)
     return {
         "goal": candidate.goal,
         "failed_paths": list(self._pending_candidate_failed_paths),
         "missing_required_files": missing_required,
+        "deferred_native_required_files": deferred_native_required,
         "manifest": manifest,
         "failed_artifacts": artifacts,
         "controller_build_policy": {
             "manifest_authority": "EngineeringPlan.required_case_files",
             "instruction": (
-                "Repair only missing/conflicting authored artifacts. Do not redesign validation lists; "
-                "Python compiles static validation, surface checks, mesh consumers and final checkMesh "
-                "from the completed bundle."
+                "Repair only genuinely missing/conflicting authored artifacts. Paths listed in "
+                "deferred_native_required_files are owned by compiled native producers and must not "
+                "be authored directly. Do not redesign validation lists; Python compiles static "
+                "validation, surface checks, mesh consumers and final checkMesh from the completed bundle."
             ),
         },
         "pipeline": {
@@ -463,6 +473,8 @@ def execute_case_plan(
             metrics={
                 "requiredFiles": len(build_graph.required_paths),
                 "authoredFiles": len(build_graph.authored_paths),
+                "authoredRequired": len(build_graph.authored_required_paths),
+                "nativeGeneratedExpected": len(build_graph.deferred_native_required_paths),
                 "staticChecks": len(build_graph.dictionary_paths),
                 "surfaceChecks": len(build_graph.surface_paths),
                 "nativeCommands": len(build_graph.native_pipeline),

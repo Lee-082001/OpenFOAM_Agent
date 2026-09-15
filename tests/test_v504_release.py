@@ -6,7 +6,7 @@ import re
 import openfoam_agent
 
 
-def test_v502_package_and_project_versions_remain_consistent_after_maintenance_releases():
+def test_v504_package_and_project_versions_remain_consistent_after_maintenance_releases():
     root = Path(__file__).resolve().parents[1]
     text = (root / "pyproject.toml").read_text(encoding="utf-8")
     match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
