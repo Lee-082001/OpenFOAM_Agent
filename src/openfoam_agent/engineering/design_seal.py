@@ -130,9 +130,10 @@ def materialize_engineering_plan(design: EngineeringDesign, state, catalog) -> E
     ]
 
     data = design.model_dump(mode="python")
-    data["region_layouts"] = [
-        item.model_dump(mode="python") for item in _canonical_region_layouts(design)
-    ]
+    # execution.scopes is authoritative; region_layouts is a legacy compatibility
+    # mirror reconstructed downstream when required. Never retain a second topology
+    # authority from Agent output during sealing.
+    data["region_layouts"] = []
     data.update(
         schema_version="2.0",
         solver=solver,
